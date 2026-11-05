@@ -60,11 +60,12 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 | Decision | Options | Selected and reason |
 |---|---|---|
 | Required gate | OS screenshots for all checks; tests at separate boundaries | Separate boundaries. Most regressions can be found without a display. |
-| Expected values | call production conversion; independent reference | Checked-in vectors from a separate double-precision reference. A round trip through shared code can hide the same error twice. |
+| Expected values | call production conversion or Little CMS; independent reference | Checked-in vectors from a separate f64 reference. Shared conversion code can hide the same error twice. |
 | QRhi check | upload-texture dump; draw readback | Read back after the draw. An upload dump misses shader and render-target errors. |
 | Capture interface | Windows-only scripts; common result with OS adapters | Common result. Each adapter must report its format and colour contract. |
 | Error limit | exact bytes everywhere; perceptual error everywhere | Exact transport checks plus numeric and perceptual checks at later boundaries. |
-| Display model | generic ICC engine; explicit platform model | A Windows MHC2 model and an explicit transform description. MHC2 is not a portable ICC rendering algorithm. |
+| Profile handling | custom ICC/MHC2 parser; Little CMS through `lcms2` | Little CMS for profile reading, MHC2 extraction and conventional ICC transforms. Use the library's existing profile support. |
+| Display model | ICC transform alone; explicit HDR model with library support | Explicit HDR model. Nitpick controls units, stage order, transfer functions and clipping; see [Colour library boundary](#colour-library-boundary). |
 | IDD dependency | required for unit tests; optional lab tool | Optional lab tool. Signing and HDR hardware must not block normal CI. |
 | Browser automation | screenshots as an HDR reference; protocol tests and qualified OS capture | Protocol tests on all hosts; HDR checks only on a qualified engine and OS. |
 
@@ -72,9 +73,11 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 
 ### Shared fixtures
 
-Store fixtures and expected data in `tests/fixtures/output/` when the harness is implemented. Store the reference generator and its locked Python dependencies in `tests/reference/`. Use `uv` to run it. Rust tests read the checked-in vectors; normal CI does not need Python. The generator must not call nitpick's conversion functions or use the reference table as its sole source.
+Store fixtures and expected data in `tests/fixtures/output/` when the harness is implemented. Store the reference generator and its locked Python dependencies in `tests/reference/`. Use `uv` to run it. Rust tests read the checked-in vectors; normal CI does not need Python. Calculate expected pixels with independent f64 arithmetic. The generator must not call nitpick's conversion functions, evaluate pixels through Little CMS, or use the reference table as its sole source.
 
 Each case has a stable ID, input depth and encoding, image size, code triples, patch rectangles, metadata request, required capabilities and expected results for each boundary. Include the source specification, generator version and rounding rule. Invalid input cases state the expected error.
+
+Profile fixtures also store the known matrix, LUT and luminance values in their manifest. These values are defined before profile serialization. Compare library extraction against that manifest, so parsed data cannot become its own expected result.
 
 | Fixture group | Values and purpose |
 |---|---|
@@ -215,13 +218,37 @@ Test capture with identity and nonidentity calibration profiles whose other meta
 
 ## Display transform model
 
-### MHC2 parser
+### Colour library boundary
 
-Implement the model as test support without GUI or Windows dependencies. Follow the [MHC2 layout](https://learn.microsoft.com/en-us/windows/win32/wcs/display-calibration-mhc#new-mhc2-tag-for-icc-profiles), with ICC big-endian fields. Resolve the ICC tag-table offset from the file start and the MHC2 internal offsets from the tag start. Check both bounds with checked arithmetic.
+Use the Rust `lcms2` binding for profile handling. Its [MHC2 tag API](https://docs.rs/lcms2/6.2.0/lcms2/enum.Tag.html#variant.MHC2) exposes the calibration data. Little CMS added MHC2 reading and writing in 2.16 and fixed MHC2 handling in 2.18; see the [library changelog](https://github.com/mm2/Little-CMS/blob/master/ChangeLog). Pin the Rust binding and the native engine separately. Select an engine with those fixes, then qualify that exact build with the profile fixtures.
+
+| Responsibility | Owner |
+|---|---|
+| ICC profile reading, writing and standard tag access | Little CMS through a small Rust profile adapter |
+| Conventional ICC profile-to-profile conversion | Little CMS, with explicit input/output formats, rendering intent, adaptation and black-point compensation settings |
+| MHC2 matrix, LUT and luminance extraction | Profile adapter, using Little CMS tag access and validation against known fixtures |
+| Matrix and tone-curve evaluation | Little CMS stages are available as building blocks; nitpick controls their order and domain |
+| PQ/HLG transfer logic, absolute luminance, scRGB scale, clipping and quantization | Explicit nitpick HDR model |
+| FP16 neighbour search, output packing and $\Delta E_{ITP}$ | Separate nitpick calculations |
+| Expected values for verification | Independent f64 reference, as defined in [Shared fixtures](#shared-fixtures) |
+
+Implement the profile adapter and display model as test support without GUI or Windows dependencies. The adapter owns the native library dependency. It returns owned Rust matrix, curve and metadata values; library handles and borrowed tag storage stay inside the adapter. The HDR model consumes these values or an IDD state record. Its interface requires the source colour space, wire colour space and luminance scales.
+
+A conventional ICC `Transform` does not apply the Windows MHC2 display contract automatically. Extract the calibration data and assemble the explicit model below. Keep conventional ICC rendering intent, D50 profile-connection-space adaptation and black-point compensation separate from this model.
+
+Little CMS accepts double-precision matrix coefficients, but its [floating-point pipeline](https://github.com/mm2/Little-CMS/blob/master/src/cmslut.c) stores values between stages as f32. **Precision limit:** an f64 matrix or pixel buffer does not make that pipeline an f64 reference. Any use of library stages must preserve the model's signed values, scale and interpolation rules within a stated error bound. Test it against the independent reference. Do not replace the reference with a library transform or an optimized LUT approximation.
+
+### MHC2 profile adapter
+
+Use Little CMS to read the profile and its MHC2 tag. The [MHC2 layout](https://learn.microsoft.com/en-us/windows/win32/wcs/display-calibration-mhc#new-mhc2-tag-for-icc-profiles) defines the byte fixtures and their expected values. ICC fields are big-endian. The ICC tag-table offset is relative to the file start; MHC2 internal offsets are relative to the tag start. Include offset and size bounds in malformed-input checks.
 
 The tag header is 36 bytes. It contains the LUT count, minimum and peak luminance, matrix offset and three LUT offsets. Matrix storage is 12 signed 15.16 values in row order. The profile's fourth matrix column is ignored; use its left 3×3 XYZ adjustment. Each LUT has an `sf32` header and signed 15.16 samples. Null transform fields select identity as specified by Microsoft. This is separate from the IDD callback layout, whose fourth column is an active offset.
 
-Parser cases include truncated headers, wrong signatures, negative fixed-point values, wrong relative bases, offset/size overflow, arrays outside the tag, identity fields and counts above 4096. The initial model accepts identity or 2–4096 LUT samples; a one-sample LUT returns `Unsupported` because its interpolation is not defined by this design. This is a model restriction, not a claim that Windows rejects it. Include two-entry identity LUTs, unequal channel curves, interior knots and values at each endpoint.
+Adapter tests cover truncated headers, wrong signatures, negative fixed-point values, wrong relative bases, offset/size overflow, arrays outside the tag, identity fields and counts above 4096. Check exact extracted values against the fixture manifest. The initial model accepts identity or 2–4096 LUT samples; a one-sample LUT returns `Unsupported` because its interpolation is not defined by this design. This is a model restriction, not a claim that Windows rejects it. Include two-entry identity LUTs, unequal channel curves, interior knots and values at each endpoint.
+
+**Unverified:** the selected library build handles every required identity and malformed-profile fixture. A missing or unreadable tag must not silently become identity. A valid profile that the library cannot read is a qualification failure. Resolve it in the adapter or library before enabling that case.
+
+Test conventional ICC transforms separately with known identity, transfer-curve and primary-conversion fixtures. Record all transform options and use independent expected values for those simple cases. A successful ICC transform is not evidence that Windows loaded its MHC2 calibration.
 
 Use complete valid display ICC profiles for installation tests, including required luminance and chromaticity tags. A valid standalone MHC2 byte block does not prove that Windows will accept the profile.
 
@@ -311,6 +338,8 @@ cargo nextest run -p nitpick-core
 ```
 
 The new harness commands are not implemented. Its runner will query and validate the selected display before showing patches. It must use the existing driver and host lifecycle, rather than add a second colour path just for tests.
+
+When the profile adapter is added, its build needs the native Little CMS engine as well as the Rust binding. Use a pinned bundled build or pinned native package on each OS. A Cargo lockfile alone does not pin a system library. Record both versions and the library build settings in test results; rerun the adapter fixtures after either dependency changes.
 
 For physical QRhi setup, use [QRhi measurement settings](qt.md#testing). For iPad setup, use [Browser measurement settings](browser.md#testing). Record brightness, ambient-light controls, Night light/Night Shift/True Tone, accessibility filters, profile association, SDR white, output depth/range, display mode and background patch level. Hold them fixed. Use large interior patches for probes; record patch area and average picture level because local dimming and automatic brightness can change results.
 
