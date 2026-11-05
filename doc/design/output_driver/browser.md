@@ -18,7 +18,14 @@ sequenceDiagram
     participant L as launcher
     participant S as nitpick-browser<br/>(tokio thread)
     participant C as web client
-    C->>S: GET /<token>/ (page), WebSocket /<token>/ws
+    participant U as user
+    C->>S: GET / (page), WebSocket /api/v1/ws
+    S-->>L: random 4-digit code
+    L-->>U: display code
+    S->>C: auth_required
+    U->>C: enter code
+    C->>S: auth {code}
+    S->>C: authenticated {token}
     C->>S: hello {client, screen, viewport, pixelRatio, media queries}
     L->>S: displays(), query()
     L->>S: open(display, depth)
@@ -27,13 +34,13 @@ sequenceDiagram
     S-->>L: Surface (viewport size in display pixels)
     L->>S: present(frame)
     S->>C: show {frame id}
-    C->>S: GET /<token>/frame/<id>.png
+    C->>S: GET /api/v1/frame/<id>.png, Authorization: Bearer <token>
     C->>S: applied {frame id, natural size, layout size}
     S-->>L: status
     L->>L: measurement delay, then ready
 ```
 
-The client sends `hello` again on each change of the media queries, the viewport or the pixel ratio. The server keeps the last state per client. `query` reads this state. A client that closes its WebSocket is removed from `displays`.
+After authentication, the client sends `hello`. It sends `hello` again on each change of the media queries, the viewport or the pixel ratio. The server keeps the last state of the single authenticated client. `query` reads this state. A client that closes its WebSocket is removed from `displays`.
 
 ## Graphics path
 
@@ -84,18 +91,21 @@ The client shows the image at one image pixel per display pixel:
 
 ## Interface
 
-HTTP (all paths under a random session token, see [Technical decisions](#technical-decisions)):
+HTTP uses fixed paths. API paths start with `/api/v1/`:
 
 | Path | Content |
 |---|---|
-| `GET /<token>/` | client page |
-| `GET /<token>/ws` | WebSocket, JSON messages |
-| `GET /<token>/frame/<id>.png` | the frame PNG; `Cache-Control: no-store` |
+| `GET /` | client page; no authentication |
+| `GET /api/v1/ws` | WebSocket, JSON messages; authenticate after the connection opens |
+| `GET /api/v1/frame/<id>.png` | the frame PNG; bearer token required; `Cache-Control: no-store` |
 
 WebSocket messages:
 
 | Direction | Message | Fields |
 |---|---|---|
+| server → client | `auth_required` | – (the client asks for the code shown by the server) |
+| client → server | `auth` | `code` (string) |
+| server → client | `authenticated` | `token` (random bearer token for this session) |
 | client → server | `hello` | `client` (user agent, `webview` flag), `screen` (`width`, `height` in CSS px), `viewport` (`width`, `height`, `scale`), `pixelRatio`, `dynamicRange` (`high`/`standard`), `colorGamut` (`rec2020`/`p3`/`srgb`), `fullscreen` |
 | server → client | `prepare` | – (the client enters full screen if possible and sends `hello`) |
 | server → client | `show` | `id`, `width`, `height` |
@@ -103,11 +113,31 @@ WebSocket messages:
 | client → server | `error` | `id`, `message` (for example decode failure) |
 | server → client | `close` | – (the client shows a black page) |
 
+### Authentication
+
+The server permits one WebSocket session, including a connection that waits for authentication. It reserves this slot when it accepts the connection. It rejects another WebSocket upgrade with HTTP `409 Conflict`. A second client cannot replace the current session.
+
+After the WebSocket opens:
+
+1. The server generates a random 4-digit code, from `0000` to `9999`. It displays the code in the launcher or server console. It sends `auth_required` without the code to the client.
+2. The user enters the code in the client. The client sends `auth` with the code as a string to preserve leading zeros.
+3. The server compares the strings exactly. A wrong code, a message other than `auth`, or no reply within 60 s closes the WebSocket and releases the slot. The server limits failed attempts to restrict code guessing.
+4. On success, the server generates a new bearer token with a cryptographic random generator and sends `authenticated`. Only then can the client send `hello` and take part in pattern presentation. The server accepts no further `auth` messages on this connection.
+
+For headless use or tests, the server can use an explicitly configured fixed string in place of the random code. The client submits the same string in `auth`. This option changes only the code; the server still issues a new random bearer token for each session.
+
+The client keeps the bearer token in memory. Every image asset request must include `Authorization: Bearer <token>`. Missing, wrong or expired tokens give HTTP `401 Unauthorized`. Tokens do not appear in URLs. When the WebSocket closes, the server revokes the token and releases the slot. A new connection must authenticate again.
+
+### Image requests and presentation
+
+The client uses `fetch` with the authorization header to load the PNG. It checks the response status, reads the body as a `Blob`, and sets the `<img>` source to an object URL for that blob. It releases each object URL when the image is replaced or discarded. The image bytes and colour metadata stay unchanged.
+
 The client sends `applied` after `HTMLImageElement.decode()`, the DOM change and two `requestAnimationFrame` callbacks. This acknowledges client processing, not physical presentation. The `present` future awaits `applied` with the current frame ID without blocking the Qt thread. The 10 s acknowledgement timeout starts when `show` is sent. A missing acknowledgement gives `Timeout`; a closed client gives `Disconnected`. Dropping the future removes the pending reply registration. Late acknowledgements for older frames do not complete a new request. The launcher then applies the [measurement delay](overview.md#measurement-delay).
 
 The client keeps the latest requested frame ID. After decode, it checks this ID before changing the DOM or sending `applied`. A newer `show` or `close` invalidates the old request, so a slow decode cannot replace a newer pattern or the black close page.
 
-Mapping to `ModeSettings`:
+### Mapping to `ModeSettings`
+
 - `hdr_on`: `dynamicRange == "high"`.
 - `gamut`: `colorGamut`.
 - `pixel_ratio`: `pixelRatio`.
@@ -125,19 +155,23 @@ Mapping to `ModeSettings`:
 | PNG encoder | `png` crate; own encoder | `png` crate | Writes 16-bit RGB. **Unverified:** it writes `cICP`, `mDCV` and `cLLI`. If not, the driver writes them with `Writer::write_chunk`. |
 | Local test window | system browser; Tauri; `wry` direct | Tauri (`nitpick-webview`), separate process | A fixed engine (WebView2 on Windows), a borderless full-screen window on a selected monitor, browser arguments. Counter-intuitive: a separate process, because Tauri and Qt both need the main thread for their event loop. |
 | Monitor selection (Tauri) | monitor index; screen position | screen position | Qt and Tauri do not use the same monitor order. The launcher gives the centre of the Qt screen geometry. The shell selects the monitor that contains it. |
-| Access | open; random token in the URL | random token, server bound to localhost by default | A LAN address only when the user turns on remote displays. The token prevents an unknown client from becoming a display. |
+| Access | open; token in the URL; WebSocket authentication and bearer token | fixed API paths and [session authentication](#authentication), server bound to localhost by default | The server code controls display access. The bearer token controls image access without a secret in the URL. A LAN address only when the user turns on remote displays. |
+| Sessions | multiple clients; one client | one session, including authentication | One client controls the display state. A second connection cannot replace it. |
 | Full screen | Fullscreen API; Home Screen web app | Fullscreen API with a "Full screen" button | The API needs a user gesture. The client shows the button until `fullscreen` is true. |
 
 ## Usage
 
 Local test:
 1. In the launcher, select the driver "Browser (local webview)" and a screen.
-2. "Show pattern" starts `nitpick-webview --url <url> --at <x>,<y>` if no webview client is on that screen. It waits 10 s for `hello`.
+2. "Show pattern" starts `nitpick-webview --url <url> --at <x>,<y>` if no session exists.
+3. Enter the code shown by the launcher in the webview. After authentication, the launcher waits 10 s for `hello`.
 
 Remote display (iPad):
 1. In the launcher, turn on remote displays. The launcher shows the URL with the LAN address.
-2. Open the URL in Safari on the iPad. Tap "Full screen".
+2. Open the URL in Safari on the iPad. Enter the code shown by the launcher. After authentication, tap "Full screen".
 3. Select the iPad in the display list. Then select the pattern and "Show pattern".
+
+For headless use or automated tests, configure the server and client with the same fixed string. See [Authentication](#authentication). Close the current client before connecting a different client or selecting a different screen.
 
 For both paths, use the [measurement delay](overview.md#measurement-delay) before taking a reading.
 
@@ -150,7 +184,11 @@ Settings before a measurement on an iPad:
 Tests:
 - Unit: all input codes at both depths. Verify the cICP tuple and transfer function for each encoding. Decode the PNG and recover each nominal-range input code with the inverse rule. Check exact black and peak endpoints, clipping outside them, and the status and reference marks for clipped levels.
 - Unit: automatic PQ metadata uses decoded PNG samples, including clipping and 16-bit rounding. HLG with `FromFrame` gives `Unsupported`; explicit light levels stay unchanged before chunk quantization. Check PNG metadata field order, widths and units against the specification.
-- Unit: the server with a mock WebSocket client: `hello` updates `query`; `present` without `applied` returns `Timeout`; a closed client gives `Disconnected`; an old frame ID cannot complete a new call.
+- Unit: authentication with a mock WebSocket client. Check codes with leading zeros and the fixed-string option. Reject a wrong code, `hello` before authentication, and an authentication timeout. Check the failed-attempt limit. Only an authenticated client appears in `displays`.
+- Unit: image requests on the fixed API path. The session token permits access. Missing and wrong tokens give `401`. Closing the WebSocket revokes the token. A new session gets a new token and rejects the old one.
+- Unit: simultaneous WebSocket connections. Only one connection reserves the slot. Other connections get `409` while authentication is pending and while the session is active. Failed authentication, timeout and disconnect release the slot.
+- Unit: the server with an authenticated mock WebSocket client: `hello` updates `query`; `present` without `applied` returns `Timeout`; a closed client gives `Disconnected`; an old frame ID cannot complete a new call.
+- Client: fetch the PNG with the bearer header and show it through a blob URL. Check decode, `applied`, and object URL cleanup. A newer `show` or `close` during a fetch or decode must discard the old image.
 - Pixel mapping: with $r = 1$ and $r = 2$, the client reports a layout size equal to the image size. A screenshot of the Tauri window (SDR, `pq-grayscale` ramp) shows each ramp step at its pixel column.
 - HDR: show `pq-grayscale` with both PQ encodings on a Windows HDR display in Tauri and on an iPad Pro in Safari. After the measurement delay, measure the 100, 203 and 1000 cd/m² patches with a probe. Done when the error of each patch below the display peak is within the probe uncertainty. Record the delay, result and tone mapping above the peak here. For HLG, compare the bars with a known HLG reference on the same display and record its viewing settings; do not use PQ luminance targets.
 
