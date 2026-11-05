@@ -4,7 +4,7 @@
 
 `DisplayDeviceControl` in `nitpick-core::device` enumerates local display devices, reads their capabilities and current state, and controls their OS settings. The first write operation is ICC profile assignment, including the state needed to restore the previous assignment. `nitpick-display` implements this trait for Windows, macOS and Linux. Both the Qt host and the command-line host can use it.
 
-**Status:** design only. The shared trait, native crate and ICC assignment are not implemented. The remaining work is in [the output driver plan](../plan/output_driver.md).
+**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. The native crate and ICC assignment are not implemented. The remaining work is in [the output driver plan](../plan/output_driver.md).
 
 The host coordinates three separate interfaces:
 
@@ -40,7 +40,7 @@ QRhi reads physical capabilities and mode fields through this trait. Its adapter
 
 ## Interface
 
-The following types are owned Rust data. Their exact fields are implementation work.
+The following types are owned Rust data. Native values use `Report<T>`: a known value with the name of its native report, or unknown with a reason. A `Report<bool>` converts to the output driver's `Support` tri-state.
 
 | Type | Required meaning |
 |---|---|
@@ -51,9 +51,9 @@ The following types are owned Rust data. Their exact fields are implementation w
 | `DeviceQuery` | Capabilities, mode, identity/topology revision and the source of each native report. |
 | `ProfileTarget` | Device, native profile role and scope, including user and host scope where applicable. The backend lists the targets it can address. |
 | `ProfileState` | Observed associations and selected default or override. Distinguish no override, inherited state and an unreadable value. Include a state revision for change detection. |
-| `IccProfile` | Owned profile bytes and content hash. A caller's path is not the profile identity. |
+| `IccProfile` | Owned profile bytes and their SHA-256 content hash. A caller's path is not the profile identity. Construction checks only the ICC header size and `acsp` signature. |
 | `PreparedProfileChange` | Versioned device identity, target, original state, desired profile and planned resources owned by this change. It can be saved for recovery before any mutation. |
-| `DeviceError` | Unsupported operation or scope, permission denied, invalid profile, device disconnected, state conflict, timeout or native error. Retain the native reason. |
+| `DeviceError` | Unsupported operation or scope, permission denied, invalid profile, device disconnected, ambiguous identity, state conflict, timeout or native error. Retain the native reason. |
 
 Pseudo-code (Rust):
 
@@ -85,7 +85,7 @@ Device queries are read-only. Query again before opening output or preparing a d
 
 Device capabilities do not describe the output transport. Accepted pattern encodings, 10/12-bit input paths, FP16 conversion limits, pixel mapping, metadata transport and code preservation remain in the output driver's `Capabilities`. Physical fields in QRhi `ModeSettings` come from `DeviceQuery`; the output adapter adds its presentation description and pixel ratio. The browser supplies its own client reports and unknown fields. It does not query a server display to fill gaps in a remote client's report.
 
-`prepare_icc_profile` reads and validates state without changing it. It rejects a target whose original assignment cannot be read or restored. The host saves the prepared change before calling `set_icc_profile`. The backend rechecks device identity, scope and state before a write. A conflicting external change returns `StateConflict`; it must not redirect the write to another display.
+`prepare_icc_profile` reads and validates state without changing it. It rejects a target whose original assignment cannot be read or restored; `ProfileState::check_restorable` is the shared check. A record of another format version fails with `Unsupported`. The host saves the prepared change before calling `set_icc_profile`. The backend rechecks device identity, scope and state before a write. A conflicting external change returns `StateConflict`; it must not redirect the write to another display.
 
 Setting a profile includes installation or registration when the OS requires it, association with the selected device and selection in the requested role. Use an existing identical profile when possible. Read back the requested state before reporting success. Native resources created for the change have unique planned identities. Partial failure still requires restoration from the saved record.
 

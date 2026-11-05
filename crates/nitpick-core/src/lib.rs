@@ -4,6 +4,7 @@
 //! Patterns are rendered as 10-bit or 12-bit R'G'B' code values.
 //! [`output`] converts them to swap chain pixels.
 
+pub mod device;
 pub mod driver;
 pub mod image;
 pub mod metadata;

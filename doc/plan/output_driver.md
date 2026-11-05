@@ -6,15 +6,6 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 3. Define device enumeration and profile control
-
-Requires: 2.
-
-TODO:
-
-- Add `DisplayDeviceControl` and its owned types in `nitpick-core::device` under [Display device operations](../design/display_device.md#interface). Cover device identity, capability tri-states, active mode, profile targets, prepared changes, saved state and errors.
-- With a fake backend, verify supported versus active capabilities, partial mode data, duplicate display names, stale identity, read-only queries and unsupported profile targets. Verify use through a trait object. Keep native, GUI and colour-library dependencies out of the core.
-
 ### 4. Add the cross-platform device implementation crate
 
 Requires: 3.
