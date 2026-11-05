@@ -6,13 +6,6 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 2. Add the common driver types and capability rules
-
-TODO:
-
-- Add `nitpick-core::driver` with the types, errors and borrowed non-`Send` `PresentFuture` in [Interface](../design/output_driver/overview.md#interface). Keep GUI, server and executor dependencies out of the core.
-- Use a mock driver to check each `Yes`, `No` and `Unknown` rule. Reject unavailable depths, unsupported input and unsupported metadata. Accept interpretation and precision limits with warnings. Verify use through `dyn OutputDriver` on a local executor.
-
 ### 3. Define device enumeration and profile control
 
 Requires: 2.

@@ -10,7 +10,7 @@ The compatibility API is one Rust trait, `OutputDriver`, in `nitpick-core` (modu
 
 Native display enumeration, capability queries and ICC profile assignment use the separate [`DisplayDeviceControl` trait](../display_device.md) in `nitpick-core::device`. The `nitpick-display` crate implements native device operations on Windows, macOS and Linux. QRhi combines device reports with its output-path limits. Hosts coordinate device changes with presentation; `OutputDriver` does not change OS profile associations.
 
-**Not implemented:** the common output and device traits, native device crate, browser driver and command-line host. The existing core library has no Qt dependency. The only current executable, `nitpick-app`, needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
+`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. **Not implemented:** the device trait, native device crate, browser driver and command-line host. The existing core library has no Qt dependency. The only current executable, `nitpick-app`, needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
 
 ```mermaid
 graph LR
@@ -158,7 +158,8 @@ pub trait OutputDriver {
 
 Rules:
 - Physical device support is read through `DisplayDeviceControl`. The output capabilities describe the selected transport and conversion, not a second native enumeration API. Browser reports remain specific to its client.
-- `open` rejects a depth whose `available` is `No`. `present` rejects an encoding whose `input` is `No`, or metadata whose `hdr_metadata` is `No`. `FromFrame` also requires `auto_light_level` other than `No`.
+- `open` rejects a depth whose `available` is `No`. `present` rejects an encoding whose `input` is `No`, or metadata whose `hdr_metadata` is `No`. `FromFrame` also requires `auto_light_level` other than `No`. A depth or encoding absent from `Capabilities` is rejected as `No`.
+- Drivers apply these rules with `driver::check_open` and `driver::check_frame`. Both return the warnings for the status line, or `Unsupported`.
 - `interpretation = No` does not reject the frame. The host accepts the encoding and shows the reason in the status and reference table. This permits QRhi scope use with HLG codes and PQ signalling.
 - `exact = No` and `pixel_exact = No` also produce warnings. They do not disable approximate output. For any selected feature with `Unknown`, continue with a warning.
 - The driver resolves `Hdr10Request` to `Hdr10Metadata`. See [content light level calculation](../test_patterns.md#hdr10-static-metadata) for the shared calculation and the HLG rule.
