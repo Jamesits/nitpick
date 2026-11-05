@@ -16,8 +16,8 @@ Scope:
 graph LR
     QML[qml/main.qml<br/>launcher UI] -->|showPattern, referenceTable, catalogue| L[launcher.rs<br/>cxx-qt QObject]
     L -->|render, reference_table| C[nitpick-core<br/>generators → PatternModel]
-    L -->|light_level| M[nitpick-core<br/>metadata]
     L -->|displays, query, open, present| D[OutputDriver<br/>QRhi or browser]
+    D -->|light_level| M[nitpick-core<br/>metadata]
     D -->|HDR10, FP16 scRGB or PQ PNG| Out[display] --> Scope[vectorscope or probe]
 ```
 
@@ -47,7 +47,7 @@ graph TD
   last code. The reference table is a list of these levels, grouped by section.
 
 Other algorithms (for example, comparison with scope readings or conversion to other formats) must read
-the model, not the generator or the pixels. Exception: `metadata::light_level` reads the rendered image, because MaxFALL is an average over the output pixels.
+the model, not the generator or the pixels. Exception: `metadata::light_level` reads the effective output samples, because MaxFALL is an average over the output pixels.
 
 ## Signal encodings
 
@@ -69,13 +69,15 @@ the values that a GPU outputs in YCbCr narrow-range mode. The GPU can round diff
 
 ## HDR10 static metadata
 
-Optional, off by default. When on, the launcher sends:
+Optional, off by default. When on, the launcher sends an `Hdr10Request` to the output driver:
 - SMPTE ST 2086 mastering display colour volume: primaries preset (BT.2020 or P3-D65, both D65 white), maximum and minimum luminance (default 1000 and 0.0001 cd/m²).
-- CTA-861.3 content light level: MaxCLL and MaxFALL. By default calculated from the rendered image: maximum and frame average of $\max(R, G, B)$ in cd/m². Codes are read as full-range PQ codes, as the QRhi driver signals them. The user can enter other values.
+- CTA-861.3 content light level: `FromFrame` by default, or explicit MaxCLL and MaxFALL in cd/m². See the request type in [the output interface](output_driver/overview.md#interface).
 
-The `metadata` module gives the values in ST 2086 units (chromaticity 0.00002, luminance 0.0001 cd/m², light level 1 cd/m²) and as big-endian SEI payloads (24 and 4 bytes; primaries in the order green, blue, red).
+The driver resolves automatic light levels with the shared `metadata::light_level` helper. The helper takes normalized PQ samples for the effective output signal. For each pixel it applies the PQ EOTF to R, G and B, then takes their maximum in cd/m². MaxCLL is the maximum over all pixels. MaxFALL is their mean. The driver supplies the transfer and range interpretation; the helper does not infer them from the pattern name or bit depth. QRhi's input to this calculation is in [HDR10 static metadata](output_driver/qt.md#hdr10-static-metadata); the browser's is in [Code to PNG sample](output_driver/browser.md#code-to-png-sample).
 
-The driver encodes the metadata for the display. See [HDR10 static metadata](output_driver/qt.md#hdr10-static-metadata) (QRhi) and [Code to PNG sample](output_driver/browser.md#code-to-png-sample) (browser).
+For actual HLG output, automatic absolute light levels are unavailable. They require a defined display and viewing model. `auto_light_level = No`; a `FromFrame` request returns `Unsupported`. The user can turn metadata off or enter explicit light levels. Explicit values bypass the calculation on every driver.
+
+The resolved `Hdr10Metadata` holds natural units. The `metadata` module also provides ST 2086 and CTA-861.3 field conversions and big-endian SEI payloads (24 and 4 bytes; primaries in green, blue, red order). Each driver encodes the resolved values into its own metadata format. PNG chunks have their own field layouts and units.
 
 ## Technical decisions
 

@@ -28,8 +28,9 @@ sequenceDiagram
     L->>S: present(frame)
     S->>C: show {frame id}
     C->>S: GET /<token>/frame/<id>.png
-    C->>S: shown {frame id, natural size, layout size}
+    C->>S: applied {frame id, natural size, layout size}
     S-->>L: status
+    L->>L: measurement delay, then ready
 ```
 
 The client sends `hello` again on each change of the media queries, the viewport or the pixel ratio. The server keeps the last state per client. `query` reads this state. A client that closes its WebSocket is removed from `displays`.
@@ -54,21 +55,23 @@ If `dynamicRange` is `standard`, the browser tone maps the image to SDR. The dri
 
 ### Code to PNG sample
 
-Code $D$ at bit depth $n$ to the 16-bit sample $V$:
+All PNGs use full-range RGB samples. For input code $D$ at bit depth $n$, let $s = 2^{n-8}$ and calculate the normalized signal $E'$:
 
-| Signalled range | cICP (primaries, transfer, matrix, full range) | $V$ |
+| Input encoding | cICP (primaries, transfer, matrix, full range) | $E'$ |
 |---|---|---|
-| full (`pq-full`) | 9, 16, 0, 1 | $\mathrm{round}(D \cdot 65535 / (2^n - 1))$ |
-| narrow (`pq-narrow`) | 9, 16, 0, 0 | $D \cdot 2^{16-n}$ |
-| narrow (`hlg-narrow`) | 9, 18, 0, 0 | $D \cdot 2^{16-n}$ |
+| `pq-full` | 9, 16, 0, 1 | $D / (2^n - 1)$ |
+| `pq-narrow` | 9, 16, 0, 1 | $(D - 16s) / (219s)$ |
+| `hlg-narrow` | 9, 18, 0, 1 | $(D - 16s) / (219s)$ |
 
-In all rows, $V$ decodes back to $D$ at bit depth $n$. The full-range rule is the same normalisation $D / (2^n - 1)$ as the FP16 path (see [Swap chain output](qt.md#swap-chain-output)).
+The stored sample is $V = \mathrm{round}(65535 \cdot \min(1, \max(0, E')))$. PQ stays PQ. HLG stays HLG. At 10 bits, narrow black 64 maps to 0 and nominal peak 940 maps to 65535. At 12 bits, the same endpoints are 256 and 3760.
 
-Deviations from the QRhi driver:
-- The browser driver signals the encoding of the pattern. QRhi always signals full-range PQ (see [Signalling](qt.md#signalling)). Thus `pq-narrow` shows black at code 64 as black, and `hlg-narrow` shows as HLG.
-- **In question:** browser support of the narrow-range flag (full range = 0) in PNG `cICP`. If it is not supported, the driver writes all encodings as full-range PQ, as QRhi does. `query` gives `Unknown` for the narrow encodings until a test on each browser confirms it.
+Deviation from a lossless code transport: values below narrow black or above nominal peak are clipped. They cannot be stored in unsigned full-range RGB while keeping the same transfer function. The driver reports clipping in the status. The reference table marks affected levels as "clipped"; they are not valid tests of those signal excursions. Inside the nominal range, conversion adds at most half a 16-bit sample step. The inverse range mapping recovers the original 10-bit or 12-bit code there.
 
-HDR10 metadata: the driver writes the PNG `mDCV` (ST 2086) and `cLLI` (CTA-861.3) chunks. **Unverified:** a browser uses these chunks for tone mapping.
+The [PNG specification](https://www.w3.org/TR/png-3/#cICP-chunk) permits narrow-range cICP. However, [Skia's PNG decoder](https://github.com/google/skia/blob/main/src/codec/SkPngRustCodec.cpp) ignores cICP when the full-range flag is zero. Full-range samples avoid that dependency. The driver does not fall back from HLG to PQ or preserve narrow codes under full-range signalling. **Unverified:** the browser and compositor preserve the signalled transfer function and luminance. `interpretation` stays `Unknown` until device tests confirm it.
+
+QRhi instead transports the input codes under full-range PQ signalling. See [Signalling](qt.md#signalling).
+
+HDR10 metadata: the driver writes PNG `mDCV` and `cLLI` chunks from the resolved values in [HDR10 static metadata](../test_patterns.md#hdr10-static-metadata). For automatic PQ light levels, it supplies $V / 65535$ to the shared calculation after clipping and quantization. HLG requires explicit light levels. PNG chunk layouts and units come from the [PNG specification](https://www.w3.org/TR/png-3/#mDCV-chunk); do not copy the core SEI payload bytes into these chunks. **Unverified:** a browser uses these chunks for tone mapping.
 
 ### Pixel mapping
 
@@ -96,11 +99,13 @@ WebSocket messages:
 | client → server | `hello` | `client` (user agent, `webview` flag), `screen` (`width`, `height` in CSS px), `viewport` (`width`, `height`, `scale`), `pixelRatio`, `dynamicRange` (`high`/`standard`), `colorGamut` (`rec2020`/`p3`/`srgb`), `fullscreen` |
 | server → client | `prepare` | – (the client enters full screen if possible and sends `hello`) |
 | server → client | `show` | `id`, `width`, `height` |
-| client → server | `shown` | `id`, `naturalWidth`, `naturalHeight`, `layoutWidth`, `layoutHeight` (display px) |
+| client → server | `applied` | `id`, `naturalWidth`, `naturalHeight`, `layoutWidth`, `layoutHeight` (display px) |
 | client → server | `error` | `id`, `message` (for example decode failure) |
 | server → client | `close` | – (the client shows a black page) |
 
-The client sends `shown` after `HTMLImageElement.decode()`, the DOM change and two `requestAnimationFrame` callbacks. `present` waits for `shown` for 10 s, then returns `Timeout`.
+The client sends `applied` after `HTMLImageElement.decode()`, the DOM change and two `requestAnimationFrame` callbacks. This acknowledges client processing, not physical presentation. The `present` future awaits `applied` with the current frame ID without blocking the Qt thread. The 10 s acknowledgement timeout starts when `show` is sent. A missing acknowledgement gives `Timeout`; a closed client gives `Disconnected`. Dropping the future removes the pending reply registration. Late acknowledgements for older frames do not complete a new request. The launcher then applies the [measurement delay](overview.md#measurement-delay).
+
+The client keeps the latest requested frame ID. After decode, it checks this ID before changing the DOM or sending `applied`. A newer `show` or `close` invalidates the old request, so a slow decode cannot replace a newer pattern or the black close page.
 
 Mapping to `ModeSettings`:
 - `hdr_on`: `dynamicRange == "high"`.
@@ -113,8 +118,10 @@ Mapping to `ModeSettings`:
 | Decision | Options | Selected | Reason |
 |---|---|---|---|
 | Graphics path | Canvas 2D; WebGL; WebGPU `extended`; HDR `<img>` | HDR `<img>` | See [Graphics path](#graphics-path). |
+| Narrow input | narrow-range cICP; rescale to full range; relabel unchanged codes | rescale to full range, keep the transfer function | Skia ignores narrow-range cICP. Rescaling preserves nominal light levels; clipping is an explicit limit. |
 | Render location | server (`nitpick-core`, PNG); client (`nitpick-core` as WASM) | server | One renderer for the pattern, the reference table and the light level. A 4K pattern PNG is small, because the patterns have large flat regions. |
 | Server | `axum` + `tokio` on a separate thread; `tiny_http` + `tungstenite` | `axum` + `tokio` | HTTP and WebSocket in one library. The Qt main thread does not run the server. |
+| Presentation | block on the server reply; await a reply by frame ID | await the reply | The GUI stays active during image encoding, transfer and client processing. See [Asynchronous presentation](overview.md#asynchronous-presentation). |
 | PNG encoder | `png` crate; own encoder | `png` crate | Writes 16-bit RGB. **Unverified:** it writes `cICP`, `mDCV` and `cLLI`. If not, the driver writes them with `Writer::write_chunk`. |
 | Local test window | system browser; Tauri; `wry` direct | Tauri (`nitpick-webview`), separate process | A fixed engine (WebView2 on Windows), a borderless full-screen window on a selected monitor, browser arguments. Counter-intuitive: a separate process, because Tauri and Qt both need the main thread for their event loop. |
 | Monitor selection (Tauri) | monitor index; screen position | screen position | Qt and Tauri do not use the same monitor order. The launcher gives the centre of the Qt screen geometry. The shell selects the monitor that contains it. |
@@ -132,6 +139,8 @@ Remote display (iPad):
 2. Open the URL in Safari on the iPad. Tap "Full screen".
 3. Select the iPad in the display list. Then select the pattern and "Show pattern".
 
+For both paths, use the [measurement delay](overview.md#measurement-delay) before taking a reading.
+
 ## Testing
 
 Settings before a measurement on an iPad:
@@ -139,10 +148,11 @@ Settings before a measurement on an iPad:
 - iPad Pro with reference mode: turn it on for a known SDR white. **Unverified:** Safari keeps the PQ luminance in reference mode.
 
 Tests:
-- Unit: code to PNG sample for all codes of both depths and all three signalled ranges; decode with the `png` crate and the inverse rule gives the same code.
-- Unit: the server with a mock WebSocket client: `hello` updates `query`; `present` without `shown` returns `Timeout`; a closed client gives `Disconnected`.
+- Unit: all input codes at both depths. Verify the cICP tuple and transfer function for each encoding. Decode the PNG and recover each nominal-range input code with the inverse rule. Check exact black and peak endpoints, clipping outside them, and the status and reference marks for clipped levels.
+- Unit: automatic PQ metadata uses decoded PNG samples, including clipping and 16-bit rounding. HLG with `FromFrame` gives `Unsupported`; explicit light levels stay unchanged before chunk quantization. Check PNG metadata field order, widths and units against the specification.
+- Unit: the server with a mock WebSocket client: `hello` updates `query`; `present` without `applied` returns `Timeout`; a closed client gives `Disconnected`; an old frame ID cannot complete a new call.
 - Pixel mapping: with $r = 1$ and $r = 2$, the client reports a layout size equal to the image size. A screenshot of the Tauri window (SDR, `pq-grayscale` ramp) shows each ramp step at its pixel column.
-- HDR: show `pq-grayscale` on a Windows HDR display in Tauri and on an iPad Pro in Safari. Measure the 100, 203 and 1000 cd/m² patches with a probe. Done when the error of each patch below the display peak is within the probe uncertainty. Record the result and the tone mapping above the peak here.
+- HDR: show `pq-grayscale` with both PQ encodings on a Windows HDR display in Tauri and on an iPad Pro in Safari. After the measurement delay, measure the 100, 203 and 1000 cd/m² patches with a probe. Done when the error of each patch below the display peak is within the probe uncertainty. Record the delay, result and tone mapping above the peak here. For HLG, compare the bars with a known HLG reference on the same display and record its viewing settings; do not use PQ luminance targets.
 
 **Not done:** all tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
 

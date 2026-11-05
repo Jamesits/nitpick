@@ -18,19 +18,23 @@ Mapping to `OutputDriver`:
 | Trait call | Bridge (`display.rs`) |
 |---|---|
 | `displays` | `QGuiApplication::screens()`, size from `screenPixelWidth`, `screenPixelHeight` |
-| `query` | the output description of the screen (Windows: DXGI `BitsPerColor`, colour space, EDID luminance) |
+| `query` | output description and path support (Windows: DXGI `BitsPerColor`, colour space, EDID luminance); reject an FP16 path without a known luminance scale |
 | `open` | `openPatternWindow(screen, fp16)`; `fp16` from the bit depth (see [Swap chain output](#swap-chain-output)) |
-| `present` | `presentPattern(pixels, width, height, metadata)` |
+| `present` | `presentPattern(pixels, width, height, metadata)`; wait for successful submission of this frame |
 
 The pattern window closes on Esc, Q, Space or a double click.
 
+The bridge queues the frame and returns to the Qt event loop. It reports the frame ID after its texture upload and a successful `endFrame`. This callback resolves the `present` future. `requestUpdate()` alone is not an acknowledgement. The bridge does not run a nested event loop. An unrecoverable error or a 10 s timeout from queueing the frame fails the future. Closing the window reports `Disconnected`. Cancellation removes the pending completion callback; late results are discarded by frame ID. This does not confirm physical scanout. The launcher then applies the [measurement delay](overview.md#measurement-delay).
+
 ## Signalling
 
-The display side always signals PQ / BT.2020 full range. The driver writes the code values of every encoding into it without change. Thus:
+The output path targets PQ / BT.2020 full range. All input encodings are accepted. The 10-bit path writes their code values directly; the 12-bit path has the conversion limits below. Thus:
 - `pq-full` is the native case.
 - `pq-narrow` codes reach the wire unchanged only if the GPU output is RGB full range.
   The display then shows black at code 64 (raised black). This is expected. Set the scope to narrow range.
 - `hlg-narrow` is for scope use only. The swap chain cannot signal HLG, so the display interprets the codes as PQ.
+
+For `pq-full`, `interpretation` is `Yes` for the signalled transfer and range. For both narrow encodings it is `No`, with a warning about PQ full-range interpretation. `input` is `Yes` for all three. These warnings keep the scope workflows available. They do not certify that the compositor preserves codes or luminance.
 
 ## Swap chain output
 
@@ -39,22 +43,28 @@ No swap chain API (DXGI, Vulkan, Metal) has a 12-bit integer format. Thus the bi
 | Bit depth | Swap chain | Pixel conversion (`output` module) | Codes on the wire |
 |---|---|---|---|
 | 10-bit | HDR10: 10-bit unorm, PQ, BT.2020 | none: packed `R10G10B10A2` | exact, if the compositor and the driver do not change them |
-| 12-bit | FP16 scRGB: linear, BT.709 primaries, 1.0 = 80 cd/m² | code → PQ EOTF → BT.2020-to-BT.709 matrix → f16 | the compositor or the driver encodes them back to PQ / BT.2020 |
+| 12-bit, known 80 cd/m² scale | FP16 scRGB: linear, BT.709 primaries | code → PQ EOTF → BT.2020-to-BT.709 matrix → f16 | the compositor or the driver encodes them back to PQ / BT.2020 |
+
+The scale is a property of the platform, not of the FP16 storage format. Windows scRGB uses 1.0 = 80 cd/m². The Linux path uses the scRGB convention of its extended-linear-sRGB Vulkan colour space; its compositor behaviour still needs a device test.
+
+On macOS, Qt's linear HDR path uses 1.0 for the current SDR white. Its luminance varies with display settings and is not known to the driver. See [Qt's luminance behaviour](https://github.com/qt/qtbase/blob/6.12/src/gui/rhi/qrhi.cpp). Thus macOS reports `available = No` for 12-bit output, with the reason "absolute FP16 luminance scale unavailable". `open` also rejects it. Do not substitute 80, 100 or Qt's placeholder SDR-white value, or reduce the output to 10 bits. HDR10 10-bit output remains available when the swap chain supports it.
 
 A fragment shader copies one texel per pixel with `texelFetch` (no filtering, no blending). Thus the swap chain gets the texture values unchanged.
 
-FP16 conversion of the code triple $(R', G', B')$ at depth $n$:
+For the supported 80 cd/m² path, convert the code triple $(R', G', B')$ at depth $n$:
 1. Each code is a full-range PQ code on the wire: $L = \mathrm{EOTF}_{PQ}(D / (2^n - 1))$ in cd/m².
 2. $L_{709} = M \cdot L_{2020}$. $M$ is calculated from the BT.709 and BT.2020 primaries and D65.
 3. The value is $L_{709} / 80$, rounded to f16.
 4. Deviation from a plain conversion: rounding each component separately is not sufficient. The matrix mixes the rounding error of the bright components into the dark ones. The conversion thus searches ±2 f16 steps per component. It takes the triple that a reference decoder (exact inverse matrix, PQ inverse EOTF, round, negative values clamped to 0) decodes closest to the codes.
 
-Results of the reference decoder:
+Results of the reference decoder for this 80 cd/m² path:
 - All 4096 12-bit grey codes decode exactly, also without the search.
 - All full-range levels and all BT.709 bars of BT.2111 decode exactly.
 - Saturated narrow-range bars do not decode exactly (36 levels over all formats at 2K). They have a component at 0 % (code 64 or 256). On the full-range wire this is a small positive luminance, and the f16 error of the bright components is larger than one code step there. A larger search does not solve this (±8 steps: 31 levels). The reference table marks these levels with `*`.
 
 **Unverified:** the real compositor and driver use the same matrix and arithmetic as the reference decoder. A different matrix precision moves more levels.
+
+The `*` marks apply only to this FP16 path. A browser reference table uses its own conversion and clipping limits. An unavailable path has no claim of exact output.
 
 ## HDR10 static metadata
 
@@ -68,6 +78,8 @@ The metadata values are in [HDR10 static metadata](../test_patterns.md#hdr10-sta
 
 Each pattern window has a new swap chain without metadata, so "off" needs no call.
 
+Automatic light levels use $D / (2^n - 1)$ as full-range PQ for every input encoding, including HLG scope input. This describes the intended PQ signal of this driver. It is not an HLG luminance calculation or a measurement of compositor output.
+
 **In question:**
 - DXGI: the documentation gives `MaxMasteringLuminance` in whole cd/m² and `MinMasteringLuminance` in 0.0001 cd/m². nitpick follows the documentation. Some sample code uses 0.0001 cd/m² for both.
 - macOS: `opticalOutputScale` is 100 (linear 1.0 = 100 cd/m², as in Chromium). Its effect on a PQ layer is not documented.
@@ -80,6 +92,7 @@ Each pattern window has a new swap chain without metadata, so "off" needs no cal
 | HDR output | QRhi on all platforms; direct D3D11 on Windows and QRhi elsewhere | QRhi on all platforms | One code path for Windows, Linux and macOS. Counter-intuitive: the draw call adds a shader on Windows. `texelFetch` keeps the values, so the shader does not change codes. |
 | Shaders | `qsb` at build time; precompiled files in git | `qsb` at build time | Reproducible from the GLSL source. `build.rs` embeds the result in a generated header. |
 | Swap chain | HDR10 for 10-bit; FP16 scRGB for 12-bit | as listed | No API has a 12-bit integer swap chain. FP16 is the only format with more than 10 bits. QRhi checks the format first, because it falls back to SDR without an error. |
+| FP16 luminance scale | assume 80 on all platforms; calibrate each display; reject paths without a known scale | reject paths without a known scale | A guessed scale changes PQ luminance and codes. Calibration is outside the current scope. |
 | Adapter (Windows) | default adapter; adapter of the monitor | adapter of the monitor | Prevents a cross-adapter copy on hybrid-GPU systems. QRhi gets the adapter LUID. |
 | Metadata on Linux | Qt private API; none | Qt private API | QRhi exposes no `VkSwapchainKHR`. Cost: the binary must use the exact Qt version of its private headers. |
 
@@ -89,6 +102,19 @@ Settings before a measurement:
 1. Turn on HDR in the system display settings for the test display.
 2. In the GPU control panel, set the output colour depth to 10 bpc or more (12 bpc for 12-bit). With 8 bpc, the driver dithers and the codes are not exact. On Windows the launcher shows the wire bit depth after "Show pattern".
 3. Select the output format:
-   - RGB full range: all encodings reach the wire unchanged.
+   - RGB full range: compare the input codes, subject to the FP16 limits above.
    - YCbCr narrow range: use `pq-full`. Compare with the Y'Cb'Cr' columns of the reference table.
 4. Turn off Night light and other colour filters.
+5. Set the [measurement delay](overview.md#measurement-delay) and wait for readiness before each reading.
+
+Tests:
+- Unit and launcher: 12-bit output on macOS gives `available = No` and `Unsupported` from `open`; 10-bit still opens when supported. A forced 12-bit request also fails before pixel conversion.
+- Unit and launcher: HLG and narrow PQ remain selectable for scope use. Their interpretation warnings appear in the status and reference table.
+- Bridge: delay the render event and verify that `present` cannot succeed before this frame is submitted. Verify submission errors, timeout and closure. The launcher delay starts only after successful acknowledgement.
+- Scope: verify supported paths against the reference table within ±1 code, except the marked FP16 levels. Record the OS, GPU output mode, delay and deviations. See [the measurement plan](../../plan/test_patterns.md).
+
+**Not done:** hardware verification of code preservation, metadata effects and the measurement delay.
+
+## Future enhancements
+
+- Calibrated 12-bit output on platforms whose linear HDR scale follows the display white. This needs a measured scale and a policy for display-setting changes before the path can be enabled.
