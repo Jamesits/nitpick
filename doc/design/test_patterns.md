@@ -2,27 +2,28 @@
 
 ## Overview
 
-Static HDR test patterns full screen, for measurement with an external vectorscope or waveform monitor.
+Static HDR test patterns full screen, for measurement with an external vectorscope or waveform monitor, or with a light probe on a display without a video input.
 
 Scope:
 - Two patterns:
   - **BT.2111-3 HDR colour bars** (`bt2111`): the colour test pattern.
   - **PQ grayscale / brightness** (`pq-grayscale`): the brightness and grayscale test pattern.
 - Two bit depths: 10-bit and 12-bit code values.
-- A borderless full-screen window that sends the code values through an HDR swap chain (see [Swap chain output](#swap-chain-output)).
-- A reference table for each pattern, encoding, bit depth and screen size: R'G'B' codes and the Y'Cb'Cr' codes that the scope must show.
+- Output through an output driver (see [output_drivers.md](output_drivers.md)):
+  - QRhi: a borderless full-screen window that sends the code values through an HDR swap chain (see [Swap chain output](#swap-chain-output)).
+  - Browser: an HDR image in a web page (see [browser_output.md](browser_output.md)).
+- A reference table for each pattern, encoding, bit depth and display size: R'G'B' codes and the Y'Cb'Cr' codes that the scope must show.
 
 ```mermaid
 graph LR
     QML[qml/main.qml<br/>launcher UI] -->|showPattern, referenceTable, catalogue| L[launcher.rs<br/>cxx-qt QObject]
     L -->|render, reference_table| C[nitpick-core<br/>generators → PatternModel]
-    L -->|hdr10_bytes, scrgb_bytes, light_level| O[nitpick-core<br/>output, metadata]
-    L -->|screen size, window, pixels, metadata| D[display.rs<br/>cxx bridge]
-    D --> W[pattern_window.cpp<br/>QWindow + QRhi swap chain]
-    W -->|HDR10 or FP16 scRGB| GPU[GPU output] --> Scope[vectorscope]
+    L -->|light_level| M[nitpick-core<br/>metadata]
+    L -->|displays, query, open, present| D[OutputDriver<br/>QRhi or browser]
+    D -->|HDR10, FP16 scRGB or PQ PNG| Out[display] --> Scope[vectorscope or probe]
 ```
 
-The pattern window closes on Esc, Q, Space or a double click.
+The QRhi pattern window closes on Esc, Q, Space or a double click.
 
 ## Pattern model
 
@@ -132,13 +133,13 @@ Each pattern window has a new swap chain without metadata, so "off" needs no cal
 | Adapter (Windows) | default adapter; adapter of the monitor | adapter of the monitor | Prevents a cross-adapter copy on hybrid-GPU systems. QRhi gets the adapter LUID. |
 | HDR metadata | none; optional HDR10 static metadata | optional, off by default | The metadata changes the display tone mapping, not the signal. The scope measures the signal. The option is for display tests. |
 | Metadata on Linux | Qt private API; none | Qt private API | QRhi exposes no `VkSwapchainKHR`. Cost: the binary must use the exact Qt version of its private headers. |
-| Pattern size | native screen size; swap chain size | swap chain size | A different size needs scaling by the compositor, which changes code values. |
+| Pattern size | native screen size; surface size of the driver | surface size (QRhi: swap chain size; browser: viewport in display pixels) | A different size needs scaling by the compositor or the browser, which changes code values. |
 | BT.2111 sizes | 2K model scaled; one model per size class | one model per size class | The 12-bit ramp of Tables 5 and 6 differs between 2K, 4K and 8K. |
 | Labels | Qt text (anti-aliased); 1-bit bitmap font | bitmap font | Anti-aliasing adds intermediate levels to the scope trace. |
 
 ## Testing
 
-Settings before a measurement:
+Settings before a measurement with the QRhi driver (for the browser driver, see [Testing](browser_output.md#testing)):
 1. Turn on HDR in the system display settings for the test display.
 2. In the GPU control panel, set the output colour depth to 10 bpc or more (12 bpc for 12-bit). With 8 bpc, the driver dithers and the codes are not exact. On Windows the launcher shows the wire bit depth after "Show pattern".
 3. Select the output format:
