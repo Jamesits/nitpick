@@ -65,6 +65,7 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 | Capture interface | Windows-only scripts; common result with OS adapters | Common result. Each adapter must report its format and colour contract. |
 | Error limit | exact bytes everywhere; perceptual error everywhere | Exact transport checks plus numeric and perceptual checks at later boundaries. |
 | Profile handling | custom ICC/MHC2 parser; Little CMS through `lcms2` | Little CMS for profile reading, MHC2 extraction and conventional ICC transforms. Use the library's existing profile support. |
+| Device operations | native queries and setters in each output driver; separate device interface | [`DisplayDeviceControl`](../display_device.md) with native implementations in `nitpick-display`. Hosts and tests share capability enumeration, profile assignment, readback and restoration. |
 | Display model | ICC transform alone; explicit HDR model with library support | Explicit HDR model. Nitpick controls units, stage order, transfer functions and clipping; see [Colour library boundary](#colour-library-boundary). |
 | IDD dependency | required for unit tests; optional lab tool | Optional lab tool. Signing and HDR hardware must not block normal CI. |
 | Browser automation | screenshots as an HDR reference; protocol tests and qualified OS capture | Protocol tests on all hosts; HDR checks only on a qualified engine and OS. |
@@ -87,7 +88,7 @@ Profile fixtures also store the known matrix, LUT and luminance values in their 
 | Mixed channels | Bright saturated patches with a small nonzero channel; include all BT.2111 levels and the FP16 levels marked `*` |
 | Geometry | Asymmetric corner colours, one-pixel lines, checkerboard, odd widths and a border marker; find flips, scaling, crop and row-pitch errors |
 | State | Two different frames with unique markers; metadata on/off/changed; close, disconnect, resize and device loss |
-| Profiles | Identity, matrix-only, LUT-only and combined MHC2 transforms; malformed profiles; identical display metadata across transform comparisons |
+| Profiles | Conventional ICC profiles for native assignment tests; identity, matrix-only, LUT-only and combined MHC2 transforms for Windows calibration; malformed profiles; identical display metadata across transform comparisons |
 
 Specify coloured luminance without ambiguity. For a P3-D65 primary at measured luminance $Y$, form its XYZ value from chromaticity $(x,y)$:
 
@@ -102,6 +103,8 @@ Convert XYZ to BT.2020 linear RGB, then encode the requested input codes. A red 
 Add a test-only control interface over standard input and output, with one JSON object per line. This avoids a Windows named-pipe dependency. A QRhi test host runs the real adapter on the Qt GUI thread. The browser host uses the planned command-line host without Qt. Both share fixture IDs and event formats.
 
 Proposed requests are `query`, `open`, `show`, `capture` and `close`. `show` selects a fixture and supplies a monotonically increasing frame ID. Events include `submitted`, `ready`, `captured`, `error` and a surface-generation change. These names describe a proposed test protocol, not existing CLI flags.
+
+For device tests, add device enumeration and query, profile preparation, assignment and restoration through `DisplayDeviceControl`. Keep these separate from output requests. Save the prepared recovery record before assignment. A profile change invalidates the current measurement and capture generation under [the device lifecycle](../display_device.md#identity-and-execution).
 
 Keep capture outside `OutputDriver`. A capture adapter returns raw planes plus a descriptor: width, height, row pitch, plane layout, channel order, bit depth, alpha, transfer, primaries, white point, range, luminance scale, timestamps and source identity. Preserve raw API metadata too. Unknown fields stay unknown. FP16 storage alone does not establish scRGB or 80 cd/m².
 
@@ -234,6 +237,8 @@ Use the Rust `lcms2` binding for profile handling. Its [MHC2 tag API](https://do
 
 Implement the profile adapter and display model as test support without GUI or Windows dependencies. The adapter owns the native library dependency. It returns owned Rust matrix, curve and metadata values; library handles and borrowed tag storage stay inside the adapter. The HDR model consumes these values or an IDD state record. Its interface requires the source colour space, wire colour space and luminance scales.
 
+OS profile installation and association belong to [`nitpick-display`](../display_device.md#crate-boundary). The test runner uses `DisplayDeviceControl` for these operations. The Little CMS adapter does not change a display's active profile.
+
 A conventional ICC `Transform` does not apply the Windows MHC2 display contract automatically. Extract the calibration data and assemble the explicit model below. Keep conventional ICC rendering intent, D50 profile-connection-space adaptation and black-point compensation separate from this model.
 
 Little CMS accepts double-precision matrix coefficients, but its [floating-point pipeline](https://github.com/mm2/Little-CMS/blob/master/src/cmslut.c) stores values between stages as f32. **Precision limit:** an f64 matrix or pixel buffer does not make that pipeline an f64 reference. Any use of library stages must preserve the model's signed values, scale and interpolation rules within a stated error bound. Test it against the independent reference. Do not replace the reference with a library transform or an optimized LUT approximation.
@@ -286,7 +291,7 @@ For the callback model, apply the enabled scalar to all matrix elements, includi
 
 Replay synthetic callback sequences in unit tests. Cover disabled stages, non-unit scalar, nonzero affine terms, transform replacement and reset, and new/previous/default HDR metadata selection. Test an invalid previous-metadata reference before any metadata exists. These state tests need no installed driver.
 
-Install identity, matrix-only, LUT-only and combined profiles. Compare effective matrix action and sampled curves against the parsed profile, allowing the measured callback representation and LUT resampling. Do not require identical byte arrays. Hold display metadata and other colour controls fixed. Test HDR and SDR WCG separately; record the actual source and wire spaces instead of assuming either is scRGB or native panel RGB. An unexpected composed transform is a failed or unqualified case, not a reason to silently change the reference.
+Use `DisplayDeviceControl` to assign identity, matrix-only, LUT-only and combined profiles on the IDD device. Compare effective matrix action and sampled curves against the parsed profile, allowing the measured callback representation and LUT resampling. Do not require identical byte arrays. Hold display metadata and other colour controls fixed. Test HDR and SDR WCG separately; record the actual source and wire spaces instead of assuming either is scRGB or native panel RGB. An unexpected composed transform is a failed or unqualified case, not a reason to silently change the reference.
 
 A pass shows what Windows delivered to that IDD and what that IDD computed. It does not validate a physical GPU's display pipeline. The full callback path, profile loading and SDR WCG behaviour remain **unverified** until this experiment runs.
 
@@ -343,7 +348,7 @@ When the profile adapter is added, its build needs the native Little CMS engine 
 
 For physical QRhi setup, use [QRhi measurement settings](qt.md#testing). For iPad setup, use [Browser measurement settings](browser.md#testing). Record brightness, ambient-light controls, Night light/Night Shift/True Tone, accessibility filters, profile association, SDR white, output depth/range, display mode and background patch level. Hold them fixed. Use large interior patches for probes; record patch area and average picture level because local dimming and automatic brightness can change results.
 
-Before changing a profile or mode, save the active association and settings for that display. The runner must restore them on success, failure, timeout and cancellation, then verify restoration. Preserve a recovery record before the first change so a later run can recover after a crash. Do not remove a user's profiles; remove only test associations and profiles created by this run.
+Use the [device change lifecycle](../display_device.md#interface) for ICC assignment, readback and restoration. Preserve its prepared recovery record before the first mutation. Run native calls on the host's device worker, including recovery after a timeout or cancellation. Verify restoration before the run passes. Other display settings are recorded and held fixed; automatic mode and vendor-control setters are outside the current device scope.
 
 Set up driver signing manually on a dedicated test machine or a suitable VM. The test harness must not change boot security. If a test-signed driver needs `bcdedit /set testsigning on`, do this during runner provisioning and reboot before qualification. Check the platform's signing requirements there. A driver installation or OS update requires qualification again.
 

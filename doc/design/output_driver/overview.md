@@ -8,7 +8,9 @@ An output driver shows a rendered test pattern on one display. This design defin
 
 The compatibility API is one Rust trait, `OutputDriver`, in `nitpick-core` (module `driver`). It has no Qt, Tauri or network dependency. A host selects the driver, renders the pattern and controls measurement timing. The host can be the Qt launcher or a command-line program. Both use this trait for output. Driver setup, such as starting the browser server, is outside the trait. The drivers do not have the same features. The API reports each feature as supported, not supported or unknown, so that the host can reject options and the reference table can show the limits.
 
-**Not implemented:** the common trait, browser driver and command-line host. The existing core library has no Qt dependency. The only current executable, `nitpick-app`, needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
+Native display enumeration, capability queries and ICC profile assignment use the separate [`DisplayDeviceControl` trait](../display_device.md) in `nitpick-core::device`. The `nitpick-display` crate implements native device operations on Windows, macOS and Linux. QRhi combines device reports with its output-path limits. Hosts coordinate device changes with presentation; `OutputDriver` does not change OS profile associations.
+
+**Not implemented:** the common output and device traits, native device crate, browser driver and command-line host. The existing core library has no Qt dependency. The only current executable, `nitpick-app`, needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
 
 ```mermaid
 graph LR
@@ -29,10 +31,11 @@ graph LR
 
 | Crate | Role | Dependencies at this boundary |
 |---|---|---|
-| `nitpick-core` | patterns, reference values, pixel calculations, driver types | Rust data and arithmetic; no GUI, server or executor |
+| `nitpick-core` | patterns, reference values, pixel calculations, output and device traits | Rust data and arithmetic; no GUI, server or executor |
+| `nitpick-display` (planned) | native device and capability enumeration, ICC assignment and restoration | `nitpick-core`, native OS bindings; no Qt, Tauri or Little CMS |
 | `nitpick-browser` (planned) | browser driver, PNG encoder, HTTP and WebSocket service | `nitpick-core`, Rust server and image libraries; no Qt or Tauri |
-| `nitpick-cli` (planned) | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, a Rust executor; no `nitpick-app` |
-| `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, Qt and its C++ bridge |
+| `nitpick-cli` (planned) | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, a Rust executor; optional `nitpick-display`; no `nitpick-app` |
+| `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, `nitpick-display`, Qt and its C++ bridge |
 | `nitpick-webview` (planned) | optional local display process | Tauri; connects to the server by URL |
 
 Dependencies go from each host or driver to the core. The core must not import a driver or host. Its current `output` module does pixel calculations without Qt or a GPU. Each host selects its concrete driver. The command-line host does not build or register QRhi. Build it by package; a workspace build also selects the Qt application.
@@ -154,6 +157,7 @@ pub trait OutputDriver {
 ```
 
 Rules:
+- Physical device support is read through `DisplayDeviceControl`. The output capabilities describe the selected transport and conversion, not a second native enumeration API. Browser reports remain specific to its client.
 - `open` rejects a depth whose `available` is `No`. `present` rejects an encoding whose `input` is `No`, or metadata whose `hdr_metadata` is `No`. `FromFrame` also requires `auto_light_level` other than `No`.
 - `interpretation = No` does not reject the frame. The host accepts the encoding and shows the reason in the status and reference table. This permits QRhi scope use with HLG codes and PQ signalling.
 - `exact = No` and `pixel_exact = No` also produce warnings. They do not disable approximate output. For any selected feature with `Unknown`, continue with a warning.
@@ -196,14 +200,14 @@ Before a measurement, set the delay for the display and probe, show the pattern,
 | `hlg-narrow` | `input = Yes`, `interpretation = No`; scope use only | full-range HLG PNG; narrow input is rescaled; interpretation: `Unknown` |
 | Automatic light levels | full-range PQ interpretation of all input encodings | PQ after PNG sample conversion; HLG: `No` |
 | HDR10 metadata | Windows, Linux, macOS (see [HDR10 static metadata](qt.md#hdr10-static-metadata)) | embedded in the PNG (`mDCV`, `cLLI`); effect `Unknown` |
-| `hdr_on` | Windows: DXGI output colour space | CSS `(dynamic-range: high)` |
-| `gamut` | Windows: DXGI output primaries | CSS `(color-gamut: …)` |
-| `wire_depth` | Windows: DXGI `BitsPerColor` | `None` |
-| `peak_nits`, `min_nits` | Windows: DXGI (EDID) | `None` |
-| `sdr_white_nits` | `None` | `None` |
+| `hdr_on` | device report; Windows: DXGI output colour space | CSS `(dynamic-range: high)` |
+| `gamut` | device report; Windows: DXGI output primaries | CSS `(color-gamut: …)` |
+| `wire_depth` | device report; Windows: DXGI `BitsPerColor` | `None` |
+| `peak_nits`, `min_nits` | device report; Windows: DXGI (EDID) | `None` |
+| `sdr_white_nits` | device report where readable; otherwise `None` | `None` |
 | `pixel_exact` | `Yes` (swap chain size = pattern size) | `Yes` only for an integer `pixel_ratio` and a layout that fills the viewport |
 
-Linux and macOS QRhi give `None` for the mode settings that the table gives for Windows only.
+All native fields come through `DisplayDeviceControl`. Linux and macOS fields remain `None` where the selected backend cannot read them. Native capability reports do not establish code preservation or enable an FP16 path with an unknown luminance scale.
 
 ## Technical decisions
 

@@ -9,22 +9,25 @@ graph LR
     L[launcher.rs] -->|OutputDriver| Q[QrhiDriver<br/>display.rs]
     Q -->|hdr10_bytes, scrgb_bytes| O[nitpick-core<br/>output]
     Q -->|screen size, window, pixels, metadata| D[display.rs<br/>cxx bridge]
+    Q -->|device identity, capabilities, mode| N[nitpick-display<br/>DisplayDeviceControl]
     D --> W[pattern_window.cpp<br/>QWindow + QRhi swap chain]
     W -->|HDR10 or FP16 scRGB| GPU[GPU output] --> Scope[vectorscope]
 ```
 
 Mapping to `OutputDriver`:
 
-| Trait call | Bridge (`display.rs`) |
+| Trait call | Adapter (`display.rs`) |
 |---|---|
-| `displays` | `QGuiApplication::screens()`, size from `screenPixelWidth`, `screenPixelHeight` |
-| `query` | output description and path support (Windows: DXGI `BitsPerColor`, colour space, EDID luminance); reject an FP16 path without a known luminance scale |
+| `displays` | Map Qt screens to native devices from `DisplayDeviceControl`; get window pixel geometry from Qt |
+| `query` | Combine the refreshed native device report with QRhi path support and conversion limits; reject an FP16 path without a known luminance scale |
 | `open` | `openPatternWindow(screen, fp16)`; `fp16` from the bit depth (see [Swap chain output](#swap-chain-output)) |
 | `present` | `presentPattern(pixels, width, height, metadata)`; wait for successful submission of this frame |
 
 The pattern window closes on Esc, Q, Space or a double click.
 
 Only this adapter requires the Qt GUI thread and event loop. It stays in `nitpick-app`; the core and browser driver do not import it. See [Host and dependency boundary](overview.md#host-and-dependency-boundary) for command-line use without Qt.
+
+Physical display discovery and capability queries use [`nitpick-display`](../display_device.md). The C++ bridge keeps window, swap-chain and submission work. It does not maintain a second native capability enumerator. The host refreshes the device report before calling synchronous `query` and `open`; a changed or missing device invalidates the cached mapping.
 
 The bridge queues the frame and returns to the Qt event loop. It reports the frame ID after its texture upload and a successful `endFrame`. This callback resolves the `present` future. `requestUpdate()` alone is not an acknowledgement. The bridge does not run a nested event loop. An unrecoverable error or a 10 s timeout from queueing the frame fails the future. Closing the window reports `Disconnected`. Cancellation removes the pending completion callback; late results are discarded by frame ID. This does not confirm physical scanout. The launcher then applies the [measurement delay](overview.md#measurement-delay).
 
