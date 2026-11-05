@@ -2,20 +2,20 @@
 
 ## Overview
 
-The browser driver shows test patterns in a web page. It implements `OutputDriver` (see [overview.md](overview.md)).
+The browser driver shows test patterns in a web page. It implements `OutputDriver` (see [overview.md](overview.md)). Its host can be the Qt launcher or a command-line program. Neither the driver nor its server needs Qt or Tauri.
 
 Use:
 - Real use: a remote display without a video input, for example an iPad with Safari. The measurement is of the display light with a probe. There is no wire to measure with a scope.
-- Tests: a local Tauri webview window (`nitpick-webview`) on a desktop screen.
+- Tests: a local browser, or an optional Tauri webview window (`nitpick-webview`) on a desktop screen.
 
 Scope:
-- An HTTP and WebSocket server in the launcher process (crate `nitpick-browser`).
-- A static web client (HTML and JavaScript, no framework), embedded in the server binary.
-- A Tauri shell (crate `nitpick-webview`) that opens the client URL full screen on one local monitor.
+- An HTTP and WebSocket server in the host process (crate `nitpick-browser`). It owns a Tokio thread and exposes the Rust service handle defined in [Host and dependency boundary](overview.md#host-and-dependency-boundary).
+- A static web client (HTML and JavaScript, no framework), embedded in the server crate.
+- An optional Tauri shell (crate `nitpick-webview`) that opens the client URL full screen on one local monitor. It is a separate build and process.
 
 ```mermaid
 sequenceDiagram
-    participant L as launcher
+    participant L as host (Qt or command line)
     participant S as nitpick-browser<br/>(tokio thread)
     participant C as web client
     participant U as user
@@ -26,12 +26,12 @@ sequenceDiagram
     U->>C: enter code
     C->>S: auth {code}
     S->>C: authenticated {token}
+    U->>C: select Full screen, if needed
     C->>S: hello {client, screen, viewport, pixelRatio, media queries}
+    S-->>L: client-state event
     L->>S: displays(), query()
     L->>S: open(display, depth)
-    S->>C: prepare
-    C->>S: viewport {size, pixelRatio, scale}
-    S-->>L: Surface (viewport size in display pixels)
+    S-->>L: Surface from cached viewport (display pixels)
     L->>S: present(frame)
     S->>C: show {frame id}
     C->>S: GET /api/v1/frame/<id>.png, Authorization: Bearer <token>
@@ -40,7 +40,11 @@ sequenceDiagram
     L->>L: measurement delay, then ready
 ```
 
-After authentication, the client sends `hello`. It sends `hello` again on each change of the media queries, the viewport or the pixel ratio. The server keeps the last state of the single authenticated client. `query` reads this state. A client that closes its WebSocket is removed from `displays`.
+After authentication, the client sends `hello`. It sends `hello` again on each change of the media queries, the viewport, full-screen state or the pixel ratio. The server keeps the last state of the single authenticated client. Only a client with a valid `hello` appears in `displays`. `query` reads this state. A client that closes its WebSocket is removed from `displays`.
+
+`open` checks the selected depth and takes a snapshot of the current viewport. It does not send a command or wait for the client. With no valid client state it returns `Disconnected`. A viewport or pixel-ratio change invalidates an open surface. The service notifies the host, which cancels presentation and measurement timing, then opens and renders again. `present` also checks that its surface is still valid and reports `Platform` with a viewport-change reason if it is stale.
+
+The page enters full screen from its "Full screen" button. A WebSocket message cannot supply the [user activation required by the Fullscreen API](https://fullscreen.spec.whatwg.org/#dom-element-requestfullscreen). Until full screen is active, the surface covers only the reported viewport and the host shows a warning. The client reports the new viewport after the change. A command-line host selects a client by `DisplayId`; it does not enumerate local monitors.
 
 ## Graphics path
 
@@ -107,7 +111,6 @@ WebSocket messages:
 | client → server | `auth` | `code` (string) |
 | server → client | `authenticated` | `token` (random bearer token for this session) |
 | client → server | `hello` | `client` (user agent, `webview` flag), `screen` (`width`, `height` in CSS px), `viewport` (`width`, `height`, `scale`), `pixelRatio`, `dynamicRange` (`high`/`standard`), `colorGamut` (`rec2020`/`p3`/`srgb`), `fullscreen` |
-| server → client | `prepare` | – (the client enters full screen if possible and sends `hello`) |
 | server → client | `show` | `id`, `width`, `height` |
 | client → server | `applied` | `id`, `naturalWidth`, `naturalHeight`, `layoutWidth`, `layoutHeight` (display px) |
 | client → server | `error` | `id`, `message` (for example decode failure) |
@@ -132,7 +135,7 @@ The client keeps the bearer token in memory. Every image asset request must incl
 
 The client uses `fetch` with the authorization header to load the PNG. It checks the response status, reads the body as a `Blob`, and sets the `<img>` source to an object URL for that blob. It releases each object URL when the image is replaced or discarded. The image bytes and colour metadata stay unchanged.
 
-The client sends `applied` after `HTMLImageElement.decode()`, the DOM change and two `requestAnimationFrame` callbacks. This acknowledges client processing, not physical presentation. The `present` future awaits `applied` with the current frame ID without blocking the Qt thread. The 10 s acknowledgement timeout starts when `show` is sent. A missing acknowledgement gives `Timeout`; a closed client gives `Disconnected`. Dropping the future removes the pending reply registration. Late acknowledgements for older frames do not complete a new request. The launcher then applies the [measurement delay](overview.md#measurement-delay).
+The client sends `applied` after `HTMLImageElement.decode()`, the DOM change and two `requestAnimationFrame` callbacks. This acknowledges client processing, not physical presentation. The `present` future awaits `applied` with the current frame ID and yields to the host executor. The 10 s acknowledgement timeout starts when `show` is sent. A missing acknowledgement gives `Timeout`; a closed client gives `Disconnected`. Dropping the future removes the pending reply registration. Late acknowledgements for older frames do not complete a new request. The host then applies the [measurement delay](overview.md#measurement-delay).
 
 The client keeps the latest requested frame ID. After decode, it checks this ID before changing the DOM or sending `applied`. A newer `show` or `close` invalidates the old request, so a slow decode cannot replace a newer pattern or the black close page.
 
@@ -150,30 +153,33 @@ The client keeps the latest requested frame ID. After decode, it checks this ID 
 | Graphics path | Canvas 2D; WebGL; WebGPU `extended`; HDR `<img>` | HDR `<img>` | See [Graphics path](#graphics-path). |
 | Narrow input | narrow-range cICP; rescale to full range; relabel unchanged codes | rescale to full range, keep the transfer function | Skia ignores narrow-range cICP. Rescaling preserves nominal light levels; clipping is an explicit limit. |
 | Render location | server (`nitpick-core`, PNG); client (`nitpick-core` as WASM) | server | One renderer for the pattern, the reference table and the light level. A 4K pattern PNG is small, because the patterns have large flat regions. |
-| Server | `axum` + `tokio` on a separate thread; `tiny_http` + `tungstenite` | `axum` + `tokio` | HTTP and WebSocket in one library. The Qt main thread does not run the server. |
-| Presentation | block on the server reply; await a reply by frame ID | await the reply | The GUI stays active during image encoding, transfer and client processing. See [Asynchronous presentation](overview.md#asynchronous-presentation). |
+| Server | `axum` + `tokio` on a separate thread; `tiny_http` + `tungstenite` | `axum` + `tokio` | HTTP and WebSocket in one library. The server runtime is independent of the host event loop. |
+| Surface setup | wait for a remote reply in `open`; use cached client state | cached client state | Keeps `open` synchronous. Authentication and full-screen user actions occur before the call. |
+| Presentation | block on the server reply; await a reply by frame ID | await the reply | The host stays active during image encoding, transfer and client processing. See [Asynchronous presentation](overview.md#asynchronous-presentation). |
 | PNG encoder | `png` crate; own encoder | `png` crate | Writes 16-bit RGB. **Unverified:** it writes `cICP`, `mDCV` and `cLLI`. If not, the driver writes them with `Writer::write_chunk`. |
-| Local test window | system browser; Tauri; `wry` direct | Tauri (`nitpick-webview`), separate process | A fixed engine (WebView2 on Windows), a borderless full-screen window on a selected monitor, browser arguments. Counter-intuitive: a separate process, because Tauri and Qt both need the main thread for their event loop. |
-| Monitor selection (Tauri) | monitor index; screen position | screen position | Qt and Tauri do not use the same monitor order. The launcher gives the centre of the Qt screen geometry. The shell selects the monitor that contains it. |
+| Local test window | system browser; Tauri; `wry` direct | system browser for basic use; optional Tauri process for controlled tests | Tauri gives a fixed engine (WebView2 on Windows), monitor selection and browser arguments. A separate process keeps its event loop independent of the host. |
+| Monitor selection (Tauri) | monitor index; screen position | screen position | The shell accepts a position and selects the monitor that contains it. The Qt launcher derives the position from its screen list; a command-line caller can supply it. The server does not use Qt screen geometry. |
 | Access | open; token in the URL; WebSocket authentication and bearer token | fixed API paths and [session authentication](#authentication), server bound to localhost by default | The server code controls display access. The bearer token controls image access without a secret in the URL. A LAN address only when the user turns on remote displays. |
 | Sessions | multiple clients; one client | one session, including authentication | One client controls the display state. A second connection cannot replace it. |
 | Full screen | Fullscreen API; Home Screen web app | Fullscreen API with a "Full screen" button | The API needs a user gesture. The client shows the button until `fullscreen` is true. |
 
 ## Usage
 
-Local test:
+Qt launcher, local webview test:
 1. In the launcher, select the driver "Browser (local webview)" and a screen.
 2. "Show pattern" starts `nitpick-webview --url <url> --at <x>,<y>` if no session exists.
 3. Enter the code shown by the launcher in the webview. After authentication, the launcher waits 10 s for `hello`.
 
-Remote display (iPad):
+Qt launcher, remote display (iPad):
 1. In the launcher, turn on remote displays. The launcher shows the URL with the LAN address.
 2. Open the URL in Safari on the iPad. Enter the code shown by the launcher. After authentication, tap "Full screen".
 3. Select the iPad in the display list. Then select the pattern and "Show pattern".
 
-For headless use or automated tests, configure the server and client with the same fixed string. See [Authentication](#authentication). Close the current client before connecting a different client or selecting a different screen.
+Command-line host (planned): follow [Host and dependency boundary](overview.md#host-and-dependency-boundary). The host supplies bind address, port, pattern, format and measurement-delay options, and prints status events. Bind to loopback for a local browser, or an explicit LAN address for a remote browser. Qt, Tauri and a local screen are not required. The command name and flags are not implemented yet.
 
-For both paths, use the [measurement delay](overview.md#measurement-delay) before taking a reading.
+Headless use can use the random code printed in the console. Automated tests can configure the server and client with the same fixed string. See [Authentication](#authentication). Close the current client before connecting a different client or selecting a different screen.
+
+For all paths, use the [measurement delay](overview.md#measurement-delay) before taking a reading.
 
 ## Testing
 
@@ -188,6 +194,8 @@ Tests:
 - Unit: image requests on the fixed API path. The session token permits access. Missing and wrong tokens give `401`. Closing the WebSocket revokes the token. A new session gets a new token and rejects the old one.
 - Unit: simultaneous WebSocket connections. Only one connection reserves the slot. Other connections get `409` while authentication is pending and while the session is active. Failed authentication, timeout and disconnect release the slot.
 - Unit: the server with an authenticated mock WebSocket client: `hello` updates `query`; `present` without `applied` returns `Timeout`; a closed client gives `Disconnected`; an old frame ID cannot complete a new call.
+- Unit: `open` uses cached `hello` state and does not wait for a network reply. A viewport change invalidates the surface and cancels readiness. Disconnect events reach the host during presentation and during the measurement delay.
+- Integration: run the [test without Qt or Tauri](overview.md#testing) with a command-line host and a mock client. Repeat page decode and acknowledgement in a normal browser without the Tauri shell.
 - Client: fetch the PNG with the bearer header and show it through a blob URL. Check decode, `applied`, and object URL cleanup. A newer `show` or `close` during a fetch or decode must discard the old image.
 - Pixel mapping: with $r = 1$ and $r = 2$, the client reports a layout size equal to the image size. A screenshot of the Tauri window (SDR, `pq-grayscale` ramp) shows each ramp step at its pixel column.
 - HDR: show `pq-grayscale` with both PQ encodings on a Windows HDR display in Tauri and on an iPad Pro in Safari. After the measurement delay, measure the 100, 203 and 1000 cd/m² patches with a probe. Done when the error of each patch below the display peak is within the probe uncertainty. Record the delay, result and tone mapping above the peak here. For HLG, compare the bars with a known HLG reference on the same display and record its viewing settings; do not use PQ luminance targets.

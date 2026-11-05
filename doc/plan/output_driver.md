@@ -1,6 +1,6 @@
-# Plan: output driver corrections
+# Plan: output drivers
 
-These changes apply to existing code. The interfaces and behaviour are in [the output driver design](../design/output_driver/overview.md). Complete these changes before the device checks in [the measurement plan](test_patterns.md).
+These changes add the common driver API, correct the QRhi path and add browser output. The interfaces and behaviour are in [the output driver design](../design/output_driver/overview.md). Complete the changes for each path before its device checks in [the measurement plan](test_patterns.md).
 
 ### 1. Restrict FP16 output to a known luminance scale
 
@@ -43,3 +43,18 @@ TODO:
 - Add the saved measurement-delay control and the statuses defined in [Measurement delay](../design/output_driver/overview.md#measurement-delay). Start its Qt timer only after the presentation future succeeds. Preserve driver warnings in the ready status.
 - Test with a controlled clock: readiness follows acknowledgement plus the configured delay; zero adds no wait; invalid negative input is rejected; failed presentation starts no delay; cancellation prevents stale readiness. Verify that the setting survives a launcher restart.
 - Run formatting, Clippy and the relevant nextest tests after these code changes. Add Rust tests in separate `_tests.rs` files.
+
+### 6. Add the browser driver without a GUI dependency
+
+TODO:
+- Add `nitpick-browser` with the server, PNG conversion and client in [the browser design](../design/output_driver/browser.md). Keep Qt, Tauri and `nitpick-app` out of its dependency graph. Verify its build by package without Qt tools or libraries.
+- Add the service handle for URL, pairing-code events, client-state events and shutdown. Run the server and its acknowledgement timeouts on its own Tokio thread. Verify that a Rust executor receives results without Qt callbacks, including disconnects during the measurement delay.
+- Implement authentication and cached client state before synchronous `open`. Invalidate the surface on viewport changes. Run the protocol, PNG, metadata, cancellation and client tests in the design. Verify that a normal browser can connect without the Tauri shell.
+
+### 7. Add and verify the command-line host
+
+TODO:
+- Add `nitpick-cli` with dependencies on the core and browser driver. Supply server, pattern, format and delay options, status output and shutdown. Use the host lifecycle in [the design](../design/output_driver/overview.md#host-and-dependency-boundary). Keep the server alive after readiness until replacement or exit.
+- Await the borrowed `PresentFuture` on a Rust executor without requiring `Send`. Process console input and service events during presentation and the delay. Verify cancellation on replacement, viewport change, disconnect and exit.
+- Run the integration test without Qt, Tauri or a window system: authenticate a mock client, render with the core, fetch and decode the PNG, acknowledge it, check readiness and shut down. Check the package dependency graph. Then check page decode and acknowledgement in a normal browser; keep HDR device measurements separate.
+- Document the implemented command and flags. Run formatting, Clippy and relevant nextest tests. Add Rust tests in separate `_tests.rs` files.
