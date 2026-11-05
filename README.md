@@ -1,6 +1,6 @@
 # Nitpick
 
-A opinionated color profiling, calibration and verification workstation.
+An opinionated color profiling, calibration and verification workstation.
 
 ## Building
 
