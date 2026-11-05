@@ -45,6 +45,7 @@ Requires: 1.
 TODO:
 
 - Add independent PQ, primary-matrix and 80 cd/m² vectors, including negative components. Extend the existing grey test with per-level BT.2111 results and fixed difficult cases for the deliberate ±2-neighbour search.
+- Check native D65 matrices with primary and white vectors. Keep ICC D50 adaptation, assumed monitor white and rounded EDID coordinates out of the scRGB reference calculation.
 - Verify the stored bits, tie behaviour, search bounds and residual code errors under [QRhi output](../design/output_driver/testing.md#qrhi-output). Do not use the production inverse or a total failure count as the sole expected result.
 
 ### 6. Report QRhi capabilities and reject unknown FP16 scales
@@ -55,6 +56,7 @@ TODO:
 
 - Add structured path and mode reports to `pattern_window.cpp` and `display.rs`. Apply the [feature matrix](../design/output_driver/overview.md#feature-matrix). Restrict the scale assumptions and comments in `output.rs` to the supported scRGB path.
 - Verify that macOS 12-bit output fails before conversion with the documented scale reason. Keep supported 10-bit HDR10 available. Test unsupported swap chains without an SDR fallback, Windows HDR-off reporting, and unknown mode fields on other platforms. Linux compositor scale remains unverified until capture and device qualification.
+- Test Windows SDR WCG separately from HDR. Generic Advanced Color enablement or an active GPU colour conversion must not alone set `hdr_on` to true. Unknown calibration or dithering state must not produce an exact-code claim.
 
 ### 7. Resolve and inspect QRhi metadata
 
@@ -314,6 +316,7 @@ Requires: 29.
 TODO:
 
 - Add saved display settings, profile associations and a durable recovery record before any test changes them. Follow [Usage and restoration](../design/output_driver/testing.md#usage-and-restoration). Remove only resources created by the run.
+- Include legacy gamma ramps, external calibration loaders, GPU gamut clamps and dithering in the recorded setup. Establish a baseline without competing transforms. Recheck it after HDR, topology or resume events, because background tools can reapply calibration. Record unreadable state as unknown; do not assume that an unsupported NVAPI call cleared it.
 - With an injected settings backend, verify restoration on success, failure, timeout and cancellation. Simulate a crash and recover on the next run. A restoration mismatch must fail the run. Test this before using profile or mode changes on a display.
 
 ### 35. Add Windows FP16 capture
@@ -358,6 +361,8 @@ Requires: 1.
 TODO:
 
 - Add complete display ICC fixtures for identity, matrix-only, LUT-only and combined calibration. Define matrix, curve and luminance expectations before serialization. Keep other display metadata equal across transform comparisons.
+- Store both intended values and expected signed 15.16 values after serialization. State the rounding rule and test positive and negative half steps. Add a red/green exchange whose XYZ matrix is derived from its intended RGB action in the native sRGB/D65 basis.
+- Give MHC2 minimum and peak display luminance, ICC `lumi` full-frame luminance and frame MaxCLL/MaxFALL distinct values in the manifests.
 - Add the malformed-input and curve-boundary cases in [MHC2 profile adapter](../design/output_driver/testing.md#mhc2-profile-adapter). Verify fixture manifests, hashes and reproducible bytes. Keep profile extraction checks separate from later Windows installation checks.
 
 ### 39. Add and qualify the Little CMS profile adapter
@@ -372,6 +377,7 @@ TODO:
 
 - Add the test-support adapter under [Colour library boundary](../design/output_driver/testing.md#colour-library-boundary). Use library tag access and return owned Rust data. Keep native handles, GUI dependencies and Windows APIs out of the model interface.
 - Verify extracted values against manifests, including identity fields, signed values, bounds failures and unsupported LUT counts. Missing or unreadable tags must not silently become identity. Qualify the exact native build; resolve valid-profile failures before enabling the case.
+- Test relocated tag data and internal offsets; do not assume a fixed file offset or contiguous matrix and LUT storage. Cover zero matrix offset, zero LUT count, two-entry identity curves and a nonzero ignored fourth matrix column. Compare decoded values to the serialized expectations from item 38.
 
 ### 40. Verify conventional ICC transforms separately
 
@@ -380,6 +386,7 @@ Requires: 39.
 TODO:
 
 - Add the adapter's conventional ICC transform tests with explicit formats, intent, adaptation and black-point compensation settings. Use independent identity, transfer-curve and primary-conversion expectations.
+- Use profiles with known white points and `chad` values to distinguish native XYZ from D50 PCS values. Verify that adaptation occurs only where requested. Keep any `vcgt` loading separate from ordinary ICC pixel conversion; do not apply calibration twice.
 - Verify numeric bounds and record all options and library versions. Keep these results separate from MHC2 model and Windows calibration results. Account for the library's f32 stage precision where stages are used.
 
 ### 41. Add the explicit HDR display model
@@ -389,7 +396,9 @@ Requires: 31, 39.
 TODO:
 
 - Implement [Model order and domain](../design/output_driver/testing.md#model-order-and-domain) as portable test support. Require source and wire spaces and luminance scales. Keep conventional ICC adaptation separate from MHC2 evaluation.
+- Apply the extracted MHC2 LUT directly after wire transfer encoding. Do not add an inverse ICC TRC or `vcgt` stage to a LUT that already contains that calibration. Keep NVAPI's SDR LUT construction and its 8-bit sample optimization out of this model.
 - Verify identity, XYZ gain, asymmetric matrices, channel LUTs and an order-sensitive combined case against independent vectors. Check knots, interpolation, clipping and quantization; retain pre-quantization floats. Report these as ideal model results, not GPU behaviour.
+- Use the RGB exchange fixture to detect a wrong matrix basis or transpose. Test sRGB and gamma 2.2 as distinct SDR transfers, including near-black values. Keep the runner's actual SDR transfer unverified until measured or established by its wire contract.
 
 ### 42. Qualify capture adapters and compare output
 
@@ -434,9 +443,14 @@ TODO:
 
 Requires: 34, 39, 41, 45.
 
+Open questions:
+
+- Does the selected runner load each new profile without stale calibration? MHC2 activation and legacy gamma-ramp loader settings are separate; qualify the actual transition on this runner.
+
 TODO:
 
 - Install the known profiles on the qualified runner. Test HDR and SDR WCG separately, holding other display metadata and controls fixed. Record actual source and wire spaces.
+- Check activation through the received transform generation and its effect. A successful profile association or a calibration-loader setting is not proof of activation. Do not use an NVAPI colour-conversion call as an MHC2 loading fallback. Test a missing or stale transform as a qualification failure.
 - Compare effective matrix action, sampled curves, raw surfaces and driver output under [Instrumented Windows IDD](../design/output_driver/testing.md#instrumented-windows-idd). Allow recorded callback representation and resampling; reject unexplained transforms. Verify restoration and retain evidence. A pass applies only to that IDD path.
 
 ### 47. Add cross-platform execution gates
@@ -456,4 +470,5 @@ TODO:
 
 - Run the pending QRhi checks in [the measurement plan](test_patterns.md). Add release measurements for browser output, including a remote display, using [Pass criteria](../design/output_driver/testing.md#pass-criteria) and [Usage and restoration](../design/output_driver/testing.md#usage-and-restoration).
 - Record wire samples and metadata where a cable exists, repeated probe readings, quantized references, uncertainty, display controls and delay. Check FP16 exceptions and above-peak tone mapping separately. A server capture cannot qualify a remote browser's light output.
+- Record actual wire depth and dithering state separately. Check repeated wire samples for temporal changes; one frame cannot establish code preservation. Keep gamma-ramp, GPU-clamp and MHC2 effects isolated under the baseline from item 34.
 - Store results at their measured boundary, verify restoration, and update only the claims supported by those results. Remove completed plan items without renumbering the remaining items.
