@@ -6,6 +6,16 @@
 //! 12-bit ramp row is not an exact multiple between these sizes (Tables 5
 //! and 6), so the model is built for one size class and
 //! [`PatternModel::render`] scales it to other sizes.
+//!
+//! Full range (Table 4, Figure 3) has no sub-black or super-white levels. The
+//! -7% step, the 109% step and the -2% PLUGE bar are replaced by the 0%
+//! step, the 100% step and 0 % black.
+//!
+//! the BT.2100 formula gives 2291 for 203 cd/m² narrow 12-bit, but Table 3
+//! has 2292 (4×573). The pattern uses the table.
+//!
+//! BT.2111 recommends to identify the signal format in the grey side bars.
+//! Nitpick keeps them plain 40% grey.
 
 use crate::pattern::model::{Fill, PatternModel, Rect, Region, Section};
 use crate::signal::{BitDepth, Encoding, Format, Rgb};

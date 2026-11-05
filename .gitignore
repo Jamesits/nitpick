@@ -130,6 +130,7 @@ ui_*.h
 *.qmlc
 *.jsc
 Makefile*
+!Makefile.toml
 *build-*
 *.qm
 *.prl
