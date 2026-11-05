@@ -69,6 +69,7 @@ fn hdr_capable_query(device: DeviceInfo) -> DeviceQuery {
             full_frame_nits: Report::known(400.0, SOURCE),
             sdr_white_nits: Report::known(80.0, SOURCE),
             native_size: Report::known((3840, 2160), SOURCE),
+            edr: Report::unknown("not macOS"),
         },
         topology_revision: 0,
     }

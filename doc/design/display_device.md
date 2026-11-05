@@ -4,7 +4,7 @@
 
 `DisplayDeviceControl` in `nitpick-core::device` enumerates local display devices, reads their capabilities and current state, and controls their OS settings. The first write operation is ICC profile assignment, including the state needed to restore the previous assignment. `nitpick-display` implements this trait for Windows, macOS and Linux. Both the Qt host and the command-line host can use it.
 
-**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows device and capability queries and the recovery-record format. macOS and Linux queries and all ICC assignment are not implemented; these backends return `Unsupported`. The remaining work is in [the output driver plan](../plan/output_driver.md).
+**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows and macOS device and capability queries and the recovery-record format. Linux queries and all ICC assignment are not implemented; they return `Unsupported`. The remaining work is in [the output driver plan](../plan/output_driver.md).
 
 The host coordinates three separate interfaces:
 
@@ -47,7 +47,7 @@ The following types are owned Rust data. Native values use `Report<T>`: a known 
 | `DeviceId` | Backend and native device identity. It is distinct from an output driver's `DisplayId`. |
 | `DeviceInfo` | Device ID, name and identity evidence used to detect replacement or ambiguous matches. |
 | `DeviceCapabilities` | Detected HDR, WCG, wire-depth and ICC-management support. Keep supported settings distinct from the active settings. Use `Yes`, `No` or `Unknown` with reasons; unknown lists are not empty supported lists. |
-| `DeviceMode` | Current HDR state, gamut, wire depth, luminance limits, SDR white and native pixel size where readable. Unknown values remain unknown. |
+| `DeviceMode` | Current HDR state, gamut, wire depth, luminance limits, SDR white, native pixel size and macOS EDR headroom where readable. Unknown values remain unknown. |
 | `DeviceQuery` | Capabilities, mode, identity/topology revision and the source of each native report. |
 | `ProfileTarget` | Device, native profile role and scope, including user and host scope where applicable. The backend lists the targets it can address. |
 | `ProfileState` | Observed associations and selected default or override. Distinguish no override, inherited state and an unreadable value. Include a state revision for change detection. |
@@ -129,6 +129,26 @@ The device key is the monitor device interface path from `DISPLAYCONFIG_TARGET_D
 
 **Unverified:** whether DXGI substitutes OS default luminance for an EDID without HDR static metadata, whether the legacy wide-colour bit is set only for SDR WCG, and the wire gamut of SDR WCG. A check on Windows 11 build 26200 with one HDR display read every field above, with HDR on at 8 bits per channel.
 
+### macOS reports
+
+The device key is the ColorSync display device UUID from `CGDisplayCreateUUIDFromDisplayID`. ColorSync profile assignment uses this UUID with the display device class. The `CGDirectDisplayID` changes after a reconnect; it only links the Core Graphics, ColorSync and `NSScreen` reports in one query. Without a UUID, the key is the display ID. The identity evidence is the vendor and model numbers, the EDID serial number and the built-in flag.
+
+| Field | Source | Rule |
+|---|---|---|
+| Name | `NSScreen.localizedName`; otherwise the ColorSync device description | |
+| `hdr`, `hdr_on` | none | Unknown. EDR headroom does not establish HDR: macOS can give headroom on an SDR panel at reduced brightness. |
+| `sdr_wcg` support | `NSScreen.canRepresentDisplayGamut(P3)` | |
+| `gamut` | none | Unknown. macOS converts to the display profile and does not report the signal gamut. |
+| `wire_depths`, `wire_depth` | none | Unknown. |
+| Luminance, `sdr_white_nits` | none | Unknown. EDR headroom does not fill these fields. |
+| `native_size` | Pixel size of the mode with `kDisplayModeNativeFlag`, from `CGDisplayCopyAllDisplayModes` with the duplicate low-resolution modes | Not the current mode: a scaled mode has a framebuffer of another size. No flagged mode or more than one flagged size is unknown. |
+| `edr` | Current, potential and reference EDR component values of the `NSScreen` | A ratio to SDR white = 1.0, not a luminance. A value below 1 or not finite is unknown. A reference value of 0 means no reference preset. |
+| `icc_profiles` | `ColorSyncDeviceCopyDeviceInfo` | No if ColorSync has no device for the UUID; otherwise unknown until assignment exists. |
+
+Core Graphics and ColorSync calls run on the calling worker. `NSScreen` is main-thread only. A call on another thread goes to the main dispatch queue and waits at most 2 s. The main queue runs only when the main thread runs a run loop, as in the Qt host. Without it, or after `dispatch_main`, the name falls back and the `NSScreen` fields are unknown with the reason. The other fields remain.
+
+**Unverified:** that the UUID survives a restart, whether two identical monitors without EDID serial numbers get the same UUID (the backend then reports an ambiguous identity), whether every panel flags its native mode, whether the P3 report follows the panel or the assigned profile, and whether `NSScreen` updates after a topology change in a process without `NSApplication`. A check on macOS 27.0.1 with a MacBook Pro (M1 Max) built-in XDR display read every field above. It reported P3 support, native size 3024 × 1964, EDR headroom 1.2 current and 16 potential, no reference preset, and ColorSync default profile ID 1. No external display was checked.
+
 **Unverified:** these implementations and their restoration behaviour on the selected OS versions. Search existing Rust bindings before adding native declarations. Pin the chosen dependencies. Use only the bindings needed on the target OS.
 
 The crate must build on all three operating systems. Missing APIs, services, roles or permissions return explicit errors or unknown capability fields. Linux without a usable colord display mapping has no profile setter in this design; display enumeration can still work. A successful colord assignment does not establish compositor application. A successful ColorSync assignment does not establish a Windows MHC2 path. Keep these limits separate from build support.
@@ -145,6 +165,8 @@ The crate must build on all three operating systems. Missing APIs, services, rol
 | Recovery | Save after assignment; prepare and save before assignment | Prepare first. A partial native failure or process crash must leave enough state to recover. |
 | Recovery-record format | Separate record types in `nitpick-display`; `serde` forms of the core types | `serde` behind a core feature: one definition of each type. The reader checks `version` before other fields, because another version can give a field another meaning. Profile bytes and hashes are hex text, and the stored hash must match the bytes. |
 | Native-call tests | Test only on each OS; inject native reports | Inject. The mapping compiles on every OS, and unknown or failed fields can be tested without a display. |
+| macOS EDR headroom | Put it in the luminance fields with an assumed SDR white; a separate ratio field | Separate `edr` field. The SDR white luminance changes with brightness and is not reported. An assumed scale would give false absolute values and enable the unsupported QRhi FP16 path. |
+| macOS `NSScreen` thread | Require the main thread; synchronous dispatch to the main queue; asynchronous dispatch with a bounded wait | Bounded wait. The trait runs on a worker. A synchronous dispatch blocks for ever in a host without a main run loop. A late block sends to a closed channel. |
 | Topology revision | std hasher; fixed hash | FNV-1a 64 over sorted identity fields. Recovery records store the value, so it must not change between builds or runs. |
 
 ## Usage

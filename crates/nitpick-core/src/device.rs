@@ -122,13 +122,32 @@ pub struct DeviceMode {
     pub gamut: Report<Gamut>,
     /// Bits per component on the wire.
     pub wire_depth: Report<u8>,
-    /// cd/m². macOS EDR headroom is a ratio and does not fill these fields.
+    /// cd/m². macOS EDR headroom is a ratio and does not fill these fields;
+    /// see [`Self::edr`].
     pub peak_nits: Report<f64>,
     pub min_nits: Report<f64>,
     pub full_frame_nits: Report<f64>,
     pub sdr_white_nits: Report<f64>,
     /// Native pixels.
     pub native_size: Report<(usize, usize)>,
+    /// macOS only.
+    pub edr: Report<EdrHeadroom>,
+}
+
+/// macOS extended dynamic range: the largest colour component value that
+/// the display can show, relative to SDR white at 1.0.
+///
+/// A ratio, not a luminance. The SDR white luminance changes with the
+/// brightness setting and is not reported, so these values give no
+/// absolute scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdrHeadroom {
+    /// Available now. Changes with brightness and other EDR content.
+    pub current: f64,
+    /// Available at the current settings when EDR content is shown.
+    pub potential: f64,
+    /// Headroom of a reference preset; `None` without a reference mode.
+    pub reference: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -6,15 +6,6 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 6. Implement macOS device and capability enumeration
-
-Requires: 4.
-
-TODO:
-
-- Enumerate native display identity and available mode and EDR reports. Resolve the identity needed by ColorSync without Qt. Record which fields can be read and respect native thread requirements.
-- Verify identity changes, partial reports and supported versus active state with injected calls. Compare readable fields on a selected Mac. EDR headroom must not become an assumed absolute luminance or enable the unsupported QRhi FP16 path.
-
 ### 7. Implement Linux device and capability enumeration
 
 Requires: 4.

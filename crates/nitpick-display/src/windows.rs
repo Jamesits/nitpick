@@ -384,6 +384,7 @@ fn mode(path: &PathReport, desc1: Result<&OutputDesc1, &str>, active: Active) ->
         full_frame_nits,
         sdr_white_nits,
         native_size,
+        edr: unknown("EDR headroom is a macOS report"),
     }
 }
 

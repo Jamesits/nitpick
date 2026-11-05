@@ -9,18 +9,21 @@
 use nitpick_core::device::DisplayDeviceControl;
 
 pub mod common;
+pub mod macos;
 pub mod recovery;
 pub mod windows;
 
 /// The backend for the target OS.
 ///
-/// macOS and Linux have no backend yet; on them, and on other targets,
-/// every call fails with [`nitpick_core::device::DeviceError::Unsupported`].
+/// Linux has no backend yet; on it, and on other targets, every call fails
+/// with [`nitpick_core::device::DeviceError::Unsupported`].
 #[must_use]
 pub fn native() -> Box<dyn DisplayDeviceControl + Send> {
     #[cfg(windows)]
     return Box::new(windows::WindowsDisplay::new());
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    return Box::new(macos::MacDisplay::new());
+    #[cfg(not(any(windows, target_os = "macos")))]
     return Box::new(common::Unavailable::new(format!(
         "no display backend for {}",
         std::env::consts::OS

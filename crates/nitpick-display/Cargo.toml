@@ -19,5 +19,41 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Gdi",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = "0.3.1"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSGraphics",
+    "NSScreen",
+    "objc2-core-foundation",
+] }
+objc2-color-sync = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "ColorSyncDevice",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "CFUUID",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGDirectDisplay",
+    "CGDisplayConfiguration",
+    "CGError",
+    "libc",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSString",
+    "NSValue",
+] }
+
 [lints]
 workspace = true
