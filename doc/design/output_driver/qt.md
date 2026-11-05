@@ -109,11 +109,7 @@ Settings before a measurement:
 4. Turn off Night light and other colour filters.
 5. Set the [measurement delay](overview.md#measurement-delay) and wait for readiness before each reading.
 
-Tests:
-- Unit and launcher: 12-bit output on macOS gives `available = No` and `Unsupported` from `open`; 10-bit still opens when supported. A forced 12-bit request also fails before pixel conversion.
-- Unit and launcher: HLG and narrow PQ remain selectable for scope use. Their interpretation warnings appear in the status and reference table.
-- Bridge: delay the render event and verify that `present` cannot succeed before this frame is submitted. Verify submission errors, timeout and closure. The launcher delay starts only after successful acknowledgement.
-- Scope: verify supported paths against the reference table within ±1 code, except the marked FP16 levels. Record the OS, GPU output mode, delay and deviations. See [the measurement plan](../../plan/test_patterns.md).
+Tests and pass criteria are in [Output verification](testing.md): [QRhi unit tests](testing.md#qrhi-output), [GPU readback](testing.md#qrhi-readback), and [physical output criteria](testing.md#pass-criteria). See [the measurement plan](../../plan/test_patterns.md) for pending device work.
 
 **Not done:** hardware verification of code preservation, metadata effects and the measurement delay.
 

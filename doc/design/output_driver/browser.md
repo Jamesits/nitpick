@@ -187,18 +187,7 @@ Settings before a measurement on an iPad:
 - Turn off True Tone, Night Shift and auto-brightness. Set the brightness to a fixed value; the EDR headroom changes with it.
 - iPad Pro with reference mode: turn it on for a known SDR white. **Unverified:** Safari keeps the PQ luminance in reference mode.
 
-Tests:
-- Unit: all input codes at both depths. Verify the cICP tuple and transfer function for each encoding. Decode the PNG and recover each nominal-range input code with the inverse rule. Check exact black and peak endpoints, clipping outside them, and the status and reference marks for clipped levels.
-- Unit: automatic PQ metadata uses decoded PNG samples, including clipping and 16-bit rounding. HLG with `FromFrame` gives `Unsupported`; explicit light levels stay unchanged before chunk quantization. Check PNG metadata field order, widths and units against the specification.
-- Unit: authentication with a mock WebSocket client. Check codes with leading zeros and the fixed-string option. Reject a wrong code, `hello` before authentication, and an authentication timeout. Check the failed-attempt limit. Only an authenticated client appears in `displays`.
-- Unit: image requests on the fixed API path. The session token permits access. Missing and wrong tokens give `401`. Closing the WebSocket revokes the token. A new session gets a new token and rejects the old one.
-- Unit: simultaneous WebSocket connections. Only one connection reserves the slot. Other connections get `409` while authentication is pending and while the session is active. Failed authentication, timeout and disconnect release the slot.
-- Unit: the server with an authenticated mock WebSocket client: `hello` updates `query`; `present` without `applied` returns `Timeout`; a closed client gives `Disconnected`; an old frame ID cannot complete a new call.
-- Unit: `open` uses cached `hello` state and does not wait for a network reply. A viewport change invalidates the surface and cancels readiness. Disconnect events reach the host during presentation and during the measurement delay.
-- Integration: run the [test without Qt or Tauri](overview.md#testing) with a command-line host and a mock client. Repeat page decode and acknowledgement in a normal browser without the Tauri shell.
-- Client: fetch the PNG with the bearer header and show it through a blob URL. Check decode, `applied`, and object URL cleanup. A newer `show` or `close` during a fetch or decode must discard the old image.
-- Pixel mapping: with $r = 1$ and $r = 2$, the client reports a layout size equal to the image size. A screenshot of the Tauri window (SDR, `pq-grayscale` ramp) shows each ramp step at its pixel column.
-- HDR: show `pq-grayscale` with both PQ encodings on a Windows HDR display in Tauri and on an iPad Pro in Safari. After the measurement delay, measure the 100, 203 and 1000 cd/m² patches with a probe. Done when the error of each patch below the display peak is within the probe uncertainty. Record the delay, result and tone mapping above the peak here. For HLG, compare the bars with a known HLG reference on the same display and record its viewing settings; do not use PQ luminance targets.
+Tests and pass criteria are in [Output verification](testing.md): [browser unit tests](testing.md#browser-output), [browser integration](testing.md#browser-integration), and [physical output criteria](testing.md#pass-criteria). Use a probe for the remote display; a capture on the server does not test it.
 
 **Not done:** all tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
 

@@ -1,6 +1,6 @@
 # Plan: output drivers
 
-These changes add the common driver API, correct the QRhi path and add browser output. The interfaces and behaviour are in [the output driver design](../design/output_driver/overview.md). Complete the changes for each path before its device checks in [the measurement plan](test_patterns.md).
+These changes add the common driver API, correct the QRhi path and add browser output. The interfaces and behaviour are in [the output driver design](../design/output_driver/overview.md). Use [Output verification](../design/output_driver/testing.md) for test boundaries and pass criteria. Complete the changes for each path before its device checks in [the measurement plan](test_patterns.md).
 
 ### 1. Restrict FP16 output to a known luminance scale
 

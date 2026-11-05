@@ -220,12 +220,7 @@ Linux and macOS QRhi give `None` for the mode settings that the table gives for 
 
 ## Testing
 
-- Without Qt or Tauri: build `nitpick-cli` by package, run its browser service, authenticate a mock client, render with the real core, fetch and decode the PNG, send `applied`, and check the delay and shutdown. Run this test on a machine without a window system. Check that its dependency graph has no Qt, Tauri or `nitpick-app` packages.
-- Run the same presentation and cancellation contract tests with a command-line executor and the Qt executor. Include service events during a pending presentation and after acknowledgement, while the delay is active.
-- Unit tests with a mock driver: reject `available = No` and `input = No`; keep `input = Yes` selectable when `interpretation = No`; show warnings for `No` interpretation or precision and for `Unknown`; map each `OutputError` to a status line.
-- Async tests: delayed acknowledgement leaves Qt timers and controls active. Dropping the future releases callbacks and permits a new request. Late results cannot complete that request. A closed surface or disconnected client returns `Disconnected`; missing acknowledgement returns `Timeout`.
-- Test the delay with a controlled clock: readiness follows acknowledgement plus the selected delay; zero adds no wait; errors start no timer; replacement, closure and disconnect cancel the old timer. Verify that Qt still processes events during the delay.
-- Each driver: `query` of a display with HDR off gives `hdr_on = Some(false)` (QRhi on Windows, browser) and the launcher shows it.
+The shared test design is in [Output verification](testing.md). It defines the [host contract](testing.md#shared-host-contract), [cross-platform run matrix](testing.md#run-matrix), and the limits of each capture boundary.
 
 ## Future enhancements
 
