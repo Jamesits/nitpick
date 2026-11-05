@@ -11,7 +11,7 @@ Open questions:
 TODO:
 - Set the GPU output to 10 bpc RGB full range. Show `bt2111` with `pq-narrow`. Compare each patch on the scope with the reference table. Done when every patch is within ±1 code.
 - Do the test again with YCbCr 4:4:4 narrow range and `pq-full`.
-- Write the results in `doc/design/test_patterns.md` (Testing) and remove the "Not done" statement.
+- Write the results in `doc/design/output_driver/qt.md` (Testing) and remove the "Not done" statement.
 
 ### 2. Verify the 12-bit output
 
@@ -20,7 +20,7 @@ Open questions:
 
 TODO:
 - Set the GPU output to 12 bpc RGB full range. Show `bt2111` and `pq-grayscale` with 12-bit. Compare with the 12-bit reference table. Done when every level without `*` is within ±1 code.
-- Write the results and the deviations of the `*` levels in `doc/design/test_patterns.md` (Swap chain output, Testing).
+- Write the results and the deviations of the `*` levels in `doc/design/output_driver/qt.md` (Swap chain output, Testing).
 
 ### 3. Verify the HDR10 metadata
 

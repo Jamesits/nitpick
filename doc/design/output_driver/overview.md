@@ -3,8 +3,8 @@
 ## Overview
 
 An output driver shows a rendered test pattern on one display. nitpick has two drivers:
-- **QRhi** (`qrhi`): a full-screen Qt window with an HDR swap chain on a local screen. See [Swap chain output](test_patterns.md#swap-chain-output) and [HDR10 static metadata](test_patterns.md#hdr10-static-metadata).
-- **Browser** (`browser`): a web page that shows the pattern as an HDR image. The page runs in a local Tauri webview (for tests) or in a remote browser, for example Safari on an iPad. See [browser_output.md](browser_output.md).
+- **QRhi** (`qrhi`): a full-screen Qt window with an HDR swap chain on a local screen. See [qt.md](qt.md).
+- **Browser** (`browser`): a web page that shows the pattern as an HDR image. The page runs in a local Tauri webview (for tests) or in a remote browser, for example Safari on an iPad. See [browser.md](browser.md).
 
 The compatibility API is one Rust trait, `OutputDriver`, in `nitpick-core` (module `driver`). It has no Qt, Tauri or network dependency. The launcher uses only this trait. The drivers do not have the same features. The API reports each feature as supported, not supported or unknown, so that the launcher can disable options and the reference table can show the limits.
 
@@ -110,7 +110,7 @@ Rules:
 | 12-bit | FP16 scRGB, not exact for `*` levels | 16-bit PNG, cICP; exact: `Unknown` |
 | `pq-narrow` / `pq-full` | written as full-range PQ codes | signalled as narrow or full range |
 | `hlg-narrow` | `No` on the display (interpreted as PQ); scope use only | signalled as HLG; `Unknown` |
-| HDR10 metadata | Windows, Linux, macOS (see [HDR10 static metadata](test_patterns.md#hdr10-static-metadata)) | embedded in the PNG (`mDCV`, `cLLI`); effect `Unknown` |
+| HDR10 metadata | Windows, Linux, macOS (see [HDR10 static metadata](qt.md#hdr10-static-metadata)) | embedded in the PNG (`mDCV`, `cLLI`); effect `Unknown` |
 | `hdr_on` | Windows: DXGI output colour space | CSS `(dynamic-range: high)` |
 | `gamut` | Windows: DXGI output primaries | CSS `(color-gamut: …)` |
 | `wire_depth` | Windows: DXGI `BitsPerColor` | `None` |

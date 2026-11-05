@@ -2,7 +2,7 @@
 
 ## Overview
 
-The browser driver shows test patterns in a web page. It implements `OutputDriver` (see [output_drivers.md](output_drivers.md)).
+The browser driver shows test patterns in a web page. It implements `OutputDriver` (see [overview.md](overview.md)).
 
 Use:
 - Real use: a remote display without a video input, for example an iPad with Safari. The measurement is of the display light with a probe. There is no wire to measure with a scope.
@@ -62,10 +62,10 @@ Code $D$ at bit depth $n$ to the 16-bit sample $V$:
 | narrow (`pq-narrow`) | 9, 16, 0, 0 | $D \cdot 2^{16-n}$ |
 | narrow (`hlg-narrow`) | 9, 18, 0, 0 | $D \cdot 2^{16-n}$ |
 
-In all rows, $V$ decodes back to $D$ at bit depth $n$. The full-range rule is the same normalisation $D / (2^n - 1)$ as the FP16 path (see [Swap chain output](test_patterns.md#swap-chain-output)).
+In all rows, $V$ decodes back to $D$ at bit depth $n$. The full-range rule is the same normalisation $D / (2^n - 1)$ as the FP16 path (see [Swap chain output](qt.md#swap-chain-output)).
 
 Deviations from the QRhi driver:
-- The browser driver signals the encoding of the pattern. QRhi always signals full-range PQ. Thus `pq-narrow` shows black at code 64 as black, and `hlg-narrow` shows as HLG.
+- The browser driver signals the encoding of the pattern. QRhi always signals full-range PQ (see [Signalling](qt.md#signalling)). Thus `pq-narrow` shows black at code 64 as black, and `hlg-narrow` shows as HLG.
 - **In question:** browser support of the narrow-range flag (full range = 0) in PNG `cICP`. If it is not supported, the driver writes all encodings as full-range PQ, as QRhi does. `query` gives `Unknown` for the narrow encodings until a test on each browser confirms it.
 
 HDR10 metadata: the driver writes the PNG `mDCV` (ST 2086) and `cLLI` (CTA-861.3) chunks. **Unverified:** a browser uses these chunks for tone mapping.
