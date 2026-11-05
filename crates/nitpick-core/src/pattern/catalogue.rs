@@ -4,9 +4,11 @@ use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
 use crate::image::Image;
+use crate::output::{SwapChainFormat, scrgb_is_exact};
+use crate::pattern::bt2111::{self, SizeClass};
+use crate::pattern::grayscale;
 use crate::pattern::model::PatternModel;
-use crate::pattern::{bt2111, grayscale};
-use crate::signal::{Encoding, ycbcr_narrow};
+use crate::signal::{Encoding, Format, ycbcr_narrow};
 
 /// Smallest supported output. Below it, label text and narrow regions collapse.
 pub const MIN_SIZE: (usize, usize) = (640, 360);
@@ -105,42 +107,58 @@ impl PatternKind {
     /// If the encoding is not supported or the size is below [`MIN_SIZE`].
     pub fn render(
         self,
-        encoding: Encoding,
+        format: Format,
         width: usize,
         height: usize,
     ) -> Result<Image, PatternError> {
-        let model = self.model(encoding)?;
+        let model = self.model(format, (width, height))?;
         if width < MIN_SIZE.0 || height < MIN_SIZE.1 {
             return Err(PatternError::TooSmall { width, height });
         }
         Ok(model.render(width, height))
     }
 
-    /// The resolution-independent model of the pattern.
+    /// The model of the pattern for an output of `size` pixels. The model is
+    /// resolution independent, but BT.2111 defines a different 12-bit ramp
+    /// for each of its picture sizes (see [`SizeClass::for_output`]).
     ///
     /// # Errors
     /// If the encoding is not supported.
-    pub fn model(self, encoding: Encoding) -> Result<PatternModel, PatternError> {
-        self.check(encoding)?;
+    pub fn model(self, format: Format, size: (usize, usize)) -> Result<PatternModel, PatternError> {
+        self.check(format.encoding)?;
         Ok(match self {
-            Self::ColourBars => bt2111::model(encoding),
-            Self::Grayscale => grayscale::model(encoding),
+            Self::ColourBars => bt2111::model(format, SizeClass::for_output(size.0, size.1)),
+            Self::Grayscale => grayscale::model(format),
         })
     }
 
     /// Text table of every flat level, grouped by section, with its R'G'B'
-    /// codes and the Y'Cb'Cr' codes a vectorscope reads.
+    /// codes and the Y'Cb'Cr' codes a vectorscope reads, for an output of
+    /// `size` pixels. With the FP16 swap chain (12-bit), a `*` marks the
+    /// levels that it cannot carry exactly (see [`scrgb_is_exact`]).
     ///
     /// # Errors
     /// If the encoding is not supported.
-    pub fn reference_table(self, encoding: Encoding) -> Result<String, PatternError> {
-        let model = self.model(encoding)?;
+    pub fn reference_table(
+        self,
+        format: Format,
+        size: (usize, usize),
+    ) -> Result<String, PatternError> {
+        let model = self.model(format, size)?;
+        let depth = format.depth;
         let mut s = String::new();
-        let _ = writeln!(s, "{} - {encoding}, 10-bit R'G'B'", self.label());
         let _ = writeln!(
             s,
-            "Y'Cb'Cr': BT.2020 non-constant luminance, 10-bit narrow range{}.",
-            if encoding.is_narrow() {
+            "{} - {}, {depth} R'G'B', {}x{}",
+            self.label(),
+            format.encoding,
+            size.0,
+            size.1
+        );
+        let _ = writeln!(
+            s,
+            "Y'Cb'Cr': BT.2020 non-constant luminance, {depth} narrow range{}.",
+            if format.is_narrow() {
                 ""
             } else {
                 ", as a GPU outputs it in YCbCr mode"
@@ -152,17 +170,32 @@ impl PatternKind {
             "{:<22} {:>5} {:>5} {:>5}   {:>5} {:>5} {:>5}",
             "patch", "R'", "G'", "B'", "Y'", "Cb", "Cr"
         );
+        let fp16 = SwapChainFormat::for_depth(depth) == SwapChainFormat::ScRgb;
+        let mut inexact = false;
         let mut section = "";
         for level in model.levels() {
             if level.section != section {
                 section = level.section;
                 let _ = writeln!(s, "\n[{section}]");
             }
-            let (rgb, c) = (level.rgb, ycbcr_narrow(level.rgb, encoding));
+            let (rgb, c) = (level.rgb, ycbcr_narrow(level.rgb, format));
+            let mark = if fp16 && !scrgb_is_exact(rgb, depth) {
+                inexact = true;
+                " *"
+            } else {
+                ""
+            };
             let _ = writeln!(
                 s,
-                "{:<22} {:>5} {:>5} {:>5}   {:>5} {:>5} {:>5}",
+                "{:<22} {:>5} {:>5} {:>5}   {:>5} {:>5} {:>5}{mark}",
                 level.name, rgb.r, rgb.g, rgb.b, c.y, c.cb, c.cr
+            );
+        }
+        if inexact {
+            let _ = writeln!(
+                s,
+                "\n* The FP16 scRGB swap chain cannot carry these codes exactly: a component \
+                 near black next to bright components moves by one or more codes."
             );
         }
         Ok(s)

@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use crate::image::Image;
 use crate::pattern::layout::scale;
-use crate::signal::{Encoding, Rgb10};
+use crate::signal::{Format, Rgb};
 use crate::text::{draw_text, text_width};
 
 /// Half-open rectangle `[x0, x1) × [y0, y1)` in reference pixels.
@@ -41,21 +41,24 @@ pub enum Align {
 /// How a region is filled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fill {
-    Solid(Rgb10),
-    /// Horizontal grey ramp over the inclusive codes `first..=last`, spread
-    /// evenly over the output width `w`: pixel `i` is
-    /// `first + floor(i * n / w)` with `n = last - first + 1`.
-    /// With `w = n` every pixel has its own code.
+    Solid(Rgb),
+    /// Horizontal grey ramp over the codes `first, first + step, …, last`,
+    /// spread evenly over the output width `w`: pixel `i` is
+    /// `first + step * floor(i * n / w)` with `n = (last - first) / step + 1`.
+    /// With `w = n` every pixel has its own code. With `w < n`, pixel `i` is
+    /// `first + step * round(i * (n - 1) / (w - 1))`, so both end codes stay
+    /// visible.
     Ramp {
         first: u16,
         last: u16,
+        step: u16,
     },
     /// 1-bit text, one line, top-aligned in the region. `height` is the glyph
     /// height in reference pixels; the output uses the largest integer
     /// multiple of the 8 px font that fits the scaled height (minimum 1).
     Text {
         text: String,
-        colour: Rgb10,
+        colour: Rgb,
         height: usize,
         align: Align,
     },
@@ -63,13 +66,20 @@ pub enum Fill {
 
 impl Fill {
     /// Value of ramp pixel `i` of an output ramp `width` pixels wide.
+    /// `last - first` must be a multiple of `step`.
     #[must_use]
-    pub fn ramp_value(first: u16, last: u16, i: usize, width: usize) -> u16 {
-        let n = u64::from(last - first) + 1;
-        let v = u64::from(first) + (i as u64) * n / (width.max(1) as u64);
-        // i < width, so v <= last <= 1023.
+    pub fn ramp_value(first: u16, last: u16, step: u16, i: usize, width: usize) -> u16 {
+        let codes = u64::from((last - first) / step) + 1;
+        let (pixel, width) = (i as u64, width.max(1) as u64);
+        let k = if width >= codes || width == 1 {
+            pixel * codes / width
+        } else {
+            (2 * pixel * (codes - 1) + (width - 1)) / (2 * (width - 1))
+        };
+        let v = u64::from(first) + k.min(codes - 1) * u64::from(step);
+        // v <= last.
         #[allow(clippy::cast_possible_truncation)]
-        let v = (v as u16).min(last);
+        let v = v as u16;
         v
     }
 }
@@ -84,7 +94,7 @@ pub struct Region {
 
 impl Region {
     #[must_use]
-    pub fn solid(name: impl Into<String>, rect: Rect, colour: Rgb10) -> Self {
+    pub fn solid(name: impl Into<String>, rect: Rect, colour: Rgb) -> Self {
         Self {
             name: name.into(),
             rect,
@@ -115,16 +125,16 @@ impl Section {
     }
 }
 
-/// A complete pattern for one encoding. Sections and regions draw in order;
+/// A complete pattern for one signal format. Sections and regions draw in order;
 /// later regions cover earlier ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternModel {
     pub title: String,
-    pub encoding: Encoding,
+    pub format: Format,
     /// Reference size the geometry is defined at.
     pub reference: (usize, usize),
     /// Fill of every pixel that no region covers.
-    pub background: Rgb10,
+    pub background: Rgb,
     pub sections: Vec<Section>,
 }
 
@@ -133,7 +143,7 @@ pub struct PatternModel {
 pub struct Level<'a> {
     pub section: &'a str,
     pub name: &'a str,
-    pub rgb: Rgb10,
+    pub rgb: Rgb,
 }
 
 impl PatternModel {
@@ -151,11 +161,11 @@ impl PatternModel {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for (section, region) in self.regions() {
-            let entries: Vec<(&str, Rgb10)> = match &region.fill {
+            let entries: Vec<(&str, Rgb)> = match &region.fill {
                 Fill::Solid(c) | Fill::Text { colour: c, .. } => vec![(&region.name, *c)],
-                Fill::Ramp { first, last } => vec![
-                    ("ramp first", Rgb10::grey(*first)),
-                    ("ramp last", Rgb10::grey(*last)),
+                Fill::Ramp { first, last, .. } => vec![
+                    ("ramp first", Rgb::grey(*first)),
+                    ("ramp last", Rgb::grey(*last)),
                 ],
             };
             for (name, rgb) in entries {
@@ -183,10 +193,10 @@ impl PatternModel {
             let (x0, y0, x1, y1) = (sx(r.x0), sy(r.y0), sx(r.x1), sy(r.y1));
             match &region.fill {
                 Fill::Solid(c) => img.fill_rect(x0, y0, x1, y1, *c),
-                &Fill::Ramp { first, last } => {
+                &Fill::Ramp { first, last, step } => {
                     let w = x1.saturating_sub(x0);
                     img.fill_columns(x0, y0, x1, y1, |x| {
-                        Rgb10::grey(Fill::ramp_value(first, last, x - x0, w))
+                        Rgb::grey(Fill::ramp_value(first, last, step, x - x0, w))
                     });
                 }
                 Fill::Text {

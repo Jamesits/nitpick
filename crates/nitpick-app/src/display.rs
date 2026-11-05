@@ -1,7 +1,35 @@
-//! Bridge to the C++ full-screen HDR10 pattern window (`cpp/pattern_window.cpp`).
+//! Bridge to the C++ full-screen HDR pattern window (`cpp/pattern_window.cpp`).
 
 #[cxx_qt::bridge]
 pub mod ffi {
+    /// HDR10 static metadata in SMPTE ST 2086 and CTA-861.3 units
+    /// (see `nitpick_core::metadata::Hdr10Metadata`).
+    #[namespace = "nitpick"]
+    struct HdrMetadata {
+        /// If false, the window clears the metadata of the swap chain.
+        enabled: bool,
+        /// CIE xy of red, green, blue and white in units of 0.00002.
+        chromaticity: [u16; 8],
+        /// Mastering display luminance in units of 0.0001 cd/m².
+        max_mastering: u32,
+        min_mastering: u32,
+        /// Content light levels in cd/m².
+        max_cll: u16,
+        max_fall: u16,
+        /// The same values as big-endian SEI payloads, for `CAEDRMetadata` (macOS).
+        mastering_display: [u8; 24],
+        content_light_level: [u8; 4],
+    }
+
+    /// The open pattern window: swap chain size in pixels and a description
+    /// of the display output.
+    #[namespace = "nitpick"]
+    struct PatternSurface {
+        width: i32,
+        height: i32,
+        description: String,
+    }
+
     unsafe extern "C++" {
         include!("nitpick-app/cpp/pattern_window.h");
 
@@ -13,11 +41,23 @@ pub mod ffi {
         #[cxx_name = "screenPixelHeight"]
         fn screen_pixel_height(screen: i32) -> Result<i32>;
 
-        /// Shows packed `R10G10B10A2` pixels full screen on `screen` through an
-        /// HDR10 swap chain, replacing any open pattern window. Returns a
-        /// description of the display output.
+        /// Opens a full-screen window on `screen` with an HDR10 swap chain, or
+        /// an FP16 scRGB swap chain if `fp16`, and replaces any open pattern
+        /// window. Blocks until the swap chain exists.
         #[namespace = "nitpick"]
-        #[cxx_name = "showPattern"]
-        fn show_pattern(pixels: &[u32], width: i32, height: i32, screen: i32) -> Result<String>;
+        #[cxx_name = "openPatternWindow"]
+        fn open_pattern_window(screen: i32, fp16: bool) -> Result<PatternSurface>;
+
+        /// Shows `pixels` in the open window: tightly packed rows in the swap
+        /// chain format, `width × height` equal to the swap chain size. Sets
+        /// the HDR metadata first. Returns a status line.
+        #[namespace = "nitpick"]
+        #[cxx_name = "presentPattern"]
+        fn present_pattern(
+            pixels: &[u8],
+            width: i32,
+            height: i32,
+            metadata: &HdrMetadata,
+        ) -> Result<String>;
     }
 }

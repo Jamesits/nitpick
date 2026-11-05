@@ -6,10 +6,15 @@
 
 namespace nitpick {
 
+// Shared structs, defined by the generated display.cxx.h.
+struct HdrMetadata;
+struct PatternSurface;
+
 // All functions throw std::runtime_error on failure; cxx maps it to Err.
 std::int32_t screenPixelWidth(std::int32_t screen);
 std::int32_t screenPixelHeight(std::int32_t screen);
-rust::String showPattern(rust::Slice<const std::uint32_t> pixels, std::int32_t width,
-                         std::int32_t height, std::int32_t screen);
+PatternSurface openPatternWindow(std::int32_t screen, bool fp16);
+rust::String presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
+                            std::int32_t height, const HdrMetadata &metadata);
 
 } // namespace nitpick

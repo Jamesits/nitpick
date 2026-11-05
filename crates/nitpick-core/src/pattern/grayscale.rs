@@ -10,7 +10,7 @@
 //! picture level low, so displays with ABL are less likely to dim them.
 
 use crate::pattern::model::{Align, Fill, PatternModel, Rect, Region, Section};
-use crate::signal::{Encoding, Rgb10, pq_eotf};
+use crate::signal::{Format, Rgb, pq_eotf};
 
 const REF_W: usize = 1920;
 const REF_H: usize = 1080;
@@ -21,8 +21,9 @@ pub const LUMINANCE_STEPS: [f64; 16] = [
     10000.0,
 ];
 
-/// Code distance between near-black steps. 15 steps of 4 codes reach about
-/// 0.1 cd/m², where most displays stop crushing.
+/// Distance between near-black steps in 10-bit codes. 15 steps of 4 codes
+/// reach about 0.1 cd/m², where most displays stop crushing. 12-bit uses
+/// 16 codes, so both depths show the same luminances.
 pub const NEAR_BLACK_STEP: u16 = 4;
 pub const NEAR_BLACK_COUNT: u16 = 16;
 
@@ -43,29 +44,33 @@ const NEAR_BLACK_Y: [usize; 2] = [690, 790];
 const RAMP_Y: [usize; 2] = [900, 1000];
 const STRIP_W: usize = 1760;
 
-fn pq(encoding: Encoding, nits: f64) -> u16 {
-    encoding
+fn pq(format: Format, nits: f64) -> u16 {
+    format
         .pq_code_from_nits(nits)
         .expect("grayscale supports PQ encodings only")
 }
 
-fn near_black_codes(encoding: Encoding) -> impl Iterator<Item = u16> {
-    (0..NEAR_BLACK_COUNT).map(move |k| encoding.black() + k * NEAR_BLACK_STEP)
+fn near_black_step(format: Format) -> u16 {
+    NEAR_BLACK_STEP << format.depth.shift()
+}
+
+fn near_black_codes(format: Format) -> impl Iterator<Item = u16> {
+    (0..NEAR_BLACK_COUNT).map(move |k| format.black() + k * near_black_step(format))
 }
 
 /// Collects labels and ramp ticks. They form one section, so the reference
 /// table lists their level once.
 struct Labels {
     name: String,
-    colour: Rgb10,
+    colour: Rgb,
     section: Section,
 }
 
 impl Labels {
-    fn new(encoding: Encoding) -> Self {
+    fn new(format: Format) -> Self {
         Self {
             name: format!("labels {LABEL_NITS} cd/m2"),
-            colour: Rgb10::grey(pq(encoding, LABEL_NITS)),
+            colour: Rgb::grey(pq(format, LABEL_NITS)),
             section: Section::new("labels"),
         }
     }
@@ -103,18 +108,18 @@ impl Labels {
     }
 }
 
-fn luminance_section(encoding: Encoding, labels: &mut Labels) -> Section {
+fn luminance_section(format: Format, labels: &mut Labels) -> Section {
     let mut section = Section::new("luminance");
     for (i, &nits) in LUMINANCE_STEPS.iter().enumerate() {
         let x0 = MARGIN_X + (i % 8) * PATCH_PITCH;
         let y0 = PATCH_ROWS_Y[i / 8];
         let (x1, y1) = (x0 + PATCH_W, y0 + PATCH_H);
-        let code = pq(encoding, nits);
+        let code = pq(format, nits);
         let rect = Rect::new(x0, y0, x1, y1);
         section.push(Region::solid(
             format!("{nits} cd/m2"),
             rect,
-            Rgb10::grey(code),
+            Rgb::grey(code),
         ));
         labels.text(x0, x1, y1 + 8, format!("{nits} cd/m2"), Align::Centre);
         labels.text(x0, x1, y1 + 32, format!("code {code}"), Align::Centre);
@@ -122,42 +127,49 @@ fn luminance_section(encoding: Encoding, labels: &mut Labels) -> Section {
     section
 }
 
-fn near_black_section(encoding: Encoding, labels: &mut Labels) -> Section {
+fn near_black_section(format: Format, labels: &mut Labels) -> Section {
     let [y0, y1] = NEAR_BLACK_Y;
     labels.heading(
         y0,
-        format!("NEAR BLACK: 0% + {NEAR_BLACK_STEP} CODES PER STEP"),
+        format!(
+            "NEAR BLACK: 0% + {} CODES PER STEP",
+            near_black_step(format)
+        ),
     );
     let step_w = STRIP_W / usize::from(NEAR_BLACK_COUNT);
     let mut section = Section::new("near black");
-    for (k, code) in near_black_codes(encoding).enumerate() {
+    for (k, code) in near_black_codes(format).enumerate() {
         let x0 = MARGIN_X + k * step_w;
-        let nits = pq_eotf(encoding.signal_from_code(code));
+        let nits = pq_eotf(format.signal_from_code(code));
         let rect = Rect::new(x0, y0, x0 + step_w, y1);
         section.push(Region::solid(
             format!("{nits:.4} cd/m2"),
             rect,
-            Rgb10::grey(code),
+            Rgb::grey(code),
         ));
         labels.text(x0, x0 + step_w, y1 + 8, code.to_string(), Align::Centre);
     }
     section
 }
 
-fn ramp_section(encoding: Encoding, labels: &mut Labels) -> Section {
+fn ramp_section(format: Format, labels: &mut Labels) -> Section {
     let [y0, y1] = RAMP_Y;
-    let (first, last) = (encoding.black(), encoding.white());
+    let (first, last) = (format.black(), format.white());
     labels.heading(y0, format!("RAMP: CODE {first} TO {last}"));
     let mut section = Section::new("ramp");
     section.push(Region {
         name: "ramp".into(),
         rect: Rect::new(MARGIN_X, y0, MARGIN_X + STRIP_W, y1),
-        fill: Fill::Ramp { first, last },
+        fill: Fill::Ramp {
+            first,
+            last,
+            step: 1,
+        },
     });
     for nits in RAMP_TICKS {
-        let code = pq(encoding, nits);
+        let code = pq(format, nits);
         // First ramp column that reaches the tick code.
-        let Some(i) = (0..STRIP_W).find(|&i| Fill::ramp_value(first, last, i, STRIP_W) >= code)
+        let Some(i) = (0..STRIP_W).find(|&i| Fill::ramp_value(first, last, 1, i, STRIP_W) >= code)
         else {
             continue;
         };
@@ -171,31 +183,31 @@ fn ramp_section(encoding: Encoding, labels: &mut Labels) -> Section {
 /// Builds the pattern model.
 ///
 /// # Panics
-/// If `encoding` is not PQ.
+/// If the encoding is not PQ.
 #[must_use]
-pub fn model(encoding: Encoding) -> PatternModel {
-    let mut labels = Labels::new(encoding);
+pub fn model(format: Format) -> PatternModel {
+    let mut labels = Labels::new(format);
     labels.text(
         MARGIN_X,
         MARGIN_X + STRIP_W,
         30,
         format!(
             "PQ GRAYSCALE  {}  labels {LABEL_NITS} cd/m2",
-            encoding.label().to_uppercase()
+            format.label().to_uppercase()
         ),
         Align::Left,
     );
     let mut sections = vec![
-        luminance_section(encoding, &mut labels),
-        near_black_section(encoding, &mut labels),
-        ramp_section(encoding, &mut labels),
+        luminance_section(format, &mut labels),
+        near_black_section(format, &mut labels),
+        ramp_section(format, &mut labels),
     ];
     sections.push(labels.section);
     PatternModel {
-        title: format!("PQ grayscale, {}", encoding.label()),
-        encoding,
+        title: format!("PQ grayscale, {format}"),
+        format,
         reference: (REF_W, REF_H),
-        background: Rgb10::grey(encoding.black()),
+        background: Rgb::grey(format.black()),
         sections,
     }
 }

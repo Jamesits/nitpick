@@ -6,7 +6,7 @@
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 
 use crate::image::Image;
-use crate::signal::Rgb10;
+use crate::signal::Rgb;
 
 const GLYPH: usize = 8;
 
@@ -25,7 +25,7 @@ pub fn line_height(scale: usize) -> usize {
 /// Draws `text` with its top-left corner at `(x, y)`. Only set font bits are
 /// written; the background is unchanged. Characters outside Basic Latin draw
 /// as `?`.
-pub fn draw_text(img: &mut Image, x: usize, y: usize, scale: usize, text: &str, colour: Rgb10) {
+pub fn draw_text(img: &mut Image, x: usize, y: usize, scale: usize, text: &str, colour: Rgb) {
     for (i, ch) in text.chars().enumerate() {
         let glyph = BASIC_FONTS
             .get(ch)

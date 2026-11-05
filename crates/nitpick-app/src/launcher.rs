@@ -14,27 +14,47 @@ pub mod qobject {
         #[qproperty(QString, status)]
         type Launcher = super::LauncherRust;
 
-        /// JSON array: `[{id, label, description, encodings: [{id, label}]}]`.
+        /// JSON object: `{patterns: [{id, label, description, encodings: [{id, label}]}],
+        /// depths: [{id, label}], primaries: [{id, label}]}`.
         #[qinvokable]
         fn catalogue(&self) -> QString;
 
+        /// Reference table for the native size of `screen`.
         #[qinvokable]
         #[cxx_name = "referenceTable"]
-        fn reference_table(&self, pattern: &QString, encoding: &QString) -> QString;
+        fn reference_table(
+            &self,
+            pattern: &QString,
+            encoding: &QString,
+            depth: &QString,
+            screen: i32,
+        ) -> QString;
 
-        /// Renders the pattern at the native size of `screen` and shows it.
-        /// The result or error goes to `status`.
+        /// Renders the pattern at the swap chain size of a new full-screen
+        /// window on `screen` and shows it. `metadata` is a JSON object, see
+        /// `metadata_from_json`. The result or error goes to `status`.
         #[qinvokable]
         #[cxx_name = "showPattern"]
-        fn show_pattern(self: Pin<&mut Self>, pattern: &QString, encoding: &QString, screen: i32);
+        fn show_pattern(
+            self: Pin<&mut Self>,
+            pattern: &QString,
+            encoding: &QString,
+            depth: &QString,
+            screen: i32,
+            metadata: &QString,
+        );
     }
 }
 
 use core::pin::Pin;
 
 use cxx_qt_lib::QString;
+use nitpick_core::image::Image;
+use nitpick_core::metadata::{Hdr10Metadata, MasteringPrimaries, light_level};
+use nitpick_core::output::{SwapChainFormat, hdr10_bytes, scrgb_bytes};
 use nitpick_core::pattern::PatternKind;
-use nitpick_core::signal::Encoding;
+use nitpick_core::signal::{BitDepth, D65, Encoding, Format};
+use serde_json::{Value, json};
 
 use crate::display::ffi;
 
@@ -43,25 +63,124 @@ pub struct LauncherRust {
     status: QString,
 }
 
-fn parse(pattern: &QString, encoding: &QString) -> Result<(PatternKind, Encoding), String> {
-    Ok((pattern.to_string().parse()?, encoding.to_string().parse()?))
+fn parse(
+    pattern: &QString,
+    encoding: &QString,
+    depth: &QString,
+) -> Result<(PatternKind, Format), String> {
+    let encoding: Encoding = encoding.to_string().parse()?;
+    let depth: BitDepth = depth.to_string().parse()?;
+    Ok((pattern.to_string().parse()?, Format::new(encoding, depth)))
 }
 
-fn show(pattern: &QString, encoding: &QString, screen: i32) -> Result<String, String> {
-    let (kind, enc) = parse(pattern, encoding)?;
+fn screen_size(screen: i32) -> Result<(usize, usize), String> {
+    let size = |v: i32| usize::try_from(v).map_err(|_| format!("invalid screen size {v}"));
     let width = ffi::screen_pixel_width(screen).map_err(|e| e.to_string())?;
     let height = ffi::screen_pixel_height(screen).map_err(|e| e.to_string())?;
-    let size = |v: i32| usize::try_from(v).map_err(|_| format!("invalid screen size {v}"));
-    let image = kind
-        .render(enc, size(width)?, size(height)?)
+    Ok((size(width)?, size(height)?))
+}
+
+/// Builds the bridge metadata from the launcher JSON
+/// `{enabled, primaries, maxMastering, minMastering, fromPattern, maxCll, maxFall}`
+/// (luminances in cd/m²). With `fromPattern`, `MaxCLL` and `MaxFALL` come
+/// from the rendered image.
+fn metadata_from_json(
+    json: &str,
+    image: &Image,
+    depth: BitDepth,
+) -> Result<ffi::HdrMetadata, String> {
+    let v: Value = serde_json::from_str(json).map_err(|e| format!("metadata: {e}"))?;
+    let number = |key: &str| {
+        v[key]
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .ok_or_else(|| format!("metadata: `{key}` must be a number >= 0"))
+    };
+    let enabled = v["enabled"].as_bool().unwrap_or(false);
+    if !enabled {
+        return Ok(ffi::HdrMetadata {
+            enabled,
+            chromaticity: [0; 8],
+            max_mastering: 0,
+            min_mastering: 0,
+            max_cll: 0,
+            max_fall: 0,
+            mastering_display: [0; 24],
+            content_light_level: [0; 4],
+        });
+    }
+    let primaries: MasteringPrimaries = v["primaries"].as_str().unwrap_or_default().parse()?;
+    let (max_cll, max_fall) = if v["fromPattern"].as_bool().unwrap_or(true) {
+        let l = light_level(image, depth);
+        (l.max_cll, l.max_fall)
+    } else {
+        (number("maxCll")?, number("maxFall")?)
+    };
+    let md = Hdr10Metadata {
+        primaries: primaries.primaries(),
+        white: D65,
+        max_mastering_nits: number("maxMastering")?,
+        min_mastering_nits: number("minMastering")?,
+        max_cll,
+        max_fall,
+    };
+    let [r, g, b] = md.primaries;
+    let xy = [r, g, b, md.white].map(|[x, y]| {
+        [
+            Hdr10Metadata::chromaticity_code(x),
+            Hdr10Metadata::chromaticity_code(y),
+        ]
+    });
+    Ok(ffi::HdrMetadata {
+        enabled,
+        chromaticity: xy.concat().try_into().unwrap_or([0; 8]),
+        max_mastering: Hdr10Metadata::luminance_code(md.max_mastering_nits),
+        min_mastering: Hdr10Metadata::luminance_code(md.min_mastering_nits),
+        max_cll: Hdr10Metadata::light_level_code(md.max_cll),
+        max_fall: Hdr10Metadata::light_level_code(md.max_fall),
+        mastering_display: md.mastering_display_bytes(),
+        content_light_level: md.content_light_level_bytes(),
+    })
+}
+
+fn show(
+    pattern: &QString,
+    encoding: &QString,
+    depth: &QString,
+    screen: i32,
+    metadata: &QString,
+) -> Result<String, String> {
+    let (kind, format) = parse(pattern, encoding, depth)?;
+    let swap_chain = SwapChainFormat::for_depth(format.depth);
+    let surface = ffi::open_pattern_window(screen, swap_chain == SwapChainFormat::ScRgb)
         .map_err(|e| e.to_string())?;
-    let output =
-        ffi::show_pattern(image.pixels(), width, height, screen).map_err(|e| e.to_string())?;
+    let (width, height) = (surface.width, surface.height);
+    let size = |v: i32| usize::try_from(v).map_err(|_| format!("invalid swap chain size {v}"));
+    let image = kind
+        .render(format, size(width)?, size(height)?)
+        .map_err(|e| e.to_string())?;
+    let pixels = match swap_chain {
+        SwapChainFormat::Hdr10 => hdr10_bytes(&image),
+        SwapChainFormat::ScRgb => scrgb_bytes(&image, format.depth),
+    };
+    let md = metadata_from_json(&metadata.to_string(), &image, format.depth)?;
+    let result = ffi::present_pattern(&pixels, width, height, &md).map_err(|e| e.to_string())?;
     Ok(format!(
-        "{} ({}) at {width}x{height}. {output}. Esc closes the pattern.",
+        "{} ({format}) at {width}x{height}. {}. {result} Esc closes the pattern.",
         kind.label(),
-        enc.label()
+        surface.description
     ))
+}
+
+fn id_labels<T: Copy>(
+    items: &[T],
+    id: impl Fn(T) -> &'static str,
+    label: impl Fn(T) -> &'static str,
+) -> Value {
+    items
+        .iter()
+        .map(|&x| json!({"id": id(x), "label": label(x)}))
+        .collect()
 }
 
 // QML invokables must be methods even when they need no state.
@@ -71,29 +190,56 @@ impl qobject::Launcher {
         let patterns: Vec<_> = PatternKind::ALL
             .iter()
             .map(|p| {
-                serde_json::json!({
+                json!({
                     "id": p.id(),
                     "label": p.label(),
                     "description": p.description(),
-                    "encodings": p.encodings().iter().map(|e| serde_json::json!({
-                        "id": e.id(),
-                        "label": e.label(),
-                    })).collect::<Vec<_>>(),
+                    "encodings": id_labels(p.encodings(), Encoding::id, Encoding::label),
                 })
             })
             .collect();
-        QString::from(&serde_json::Value::from(patterns).to_string())
+        let depth_label = |d: BitDepth| match SwapChainFormat::for_depth(d) {
+            SwapChainFormat::Hdr10 => "10-bit (HDR10 swap chain, exact codes)",
+            SwapChainFormat::ScRgb => "12-bit (FP16 scRGB swap chain)",
+        };
+        let value = json!({
+            "patterns": patterns,
+            "depths": id_labels(&BitDepth::ALL, BitDepth::id, depth_label),
+            "primaries": id_labels(
+                &MasteringPrimaries::ALL,
+                MasteringPrimaries::id,
+                MasteringPrimaries::label,
+            ),
+        });
+        QString::from(&value.to_string())
     }
 
-    pub fn reference_table(&self, pattern: &QString, encoding: &QString) -> QString {
-        let text = parse(pattern, encoding)
-            .and_then(|(kind, enc)| kind.reference_table(enc).map_err(|e| e.to_string()))
+    pub fn reference_table(
+        &self,
+        pattern: &QString,
+        encoding: &QString,
+        depth: &QString,
+        screen: i32,
+    ) -> QString {
+        let text = parse(pattern, encoding, depth)
+            .and_then(|(kind, format)| {
+                kind.reference_table(format, screen_size(screen)?)
+                    .map_err(|e| e.to_string())
+            })
             .unwrap_or_else(|e| e);
         QString::from(&text)
     }
 
-    pub fn show_pattern(self: Pin<&mut Self>, pattern: &QString, encoding: &QString, screen: i32) {
-        let status = show(pattern, encoding, screen).unwrap_or_else(|e| format!("Error: {e}"));
+    pub fn show_pattern(
+        self: Pin<&mut Self>,
+        pattern: &QString,
+        encoding: &QString,
+        depth: &QString,
+        screen: i32,
+        metadata: &QString,
+    ) {
+        let status = show(pattern, encoding, depth, screen, metadata)
+            .unwrap_or_else(|e| format!("Error: {e}"));
         self.set_status(QString::from(&status));
     }
 }

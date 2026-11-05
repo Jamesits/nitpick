@@ -1,39 +1,56 @@
 #include "nitpick-app/cpp/pattern_window.h"
 
+#include "nitpick-app/src/display.cxx.h"
+
+#include <QtCore/QEventLoop>
 #include <QtCore/QPointer>
+#include <QtCore/QTimer>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QKeyEvent>
+#include <QtGui/QPlatformSurfaceEvent>
 #include <QtGui/QScreen>
 #include <QtGui/QWindow>
+#include <rhi/qrhi.h>
+#include <rhi/qrhi_platform.h>
 
+#include <cmath>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
-#ifdef _WIN32
+#include "pattern_shaders.h"
 
+#if defined(Q_OS_WIN)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
 
+#include <QtGui/private/qrhid3d11_p.h>
 #include <QtGui/qscreen_platform.h>
-#include <d3d11.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
-
 using Microsoft::WRL::ComPtr;
+#elif defined(Q_OS_MACOS)
+#include "nitpick-app/cpp/metal_hdr.h"
+#else
+#include <QtGui/QVulkanInstance>
+#include <QtGui/private/qrhivulkan_p.h>
+#endif
 
 namespace {
 
-void check(HRESULT hr, const char *what) {
-    if (FAILED(hr)) {
-        char buf[16];
-        std::snprintf(buf, sizeof buf, "0x%08lX", static_cast<unsigned long>(hr));
-        throw std::runtime_error(std::string(what) + " failed: " + buf);
-    }
+using nitpick::HdrMetadata;
+
+// Time for the compositor to map and expose the full-screen window.
+constexpr int kInitTimeoutMs = 5000;
+
+template <typename... Args> std::string sformat(const char *fmt, Args... args) {
+    char buf[512];
+    std::snprintf(buf, sizeof buf, fmt, args...);
+    return buf;
 }
 
 QScreen *screenAt(std::int32_t index) {
@@ -42,6 +59,24 @@ QScreen *screenAt(std::int32_t index) {
         throw std::runtime_error("no screen with index " + std::to_string(index));
     }
     return screens.at(index);
+}
+
+QShader loadShader(const unsigned char *data, std::size_t size) {
+    QShader s = QShader::fromSerialized(
+        QByteArray::fromRawData(reinterpret_cast<const char *>(data), qsizetype(size)));
+    if (!s.isValid()) {
+        throw std::runtime_error("embedded shader is not valid");
+    }
+    return s;
+}
+
+#if defined(Q_OS_WIN)
+
+void check(HRESULT hr, const char *what) {
+    if (FAILED(hr)) {
+        throw std::runtime_error(
+            sformat("%s failed: 0x%08lX", what, static_cast<unsigned long>(hr)));
+    }
 }
 
 HMONITOR monitorOf(QScreen *screen) {
@@ -65,8 +100,9 @@ RECT monitorRect(QScreen *screen) {
 
 // Finds the adapter that scans out `monitor`. Rendering on that adapter
 // avoids a cross-adapter copy on hybrid-GPU systems.
-void findOutput(IDXGIFactory2 *factory, HMONITOR monitor, ComPtr<IDXGIAdapter1> &adapterOut,
-                ComPtr<IDXGIOutput6> &outputOut) {
+void findOutput(HMONITOR monitor, LUID &adapterOut, ComPtr<IDXGIOutput6> &outputOut) {
+    ComPtr<IDXGIFactory1> factory;
+    check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "CreateDXGIFactory1");
     ComPtr<IDXGIAdapter1> adapter;
     for (UINT a = 0; factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a) {
         ComPtr<IDXGIOutput> output;
@@ -74,7 +110,9 @@ void findOutput(IDXGIFactory2 *factory, HMONITOR monitor, ComPtr<IDXGIAdapter1> 
             DXGI_OUTPUT_DESC desc{};
             if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == monitor &&
                 SUCCEEDED(output.As(&outputOut))) {
-                adapterOut = adapter;
+                DXGI_ADAPTER_DESC1 ad{};
+                check(adapter->GetDesc1(&ad), "GetDesc1");
+                adapterOut = ad.AdapterLuid;
                 return;
             }
         }
@@ -88,91 +126,184 @@ std::string describeOutput(IDXGIOutput6 *output) {
         return "output description unavailable";
     }
     const bool hdr = d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-    char buf[512];
-    std::snprintf(buf, sizeof buf,
-                  "%ls: %ldx%ld, %u bpc, Windows HDR %s, EDID peak %.0f cd/m2, min %.4f cd/m2",
-                  d.DeviceName, d.DesktopCoordinates.right - d.DesktopCoordinates.left,
-                  d.DesktopCoordinates.bottom - d.DesktopCoordinates.top, d.BitsPerColor,
-                  hdr ? "on" : "OFF (signal is converted to SDR)", d.MaxLuminance,
-                  d.MinLuminance);
-    return buf;
+    char name[64];
+    std::snprintf(name, sizeof name, "%ls", d.DeviceName);
+    return sformat("%s: %u bpc, Windows HDR %s, EDID peak %.0f cd/m2, min %.4f cd/m2", name,
+                  d.BitsPerColor, hdr ? "on" : "OFF (signal is converted to SDR)",
+                  d.MaxLuminance, d.MinLuminance);
 }
 
-// Borderless full-screen window that scans out one static 10-bit image.
+#elif !defined(Q_OS_MACOS)
+
+// Created once and never destroyed: windows that use it may live until the
+// application exits.
+QVulkanInstance *vulkanInstance() {
+    static QVulkanInstance *instance = [] {
+        auto *inst = new QVulkanInstance;
+        // Includes VK_EXT_swapchain_colorspace, which HDR swap chains need.
+        inst->setExtensions(QRhiVulkanInitParams::preferredInstanceExtensions());
+        if (!inst->create()) {
+            throw std::runtime_error("cannot create a Vulkan instance");
+        }
+        return inst;
+    }();
+    return instance;
+}
+
+#endif
+
+// Borderless full-screen window that scans out one static image through
+// QRhi: D3D11 on Windows, Metal on macOS, Vulkan elsewhere.
 //
-// The image goes to the back buffer with CopyResource, not a draw call, so
-// no sampling, blending or colour conversion can change a code value inside
-// the application. The swap chain colour space is PQ / BT.2020
-// (DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020); DWM and the driver may still
-// alter values after Present, which is what the external scope verifies.
+// The swap chain is HDR10 (10-bit unorm, PQ, BT.2020) or FP16 scRGB. The
+// fragment shader copies one texel per pixel with texelFetch: no sampling,
+// blending or colour conversion inside the application. The compositor and
+// the driver may still alter values after the present, which is what the
+// external scope verifies.
 class PatternWindow final : public QWindow {
 public:
-    PatternWindow(QScreen *screen, const std::uint32_t *pixels, int width, int height) {
+    PatternWindow(QScreen *screen, bool fp16) : m_fp16(fp16) {
+#if defined(Q_OS_WIN)
         setSurfaceType(QSurface::Direct3DSurface);
+        findOutput(monitorOf(screen), m_adapter, m_output);
+#elif defined(Q_OS_MACOS)
+        setSurfaceType(QSurface::MetalSurface);
+#else
+        setSurfaceType(QSurface::VulkanSurface);
+        setVulkanInstance(vulkanInstance());
+#endif
         setFlags(Qt::Window | Qt::FramelessWindowHint);
         setScreen(screen);
         setGeometry(screen->geometry());
         setCursor(Qt::BlankCursor);
         setTitle(QStringLiteral("nitpick pattern"));
-
-        ComPtr<IDXGIFactory2> factory;
-        check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
-        ComPtr<IDXGIAdapter1> adapter;
-        findOutput(factory.Get(), monitorOf(screen), adapter, m_output);
-
-        check(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
-                                D3D11_SDK_VERSION, &m_device, nullptr, &m_context),
-              "D3D11CreateDevice");
-
-        D3D11_TEXTURE2D_DESC td{};
-        td.Width = UINT(width);
-        td.Height = UINT(height);
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_IMMUTABLE;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SUBRESOURCE_DATA init{pixels, UINT(width) * 4, 0};
-        check(m_device->CreateTexture2D(&td, &init, &m_source), "CreateTexture2D");
-
-        create();
-        const auto hwnd = reinterpret_cast<HWND>(winId());
-
-        DXGI_SWAP_CHAIN_DESC1 sd{};
-        sd.Width = UINT(width);
-        sd.Height = UINT(height);
-        sd.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-        sd.SampleDesc.Count = 1;
-        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        sd.BufferCount = 2;
-        // No scaling: a resampled pixel would not keep its code value.
-        sd.Scaling = DXGI_SCALING_NONE;
-        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-        ComPtr<IDXGISwapChain1> sc1;
-        check(factory->CreateSwapChainForHwnd(m_device.Get(), hwnd, &sd, nullptr, nullptr, &sc1),
-              "CreateSwapChainForHwnd");
-        check(factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER),
-              "MakeWindowAssociation");
-        check(sc1.As(&m_swapChain), "IDXGISwapChain3");
-
-        constexpr auto pq2020 = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-        UINT support = 0;
-        check(m_swapChain->CheckColorSpaceSupport(pq2020, &support), "CheckColorSpaceSupport");
-        if (!(support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT)) {
-            throw std::runtime_error("swap chain does not support PQ / BT.2020 output");
-        }
-        check(m_swapChain->SetColorSpace1(pq2020), "SetColorSpace1");
     }
 
-    std::string describe() const { return describeOutput(m_output.Get()); }
+    // Blocks until the first expose has created the swap chain.
+    void waitUntilReady() {
+        if (!m_ready && m_error.empty()) {
+            QEventLoop loop;
+            m_onInit = [&loop] { loop.quit(); };
+            QTimer::singleShot(kInitTimeoutMs, &loop, &QEventLoop::quit);
+            loop.exec(QEventLoop::ExcludeUserInputEvents);
+            m_onInit = nullptr;
+        }
+        if (!m_error.empty()) {
+            throw std::runtime_error(m_error);
+        }
+        if (!m_ready) {
+            throw std::runtime_error("the pattern window was not exposed in time");
+        }
+    }
+
+    QSize pixelSize() const { return m_sc->currentPixelSize(); }
+
+    std::string describe() const {
+        std::string s = m_fp16 ? "FP16 scRGB swap chain" : "HDR10 swap chain";
+        s += " (" + std::string(m_rhi->backendName()) + ")";
+#if defined(Q_OS_WIN)
+        s += "; " + describeOutput(m_output.Get());
+        const RECT r = monitorRect(screen());
+        if (r.right - r.left != pixelSize().width() || r.bottom - r.top != pixelSize().height()) {
+            s += "; WARNING: swap chain size differs from the native screen size";
+        }
+#else
+        const QRhiSwapChainHdrInfo i = m_sc->hdrInfo();
+        if (i.limitsType == QRhiSwapChainHdrInfo::LuminanceInNits) {
+            s += sformat("; display %.4f to %.0f cd/m2", i.limits.luminanceInNits.minLuminance,
+                        i.limits.luminanceInNits.maxLuminance);
+        } else {
+            s += sformat("; EDR headroom %.2f (potential %.2f)",
+                        i.limits.colorComponentValue.maxColorComponentValue,
+                        i.limits.colorComponentValue.maxPotentialColorComponentValue);
+        }
+#endif
+        return s;
+    }
+
+    std::string present(const std::uint8_t *data, std::size_t size, int width, int height,
+                        const HdrMetadata &metadata) {
+        if (QSize(width, height) != pixelSize()) {
+            throw std::runtime_error("image size differs from the swap chain size");
+        }
+        const auto format = m_fp16 ? QRhiTexture::RGBA16F : QRhiTexture::RGB10A2;
+        const std::size_t bytesPerPixel = m_fp16 ? 8 : 4;
+        if (size != std::size_t(width) * std::size_t(height) * bytesPerPixel) {
+            throw std::runtime_error("pixel buffer does not match the image size");
+        }
+        if (!m_rhi->isTextureFormatSupported(format)) {
+            throw std::runtime_error("the GPU cannot sample the pattern texture format");
+        }
+        m_ps.reset();
+        m_srb.reset();
+        m_tex.reset(m_rhi->newTexture(format, QSize(width, height)));
+        if (!m_tex->create()) {
+            throw std::runtime_error("cannot create the pattern texture");
+        }
+        m_srb.reset(m_rhi->newShaderResourceBindings());
+        m_srb->setBindings({QRhiShaderResourceBinding::sampledTexture(
+            1, QRhiShaderResourceBinding::FragmentStage, m_tex.get(), m_sampler.get())});
+        if (!m_srb->create()) {
+            throw std::runtime_error("cannot create the shader resource bindings");
+        }
+        m_ps.reset(m_rhi->newGraphicsPipeline());
+        m_ps->setShaderStages(
+            {{QRhiShaderStage::Vertex, loadShader(kPatternVertQsb, sizeof kPatternVertQsb)},
+             {QRhiShaderStage::Fragment, loadShader(kPatternFragQsb, sizeof kPatternFragQsb)}});
+        m_ps->setVertexInputLayout({});
+        m_ps->setShaderResourceBindings(m_srb.get());
+        m_ps->setRenderPassDescriptor(m_rp.get());
+        if (!m_ps->create()) {
+            throw std::runtime_error("cannot create the graphics pipeline");
+        }
+        m_pending = QByteArray(reinterpret_cast<const char *>(data), qsizetype(size));
+        std::string status = applyMetadata(metadata);
+        requestUpdate();
+        return status;
+    }
 
 protected:
     void exposeEvent(QExposeEvent *) override {
-        if (isExposed()) {
-            present();
+        if (!isExposed()) {
+            return;
         }
+        if (!m_ready && m_error.empty()) {
+            // Qt event handlers must not throw.
+            try {
+                init();
+                m_ready = true;
+            } catch (const std::exception &e) {
+                m_error = e.what();
+            }
+            if (m_onInit) {
+                m_onInit();
+            }
+        }
+        if (m_ready) {
+            render();
+        }
+    }
+
+    bool event(QEvent *e) override {
+        switch (e->type()) {
+        case QEvent::UpdateRequest:
+            if (m_ready) {
+                render();
+            }
+            return true;
+        case QEvent::PlatformSurface:
+            // The swap chain must go before the native surface.
+            if (static_cast<QPlatformSurfaceEvent *>(e)->surfaceEventType() ==
+                    QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed &&
+                m_sc) {
+                m_sc->destroy();
+                m_ready = false;
+            }
+            break;
+        default:
+            break;
+        }
+        return QWindow::event(e);
     }
 
     void keyPressEvent(QKeyEvent *e) override {
@@ -190,22 +321,162 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *) override { deleteLater(); }
 
 private:
-    // Flip-model buffers are discarded after Present, so every frame copies
-    // the source again.
-    void present() {
-        ComPtr<ID3D11Texture2D> back;
-        if (FAILED(m_swapChain->GetBuffer(0, IID_PPV_ARGS(&back)))) {
-            return;
+    void init() {
+#if defined(Q_OS_WIN)
+        QRhiD3D11InitParams params;
+        QRhiD3D11NativeHandles adapter;
+        adapter.adapterLuidLow = m_adapter.LowPart;
+        adapter.adapterLuidHigh = m_adapter.HighPart;
+        m_rhi.reset(QRhi::create(QRhi::D3D11, &params, {}, &adapter));
+#elif defined(Q_OS_MACOS)
+        QRhiMetalInitParams params;
+        m_rhi.reset(QRhi::create(QRhi::Metal, &params));
+#else
+        QRhiVulkanInitParams params;
+        params.inst = vulkanInstance();
+        params.window = this;
+        // Unsupported device extensions are ignored; applyMetadata checks.
+        params.deviceExtensions = {"VK_EXT_hdr_metadata"};
+        m_rhi.reset(QRhi::create(QRhi::Vulkan, &params));
+#endif
+        if (!m_rhi) {
+            throw std::runtime_error("cannot create the QRhi device");
         }
-        m_context->CopyResource(back.Get(), m_source.Get());
-        m_swapChain->Present(1, 0);
+        m_sc.reset(m_rhi->newSwapChain());
+        m_sc->setWindow(this);
+        const auto format = m_fp16 ? QRhiSwapChain::HDRExtendedSrgbLinear : QRhiSwapChain::HDR10;
+        // Without this check QRhi falls back to an SDR swap chain silently.
+        if (!m_sc->isFormatSupported(format)) {
+            throw std::runtime_error(
+                std::string(m_fp16 ? "FP16 scRGB" : "HDR10") +
+                " swap chain not supported on this display; turn on HDR in the system "
+                "display settings");
+        }
+        m_sc->setFormat(format);
+        m_rp.reset(m_sc->newCompatibleRenderPassDescriptor());
+        m_sc->setRenderPassDescriptor(m_rp.get());
+        if (!m_sc->createOrResize()) {
+            throw std::runtime_error("cannot create the swap chain");
+        }
+        m_sampler.reset(m_rhi->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest,
+                                          QRhiSampler::None, QRhiSampler::ClampToEdge,
+                                          QRhiSampler::ClampToEdge));
+        if (!m_sampler->create()) {
+            throw std::runtime_error("cannot create the sampler");
+        }
     }
 
-    ComPtr<ID3D11Device> m_device;
-    ComPtr<ID3D11DeviceContext> m_context;
-    ComPtr<ID3D11Texture2D> m_source;
-    ComPtr<IDXGISwapChain3> m_swapChain;
+    void render() {
+        if (m_sc->currentPixelSize() != m_sc->surfacePixelSize()) {
+            // The pattern texture keeps its size; the shader draws it 1:1
+            // from the top-left corner.
+            m_sc->createOrResize();
+        }
+        QRhi::FrameOpResult r = m_rhi->beginFrame(m_sc.get());
+        if (r == QRhi::FrameOpSwapChainOutOfDate) {
+            m_sc->createOrResize();
+            r = m_rhi->beginFrame(m_sc.get());
+        }
+        if (r != QRhi::FrameOpSuccess) {
+            return;
+        }
+        QRhiResourceUpdateBatch *updates = nullptr;
+        if (!m_pending.isEmpty()) {
+            updates = m_rhi->nextResourceUpdateBatch();
+            updates->uploadTexture(
+                m_tex.get(),
+                QRhiTextureUploadEntry(0, 0, QRhiTextureSubresourceUploadDescription(m_pending)));
+            m_pending.clear();
+        }
+        QRhiCommandBuffer *cb = m_sc->currentFrameCommandBuffer();
+        cb->beginPass(m_sc->currentFrameRenderTarget(), Qt::black, {1.0f, 0}, updates);
+        if (m_ps) {
+            const QSize s = m_sc->currentPixelSize();
+            cb->setGraphicsPipeline(m_ps.get());
+            cb->setViewport({0, 0, float(s.width()), float(s.height())});
+            cb->setShaderResources();
+            cb->draw(3);
+        }
+        cb->endPass();
+        m_rhi->endFrame(m_sc.get());
+    }
+
+    // The swap chain of each window starts without metadata, so a disabled
+    // metadata needs no call.
+    std::string applyMetadata(const HdrMetadata &md) {
+        if (!md.enabled) {
+            return "No HDR metadata.";
+        }
+        const std::string values =
+            sformat("MaxCLL %u, MaxFALL %u, mastering %.4f to %.0f cd/m2", unsigned(md.max_cll),
+                   unsigned(md.max_fall), md.min_mastering / 10000.0, md.max_mastering / 10000.0);
+#if defined(Q_OS_WIN)
+        auto *sc = static_cast<QD3D11SwapChain *>(m_sc.get())->swapChain;
+        ComPtr<IDXGISwapChain4> sc4;
+        check(sc->QueryInterface(IID_PPV_ARGS(&sc4)), "IDXGISwapChain4");
+        DXGI_HDR_METADATA_HDR10 d{};
+        const auto &c = md.chromaticity;
+        d.RedPrimary[0] = c[0], d.RedPrimary[1] = c[1];
+        d.GreenPrimary[0] = c[2], d.GreenPrimary[1] = c[3];
+        d.BluePrimary[0] = c[4], d.BluePrimary[1] = c[5];
+        d.WhitePoint[0] = c[6], d.WhitePoint[1] = c[7];
+        // DXGI documents the maximum in whole cd/m² and the minimum in
+        // 0.0001 cd/m², unlike ST 2086, which uses 0.0001 for both.
+        d.MaxMasteringLuminance = UINT(std::lround(md.max_mastering / 10000.0));
+        d.MinMasteringLuminance = md.min_mastering;
+        d.MaxContentLightLevel = md.max_cll;
+        d.MaxFrameAverageLightLevel = md.max_fall;
+        check(sc4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof d, &d), "SetHDRMetaData");
+        return "HDR10 metadata: " + values + ".";
+#elif defined(Q_OS_MACOS)
+        nitpick::setMetalHdrMetadata(this, md);
+        return "EDR HDR10 metadata: " + values + ".";
+#else
+        const auto *handles = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles());
+        auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+            vulkanInstance()->getInstanceProcAddr("vkGetDeviceProcAddr"));
+        auto setHdrMetadata =
+            getDeviceProcAddr ? reinterpret_cast<PFN_vkSetHdrMetadataEXT>(
+                                    getDeviceProcAddr(handles->dev, "vkSetHdrMetadataEXT"))
+                              : nullptr;
+        if (!setHdrMetadata) {
+            return "HDR metadata NOT sent: the Vulkan driver has no VK_EXT_hdr_metadata.";
+        }
+        const auto &c = md.chromaticity;
+        const auto xy = [&c](int i) { return VkXYColorEXT{c[i] / 50000.0f, c[i + 1] / 50000.0f}; };
+        VkHdrMetadataEXT d{};
+        d.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT;
+        d.displayPrimaryRed = xy(0);
+        d.displayPrimaryGreen = xy(2);
+        d.displayPrimaryBlue = xy(4);
+        d.whitePoint = xy(6);
+        d.maxLuminance = md.max_mastering / 10000.0f;
+        d.minLuminance = md.min_mastering / 10000.0f;
+        d.maxContentLightLevel = md.max_cll;
+        d.maxFrameAverageLightLevel = md.max_fall;
+        VkSwapchainKHR sc = static_cast<QVkSwapChain *>(m_sc.get())->sc;
+        setHdrMetadata(handles->dev, 1, &sc, &d);
+        return "HDR10 metadata: " + values + ".";
+#endif
+    }
+
+    bool m_fp16;
+    bool m_ready = false;
+    std::string m_error;
+    std::function<void()> m_onInit;
+    QByteArray m_pending;
+#if defined(Q_OS_WIN)
+    LUID m_adapter{};
     ComPtr<IDXGIOutput6> m_output;
+#endif
+    // Declared first, destroyed last: every QRhi resource needs the QRhi.
+    std::unique_ptr<QRhi> m_rhi;
+    std::unique_ptr<QRhiSwapChain> m_sc;
+    std::unique_ptr<QRhiRenderPassDescriptor> m_rp;
+    std::unique_ptr<QRhiSampler> m_sampler;
+    std::unique_ptr<QRhiTexture> m_tex;
+    std::unique_ptr<QRhiShaderResourceBindings> m_srb;
+    std::unique_ptr<QRhiGraphicsPipeline> m_ps;
 };
 
 QPointer<PatternWindow> g_window;
@@ -215,52 +486,46 @@ QPointer<PatternWindow> g_window;
 namespace nitpick {
 
 std::int32_t screenPixelWidth(std::int32_t screen) {
+#if defined(Q_OS_WIN)
     const RECT r = monitorRect(screenAt(screen));
     return r.right - r.left;
+#else
+    QScreen *s = screenAt(screen);
+    return std::int32_t(std::lround(s->geometry().width() * s->devicePixelRatio()));
+#endif
 }
 
 std::int32_t screenPixelHeight(std::int32_t screen) {
+#if defined(Q_OS_WIN)
     const RECT r = monitorRect(screenAt(screen));
     return r.bottom - r.top;
+#else
+    QScreen *s = screenAt(screen);
+    return std::int32_t(std::lround(s->geometry().height() * s->devicePixelRatio()));
+#endif
 }
 
-rust::String showPattern(rust::Slice<const std::uint32_t> pixels, std::int32_t width,
-                         std::int32_t height, std::int32_t screen) {
-    if (width <= 0 || height <= 0 ||
-        pixels.size() != std::size_t(width) * std::size_t(height)) {
-        throw std::runtime_error("pixel buffer does not match the image size");
-    }
+PatternSurface openPatternWindow(std::int32_t screen, bool fp16) {
     QScreen *target = screenAt(screen);
     delete g_window.data();
-    auto window = std::make_unique<PatternWindow>(target, pixels.data(), width, height);
+    auto window = std::make_unique<PatternWindow>(target, fp16);
     window->showFullScreen();
     window->requestActivate();
-    std::string status = window->describe();
-    const RECT r = monitorRect(target);
-    if (r.right - r.left != width || r.bottom - r.top != height) {
-        status += "; WARNING: image size differs from the native screen size";
-    }
+    window->waitUntilReady();
+    PatternSurface surface;
+    surface.width = window->pixelSize().width();
+    surface.height = window->pixelSize().height();
+    surface.description = rust::String(window->describe());
     g_window = window.release();
-    return rust::String(status);
+    return surface;
+}
+
+rust::String presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
+                            std::int32_t height, const HdrMetadata &metadata) {
+    if (!g_window) {
+        throw std::runtime_error("no pattern window is open");
+    }
+    return rust::String(g_window->present(pixels.data(), pixels.size(), width, height, metadata));
 }
 
 } // namespace nitpick
-
-#else // !_WIN32
-
-namespace nitpick {
-
-[[noreturn]] static void unsupported() {
-    throw std::runtime_error("the HDR pattern window supports Windows only");
-}
-
-std::int32_t screenPixelWidth(std::int32_t) { unsupported(); }
-std::int32_t screenPixelHeight(std::int32_t) { unsupported(); }
-rust::String showPattern(rust::Slice<const std::uint32_t>, std::int32_t, std::int32_t,
-                         std::int32_t) {
-    unsupported();
-}
-
-} // namespace nitpick
-
-#endif

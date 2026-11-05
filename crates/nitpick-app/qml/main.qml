@@ -7,12 +7,27 @@ import nitpick
 ApplicationWindow {
     id: root
 
-    readonly property var patterns: JSON.parse(launcher.catalogue())
+    readonly property var catalogue: JSON.parse(launcher.catalogue())
+    readonly property var patterns: catalogue.patterns
     readonly property var pattern: patterns[patternList.currentIndex]
     readonly property var encoding: pattern.encodings[Math.max(0, encodingBox.currentIndex)]
+    readonly property var depth: catalogue.depths[Math.max(0, depthBox.currentIndex)]
+
+    // Launcher JSON for the HDR10 static metadata, see launcher.rs.
+    function metadataJson() {
+        return JSON.stringify({
+            enabled: metadataCheck.checked,
+            primaries: catalogue.primaries[Math.max(0, primariesBox.currentIndex)].id,
+            maxMastering: Number(maxMasteringField.text),
+            minMastering: Number(minMasteringField.text),
+            fromPattern: fromPatternCheck.checked,
+            maxCll: Number(maxCllField.text),
+            maxFall: Number(maxFallField.text)
+        });
+    }
 
     width: 1100
-    height: 760
+    height: 860
     visible: true
     title: qsTr("nitpick - HDR/WCG test patterns")
 
@@ -82,6 +97,19 @@ ApplicationWindow {
             }
 
             Label {
+                text: qsTr("Bit depth")
+                font.bold: true
+            }
+
+            ComboBox {
+                id: depthBox
+
+                Layout.fillWidth: true
+                model: root.catalogue.depths
+                textRole: "label"
+            }
+
+            Label {
                 text: qsTr("Display")
                 font.bold: true
             }
@@ -104,10 +132,95 @@ ApplicationWindow {
                 }
             }
 
+            CheckBox {
+                id: metadataCheck
+
+                text: qsTr("Send HDR10 static metadata")
+            }
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                enabled: metadataCheck.checked
+
+                Label {
+                    text: qsTr("Mastering primaries")
+                }
+                ComboBox {
+                    id: primariesBox
+
+                    Layout.fillWidth: true
+                    model: root.catalogue.primaries
+                    textRole: "label"
+                }
+                Label {
+                    text: qsTr("Mastering max (cd/m2)")
+                }
+                TextField {
+                    id: maxMasteringField
+
+                    Layout.fillWidth: true
+                    text: "1000"
+                    validator: DoubleValidator {
+                        bottom: 0
+                        top: 10000
+                    }
+                }
+                Label {
+                    text: qsTr("Mastering min (cd/m2)")
+                }
+                TextField {
+                    id: minMasteringField
+
+                    Layout.fillWidth: true
+                    text: "0.0001"
+                    validator: DoubleValidator {
+                        bottom: 0
+                        top: 10000
+                    }
+                }
+                CheckBox {
+                    id: fromPatternCheck
+
+                    Layout.columnSpan: 2
+                    text: qsTr("MaxCLL / MaxFALL from the pattern")
+                    checked: true
+                }
+                Label {
+                    text: qsTr("MaxCLL (cd/m2)")
+                }
+                TextField {
+                    id: maxCllField
+
+                    Layout.fillWidth: true
+                    enabled: !fromPatternCheck.checked
+                    text: "1000"
+                    validator: IntValidator {
+                        bottom: 0
+                        top: 65535
+                    }
+                }
+                Label {
+                    text: qsTr("MaxFALL (cd/m2)")
+                }
+                TextField {
+                    id: maxFallField
+
+                    Layout.fillWidth: true
+                    enabled: !fromPatternCheck.checked
+                    text: "400"
+                    validator: IntValidator {
+                        bottom: 0
+                        top: 65535
+                    }
+                }
+            }
+
             Button {
                 Layout.fillWidth: true
                 text: qsTr("Show pattern (Esc closes)")
-                onClicked: launcher.showPattern(root.pattern.id, root.encoding.id, screenBox.currentIndex)
+                onClicked: launcher.showPattern(root.pattern.id, root.encoding.id, root.depth.id,
+                                                screenBox.currentIndex, root.metadataJson())
             }
 
             Label {
@@ -122,9 +235,9 @@ ApplicationWindow {
                 Layout.topMargin: 8
                 wrapMode: Text.WordWrap
                 opacity: 0.8
-                text: qsTr("Before measuring: turn on Windows HDR for the display, set the GPU output to 10 bpc. " +
-                           "Narrow-range codes reach the wire unchanged only with RGB full-range output. " +
-                           "See doc/design/test_patterns.md.")
+                text: qsTr("Before measuring: turn on HDR for the display, set the GPU output to 10 bpc " +
+                           "(12 bpc for 12-bit). Narrow-range codes reach the wire unchanged only with RGB " +
+                           "full-range output. See doc/design/test_patterns.md.")
             }
 
             Item {
@@ -150,7 +263,8 @@ ApplicationWindow {
                     selectByMouse: true
                     font.family: "Consolas"
                     font.pixelSize: 13
-                    text: launcher.referenceTable(root.pattern.id, root.encoding.id)
+                    text: launcher.referenceTable(root.pattern.id, root.encoding.id, root.depth.id,
+                                                  Math.max(0, screenBox.currentIndex))
                 }
             }
         }
