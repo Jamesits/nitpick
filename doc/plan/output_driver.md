@@ -6,24 +6,6 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 4. Add the cross-platform device implementation crate
-
-Requires: 3.
-
-TODO:
-
-- Add `nitpick-display` with native modules selected for the target OS and injected native-call interfaces for tests. Search existing Rust bindings before adding declarations. Share error and state handling under [Crate boundary](../design/display_device.md#crate-boundary).
-- Build by package on Windows, macOS and Linux. Verify that core, browser and webview builds do not acquire native device dependencies. Test unknown query fields, explicit unavailable-service errors and versioned recovery-record round trips without a display.
-
-### 5. Implement Windows device and capability enumeration
-
-Requires: 4.
-
-TODO:
-
-- Enumerate native devices and read capabilities and active mode through the Windows sources in [Platform implementations](../design/display_device.md#platform-implementations). Map display paths to the native adapter/source identifiers. Keep reported support and active settings separate.
-- With injected reports, verify HDR, SDR WCG, HDR-off, missing luminance or depth, duplicate names and topology changes. Check native identity and readable fields on a selected Windows display. A missing field must remain unknown; generic Advanced Color enablement must not report active HDR.
-
 ### 6. Implement macOS device and capability enumeration
 
 Requires: 4.

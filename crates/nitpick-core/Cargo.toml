@@ -5,9 +5,15 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Serde forms of the device recovery-record types.
+serde = ["dep:serde", "dep:hex"]
+
 [dependencies]
 font8x8 = "0.3.1"
 half = "2"
+hex = { version = "0.4.3", features = ["serde"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
 sha2 = "0.11"
 
 [lints]

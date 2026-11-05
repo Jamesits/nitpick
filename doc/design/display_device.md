@@ -4,7 +4,7 @@
 
 `DisplayDeviceControl` in `nitpick-core::device` enumerates local display devices, reads their capabilities and current state, and controls their OS settings. The first write operation is ICC profile assignment, including the state needed to restore the previous assignment. `nitpick-display` implements this trait for Windows, macOS and Linux. Both the Qt host and the command-line host can use it.
 
-**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. The native crate and ICC assignment are not implemented. The remaining work is in [the output driver plan](../plan/output_driver.md).
+**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows device and capability queries and the recovery-record format. macOS and Linux queries and all ICC assignment are not implemented; these backends return `Unsupported`. The remaining work is in [the output driver plan](../plan/output_driver.md).
 
 The host coordinates three separate interfaces:
 
@@ -29,8 +29,8 @@ graph LR
 
 | Component | Responsibility | Dependencies |
 |---|---|---|
-| `nitpick-core::device` | Trait, device identity, capabilities, mode state, profile requests, saved state and errors | Rust data types; no OS, GUI, executor or colour library |
-| `nitpick-display` | Device and capability enumeration, native profile changes, readback and restoration | Core plus native bindings selected for the target OS |
+| `nitpick-core::device` | Trait, device identity, capabilities, mode state, profile requests, saved state and errors | Rust data types, with optional `serde` forms; no OS, GUI, executor or colour library |
+| `nitpick-display` | Device and capability enumeration, native profile changes, readback and restoration, recovery-record text form | Core plus native bindings selected for the target OS |
 | Host or test runner | Device selection, durable recovery record, worker lifetime and test sequence | Core and the selected implementations |
 | Profile test support | ICC contents, MHC2 extraction and display model | Little CMS through its separate adapter |
 
@@ -111,6 +111,24 @@ Before a profile change, the host cancels pending presentation and measurement t
 | macOS | Native display identity and available EDR reports; [ColorSync device profile assignment](https://developer.apple.com/documentation/colorsync/colorsyncdevicesetcustomprofiles(_:_:_:)) | Map the display to its ColorSync device UUID and profile ID. Keep EDR headroom separate from absolute luminance. Save user and host scope. Restore a prior custom profile or remove its override. |
 | Linux | Wayland output or XRandR reports, with compositor/DRM colour state only where readable; [colord device profile association and default selection](https://www.freedesktop.org/software/colord/gtk-doc/CdDevice.html) | Match native output identity to the colord device. Record which capability fields are available. Check service availability, authorization and persistence. Establish separately whether the compositor uses the assigned profile. |
 
+Each platform module maps native reports to the core types through an injected native-call trait. Only the module that calls the OS is limited to its target, so the mapping tests run on every OS.
+
+### Windows reports
+
+The device key is the monitor device interface path from `DISPLAYCONFIG_TARGET_DEVICE_NAME`. It survives a restart and distinguishes identical monitors. The identity evidence holds only fields that survive a restart: EDID IDs, connector instance and output technology. The backend re-resolves the adapter LUID and source ID from the key before each native call.
+
+| Field | Source | Rule |
+|---|---|---|
+| `hdr`, `sdr_wcg` support | `DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2` (Windows 11 24H2 and later) | Without it, the legacy support bit covers both kinds. A kind is then known only when it is active, or when no Advanced Color is supported. |
+| `hdr_on`, active kind | `INFO_2` active colour mode; otherwise the legacy enabled bit and the DXGI PQ colour space | The legacy enabled bit alone does not set HDR. |
+| `gamut` | Active kind | HDR is BT.2020; plain SDR is sRGB; SDR WCG is unknown. |
+| `wire_depth` | `bitsPerColorChannel` of either Advanced Color report | 0 is unknown. Supported depths are unknown: Windows reports the active depth only. |
+| Luminance | `DXGI_OUTPUT_DESC1`, matched by GDI source name | 0 is unknown. A minimum is known only with a known peak. |
+| `sdr_white_nits` | `DISPLAYCONFIG_SDR_WHITE_LEVEL` | HDR active only. |
+| `native_size` | Active signal size of the target mode | |
+
+**Unverified:** whether DXGI substitutes OS default luminance for an EDID without HDR static metadata, whether the legacy wide-colour bit is set only for SDR WCG, and the wire gamut of SDR WCG. A check on Windows 11 build 26200 with one HDR display read every field above, with HDR on at 8 bits per channel.
+
 **Unverified:** these implementations and their restoration behaviour on the selected OS versions. Search existing Rust bindings before adding native declarations. Pin the chosen dependencies. Use only the bindings needed on the target OS.
 
 The crate must build on all three operating systems. Missing APIs, services, roles or permissions return explicit errors or unknown capability fields. Linux without a usable colord display mapping has no profile setter in this design; display enumeration can still work. A successful colord assignment does not establish compositor application. A successful ColorSync assignment does not establish a Windows MHC2 path. Keep these limits separate from build support.
@@ -125,6 +143,9 @@ The crate must build on all three operating systems. Missing APIs, services, rol
 | Profile selection | One unqualified path; explicit native role and scope | Explicit target. The OS can have different defaults and overrides for one device. |
 | Call model | Native work in the UI; synchronous trait on a worker | Worker. Native APIs can block, and cancellation must not hide an unfinished write. |
 | Recovery | Save after assignment; prepare and save before assignment | Prepare first. A partial native failure or process crash must leave enough state to recover. |
+| Recovery-record format | Separate record types in `nitpick-display`; `serde` forms of the core types | `serde` behind a core feature: one definition of each type. The reader checks `version` before other fields, because another version can give a field another meaning. Profile bytes and hashes are hex text, and the stored hash must match the bytes. |
+| Native-call tests | Test only on each OS; inject native reports | Inject. The mapping compiles on every OS, and unknown or failed fields can be tested without a display. |
+| Topology revision | std hasher; fixed hash | FNV-1a 64 over sorted identity fields. Recovery records store the value, so it must not change between builds or runs. |
 
 ## Usage
 
@@ -134,7 +155,7 @@ On startup, inspect unresolved recovery records before changing that device agai
 
 ## Testing
 
-Run the same trait contract against a fake backend and each native backend. Ordinary CI uses injected native calls and does not change the developer's display profile. Test capability tri-states, supported versus active modes, partial query data, stale caches and profile queries without write permission. Test device replacement, duplicate display names, role and scope selection, no prior override, wrong profile bytes and unsupported services.
+Run the same trait contract against a fake backend and each native backend. To print the readable fields of each local display, run `cargo run -p nitpick-display --example devices`. Ordinary CI uses injected native calls and does not change the developer's display profile. Test capability tri-states, supported versus active modes, partial query data, stale caches and profile queries without write permission. Test device replacement, duplicate display names, role and scope selection, no prior override, wrong profile bytes and unsupported services.
 
 Inject failure after installation, association and default selection. Verify recovery after each step, timeout, cancellation and process restart. Test concurrent external changes, shared pre-existing profiles and repeated restoration. A completed assignment must have matching readback. Failed restoration fails the run.
 

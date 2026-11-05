@@ -20,6 +20,7 @@ pub const PREPARED_CHANGE_VERSION: u32 = 1;
 ///
 /// `backend` is owned, unlike `DisplayId::driver`, because recovery records
 /// are read back from storage.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DeviceId {
     pub backend: String,
@@ -36,6 +37,7 @@ impl fmt::Display for DeviceId {
 }
 
 /// A native value with its origin, or the reason it is not available.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Report<T> {
     Known {
@@ -84,6 +86,7 @@ impl Report<bool> {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub id: DeviceId,
@@ -139,6 +142,7 @@ pub struct DeviceQuery {
 }
 
 /// Native profile role.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProfileRole {
     /// Ordinary display profile.
@@ -147,18 +151,21 @@ pub enum ProfileRole {
     AdvancedColor,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UserScope {
     Current,
     All,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostScope {
     Current,
     Any,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProfileScope {
     pub user: UserScope,
@@ -168,6 +175,7 @@ pub struct ProfileScope {
 
 /// One addressable profile assignment. Listed by
 /// [`DisplayDeviceControl::profile_targets`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProfileTarget {
     pub device: DeviceId,
@@ -200,6 +208,7 @@ impl fmt::Display for ContentHash {
 
 /// An installed or registered profile as the OS names it: a file name on
 /// Windows, a profile URL on macOS or a colord object ID.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProfileRef {
     pub native_id: String,
@@ -207,6 +216,7 @@ pub struct ProfileRef {
     pub hash: Option<ContentHash>,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileSelection {
     /// No selection at this target or a wider scope; the OS default applies.
@@ -221,6 +231,7 @@ pub enum ProfileSelection {
     Unreadable(String),
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProfileState {
     pub target: ProfileTarget,
@@ -301,6 +312,7 @@ impl IccProfile {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceKind {
     /// A profile file copied into the OS profile store.
@@ -313,6 +325,7 @@ pub enum ResourceKind {
 
 /// A native resource that the change creates. Restoration removes only
 /// these, and only if no longer used.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlannedResource {
     pub kind: ResourceKind,
@@ -322,6 +335,7 @@ pub struct PlannedResource {
 
 /// A validated profile change. The host saves it as the recovery record
 /// before [`DisplayDeviceControl::set_icc_profile`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedProfileChange {
     /// [`PREPARED_CHANGE_VERSION`] when prepared.
@@ -457,6 +471,10 @@ pub trait DisplayDeviceControl {
         change: &PreparedProfileChange,
     ) -> Result<ProfileState, DeviceError>;
 }
+
+#[cfg(feature = "serde")]
+#[path = "device_serde.rs"]
+mod serde_impl;
 
 #[cfg(test)]
 #[path = "device_tests.rs"]
