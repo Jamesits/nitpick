@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** design only. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The common driver interface, browser driver, test host, capture adapters and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** design only. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures) and their reader exist; no production code is tested against them yet. The common driver interface, browser driver, test host, capture adapters and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -74,9 +74,41 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 
 ### Shared fixtures
 
-Store fixtures and expected data in `tests/fixtures/output/` when the harness is implemented. Store the reference generator and its locked Python dependencies in `tests/reference/`. Use `uv` to run it. Rust tests read the checked-in vectors; normal CI does not need Python. Calculate expected pixels with independent f64 arithmetic. The generator must not call nitpick's conversion functions, evaluate pixels through Little CMS, or use the reference table as its sole source.
+Fixtures and expected data are in `tests/fixtures/output/`. The reference generator and its locked Python dependencies are in `tests/reference/`. Rust tests read the checked-in vectors through the `nitpick-fixtures` crate; normal CI does not need Python. The generator does not call nitpick's conversion functions, evaluate pixels through Little CMS, or use the reference table as its sole source.
 
-Each case has a stable ID, input depth and encoding, image size, code triples, patch rectangles, metadata request, required capabilities and expected results for each boundary. Include the source specification, generator version and rounding rule. Invalid input cases state the expected error.
+**Deviation from plain f64 arithmetic:** the generator calculates at higher precision and stores the nearest f64 value. Range mapping, primary matrices and integer quantization use exact rationals. Transfer functions use `mpmath` at 50 significant digits. Thus exact halves in quantization are detected; for example, 12-bit narrow code 840 gives PNG sample $65535 \cdot 584 / 3504 = 10922.5$, stored as 10923. A production f64 calculation can round such a value down.
+
+Each case has a stable ID, input depth and encoding, image size, palette of code triples, layout, metadata request, required capabilities and expected results for each boundary. A layout is either rectangles painted in order over a background entry, or one palette index per pixel. Invalid input cases state the expected error.
+
+The files hold data only, for machine reading: no descriptions, labels, provenance records or manifest. The generator source documents each case. Sources and rounding rules for all cases:
+- Transfer: SMPTE ST 2084 PQ. Quantization: ITU-R BT.2100 Table 9. Primary matrices: SMPTE RP 177 with BT.709, BT.2020 and P3-D65 (SMPTE EG 432-1) primaries and D65. Light levels: CTA-861.3. scRGB, packing and PNG mapping: [Swap chain output](qt.md#swap-chain-output) and [Code to PNG sample](browser.md#code-to-png-sample).
+- Codes and PNG samples round half up: $\lfloor x + 1/2 \rfloor$. Real values are the binary64 values nearest to the high-precision results.
+
+| File | Content |
+|---|---|
+| `scalar.json` | every scalar code as columns: QRhi signal, luminance, grey scRGB and single-channel `R10G10B10A2` words; browser samples, clip state and PQ luminance for each encoding |
+| `codes.json`, `luminance.json`, `gamut.json`, `mixed.json`, `geometry.json` | patch and image cases |
+| `state.json` | two marker frames per depth and event sequences with expected outcomes |
+| `invalid.json` | invalid inputs and their error kinds |
+
+Expected results per palette entry:
+- `qrhi`: the codes as full-range PQ for every encoding: signal, linear BT.2020 cd/m², ideal scRGB before f16 rounding and, at 10 bits, the packed word. The FP16 neighbour search is not in the fixtures.
+- `browser`: 16-bit samples and clip state under [Code to PNG sample](browser.md#code-to-png-sample); PQ luminance and scRGB of the stored samples; none for HLG.
+
+Each case also has MaxCLL and MaxFALL for both drivers, and the resolved metadata if it has a request. A browser HLG case gives the error `unsupported` for automatic light levels. State sequences use the error kind `any` where this design does not fix an `OutputError` variant (stale surface after resize, device loss).
+
+The BT.2111 levels are transcribed from BT.2111-3 (05/2025) Tables 2–4, both depths, and are not derived from the 10-bit values. The ramp is covered by the scalar tables. P3-D65 red has a small negative BT.2020 blue component; the generator clips it to 0 before encoding and sets `container_clip`.
+
+Regenerate and check from the repository root. Reproducible generation gives no difference to the committed files:
+
+```sh
+uv run --project tests/reference python tests/reference/generate.py  # write
+git diff --exit-code tests/fixtures/output                            # compare with the committed files
+uv run --project tests/reference pytest tests/reference              # generator tests
+cargo nextest run -p nitpick-fixtures                                 # Rust reader tests
+```
+
+`.gitattributes` keeps the fixture bytes free of line-ending conversion, so the comparison also passes on Windows.
 
 Profile fixtures also store the known matrix, LUT and luminance values in their manifest. These values are defined before profile serialization. Compare library extraction against that manifest, so parsed data cannot become its own expected result.
 

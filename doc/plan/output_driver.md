@@ -6,13 +6,6 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 1. Add independent output fixtures
-
-TODO:
-
-- Add the case manifest and locked `uv` reference generator in the locations defined by [Shared fixtures](../design/output_driver/testing.md#shared-fixtures). Generate code, luminance, gamut, mixed-channel, geometry and state vectors with independent f64 arithmetic. Profile fixtures are a separate item below.
-- Verify reproducible generation, source and rounding records, and rejection of invalid cases. Rust tests must read the checked-in data without Python. Expected values must not come from production conversion code or Little CMS.
-
 ### 2. Add the common driver types and capability rules
 
 TODO:
@@ -71,7 +64,7 @@ TODO:
 
 ### 8. Calculate light levels from effective PQ samples
 
-Requires: 1, 2.
+Requires: 2.
 
 TODO:
 
@@ -80,16 +73,12 @@ TODO:
 
 ### 9. Extend QRhi integer packing checks
 
-Requires: 1.
-
 TODO:
 
 - Extend `output_tests.rs` with independent `R10G10B10A2` expectations for every scalar code, asymmetric channels, alpha and row boundaries. Test equal input codes under all three encodings.
 - Verify exact bytes and channel order. The scope encodings must retain the full-range PQ transport described in [Signalling](../design/output_driver/qt.md#signalling).
 
 ### 10. Test FP16 conversion and neighbour search independently
-
-Requires: 1.
 
 TODO:
 
@@ -176,7 +165,7 @@ TODO:
 
 ### 19. Encode browser PNG samples and colour tags
 
-Requires: 1, 18.
+Requires: 18.
 
 Open questions:
 
@@ -306,7 +295,7 @@ TODO:
 
 ### 33. Add the shared test-host protocol
 
-Requires: 1, 17, 28.
+Requires: 17, 28.
 
 TODO:
 
@@ -315,7 +304,7 @@ TODO:
 
 ### 34. Add capture descriptors and result artifacts
 
-Requires: 1, 33.
+Requires: 33.
 
 TODO:
 
@@ -333,7 +322,7 @@ TODO:
 
 ### 36. Add comparison metrics and fixed limits
 
-Requires: 1, 34.
+Requires: 34.
 
 TODO:
 
@@ -394,8 +383,6 @@ TODO:
 - Verify layout, timestamps, resize and missing-field handling. Missing transfer, primaries, range or scale must make absolute HDR comparison unavailable. Keep X11 screenshots limited to geometry.
 
 ### 42. Add known ICC and MHC2 profile fixtures
-
-Requires: 1.
 
 TODO:
 

@@ -1,0 +1,413 @@
+{
+ "cases": [
+  {
+   "id": "invalid-encoding",
+   "error": "unknown_encoding",
+   "input": {
+    "id": "invalid-encoding",
+    "format": {
+     "encoding": "hlg-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-depth-8",
+   "error": "unsupported_depth",
+   "input": {
+    "id": "invalid-depth-8",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 8
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-depth-16",
+   "error": "unsupported_depth",
+   "input": {
+    "id": "invalid-depth-16",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 16
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-empty",
+   "error": "empty_image",
+   "input": {
+    "id": "invalid-empty",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [0, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-code-10",
+   "error": "code_out_of_range",
+   "input": {
+    "id": "invalid-code-10",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [1024, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-code-12",
+   "error": "code_out_of_range",
+   "input": {
+    "id": "invalid-code-12",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 12
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 4096]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-code-negative",
+   "error": "code_out_of_range",
+   "input": {
+    "id": "invalid-code-negative",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, -1, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-rect",
+   "error": "rect_out_of_bounds",
+   "input": {
+    "id": "invalid-rect",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": [
+      [1, 0, 2, 1, 0]
+     ]
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-rect-empty",
+   "error": "rect_out_of_bounds",
+   "input": {
+    "id": "invalid-rect-empty",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": [
+      [0, 0, 0, 1, 0]
+     ]
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-rows",
+   "error": "layout_mismatch",
+   "input": {
+    "id": "invalid-rows",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rows",
+     "rows": [
+      [0, 0],
+      [0]
+     ]
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-index",
+   "error": "layout_mismatch",
+   "input": {
+    "id": "invalid-index",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rows",
+     "rows": [
+      [0, 1],
+      [0, 0]
+     ]
+    },
+    "metadata": null
+   }
+  },
+  {
+   "id": "invalid-mastering",
+   "error": "invalid_metadata",
+   "input": {
+    "id": "invalid-mastering",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": {
+     "primaries": [
+      [0.708, 0.292],
+      [0.17, 0.797],
+      [0.131, 0.046]
+     ],
+     "white": [0.3127, 0.329],
+     "max_mastering_nits": 1000.0,
+     "min_mastering_nits": 2000.0,
+     "light_level": {
+      "kind": "explicit",
+      "max_cll": 1000.0,
+      "max_fall": 400.0
+     }
+    }
+   }
+  },
+  {
+   "id": "invalid-chromaticity",
+   "error": "invalid_metadata",
+   "input": {
+    "id": "invalid-chromaticity",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": {
+     "primaries": [
+      [0.708, 0.292],
+      [0.17, 0.797],
+      [0.131, 0.046]
+     ],
+     "white": [0.3127, 1.2],
+     "max_mastering_nits": 1000.0,
+     "min_mastering_nits": 0.0001,
+     "light_level": {
+      "kind": "explicit",
+      "max_cll": 1000.0,
+      "max_fall": 400.0
+     }
+    }
+   }
+  },
+  {
+   "id": "invalid-light-level",
+   "error": "invalid_metadata",
+   "input": {
+    "id": "invalid-light-level",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": {
+     "primaries": [
+      [0.708, 0.292],
+      [0.17, 0.797],
+      [0.131, 0.046]
+     ],
+     "white": [0.3127, 0.329],
+     "max_mastering_nits": 1000.0,
+     "min_mastering_nits": 0.0001,
+     "light_level": {
+      "kind": "explicit",
+      "max_cll": 100.0,
+      "max_fall": 200.0
+     }
+    }
+   }
+  },
+  {
+   "id": "invalid-light-level-negative",
+   "error": "invalid_metadata",
+   "input": {
+    "id": "invalid-light-level-negative",
+    "format": {
+     "encoding": "pq-full",
+     "depth": 10
+    },
+    "size": [2, 2],
+    "palette": [
+     {
+      "codes": [0, 0, 0]
+     }
+    ],
+    "layout": {
+     "kind": "rects",
+     "background": 0,
+     "rects": []
+    },
+    "metadata": {
+     "primaries": [
+      [0.708, 0.292],
+      [0.17, 0.797],
+      [0.131, 0.046]
+     ],
+     "white": [0.3127, 0.329],
+     "max_mastering_nits": 1000.0,
+     "min_mastering_nits": 0.0001,
+     "light_level": {
+      "kind": "explicit",
+      "max_cll": -1.0,
+      "max_fall": 0.0
+     }
+    }
+   }
+  }
+ ]
+}

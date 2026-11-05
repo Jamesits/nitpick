@@ -1,0 +1,2 @@
+# Byte-exact fixtures: regeneration must give no git diff on any OS.
+tests/fixtures/** -text
