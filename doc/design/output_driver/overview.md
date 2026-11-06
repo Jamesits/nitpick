@@ -10,7 +10,7 @@ The compatibility API is one Rust trait, `OutputDriver`, in `nitpick-core` (modu
 
 Native display enumeration, capability queries and ICC profile assignment use the separate [`DisplayDeviceControl` trait](../display_device.md) in `nitpick-core::device`. The `nitpick-display` crate implements native device operations on Windows, macOS and Linux. QRhi combines device reports with its output-path limits. Hosts coordinate device changes with presentation; `OutputDriver` does not change OS profile associations.
 
-`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries. **Not implemented:** ICC profile assignment, the browser driver and the command-line host. The existing core library has no Qt dependency. The only current executable, `nitpick-app`, needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
+`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries. `nitpick-browser` has the browser service, the PNG encoder and the browser driver's `displays`, `query` and `open`. **Not implemented:** ICC profile assignment, browser presentation and the command-line host. The existing core library has no Qt dependency. The only current executable, `nitpick-app`, needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
 
 ```mermaid
 graph LR

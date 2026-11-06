@@ -42,7 +42,15 @@ sequenceDiagram
 
 After authentication, the client sends `hello`. It sends `hello` again on each change of the media queries, the viewport, full-screen state or the pixel ratio. The server keeps the last state of the single authenticated client. Only a client with a valid `hello` appears in `displays`. `query` reads this state. A client that closes its WebSocket is removed from `displays`.
 
-`open` checks the selected depth and takes a snapshot of the current viewport. It does not send a command or wait for the client. With no valid client state it returns `Disconnected`. A viewport or pixel-ratio change invalidates an open surface. The service notifies the host, which cancels presentation and measurement timing, then opens and renders again. `present` also checks that its surface is still valid and reports `Platform` with a viewport-change reason if it is stale.
+Each authenticated session gets a new `DisplayId` (`browser:client-N`). A surface of an earlier session therefore cannot match a new client. The display name is the engine name and the client IP address, for example "Safari at 192.168.1.20". The display size is the viewport in display pixels.
+
+A `hello` is valid if it has all fields in [Interface](#interface) with the specified types and values. All sizes, `scale` and `pixelRatio` must be positive. Each side of the viewport in display pixels must be in 1 to 16384; this limit stops a client from making the host render a very large frame. An invalid `hello` ends the session with close code 4003.
+
+The service sends a `Ready` client-state event for each valid `hello`. Before `Ready`, it sends `ViewportChanged` if the surface geometry changed: the viewport size in display pixels, `pixelRatio` or `viewport.scale`. Other changes, such as `dynamicRange` or `fullscreen` with the same viewport, keep the surface valid. The host queries again after each `Ready`.
+
+`open` checks the selected depth and takes a snapshot of the current viewport. It does not send a command or wait for the client. With no valid client state it returns `Disconnected`. A geometry change invalidates an open surface. On `ViewportChanged`, the host cancels presentation and measurement timing, then opens and renders again. `present` also checks that its surface is still valid. It reports `Platform` with a viewport-change reason if the surface is stale, or `Disconnected` if the session ended or the surface was closed. These checks use the cached state only and do not wait for the network.
+
+The SDR preview reason and the full-screen layout warning appear in the mode description and the surface description, so the status line shows them.
 
 The page enters full screen from its "Full screen" button. A WebSocket message cannot supply the [user activation required by the Fullscreen API](https://fullscreen.spec.whatwg.org/#dom-element-requestfullscreen). Until full screen is active, the surface covers only the reported viewport and the host shows a warning. The client reports the new viewport after the change. A command-line host selects a client by `DisplayId`; it does not enumerate local monitors.
 
@@ -62,7 +70,17 @@ Selected: the HDR image. A 16-bit PNG with a `cICP` chunk (BT.2020 primaries, PQ
 - The image carries code values, not linear light. This is the same model as the pattern (`Image` of codes). The WebGPU `extended` mode needs linear values relative to the SDR white, and no web API gives the SDR white luminance.
 - No shader. The page does not change the decoded values.
 
-If `dynamicRange` is `standard`, the browser tone maps the image to SDR. The driver shows it, and the status line shows "SDR preview". Firefox on Windows and Linux, and WebKitGTK (Tauri on Linux), show SDR also on an HDR display. The driver identifies them by the user agent and gives `hdr_on = Some(false)`.
+If `dynamicRange` is `standard`, the browser tone maps the image to SDR. The driver shows it, and the status line shows "SDR preview". Firefox on Windows and Linux, and WebKitGTK (Tauri on Linux), show SDR also on an HDR display. The driver identifies them by the user agent and gives `hdr_on = Some(false)`. With SDR preview, every encoding has `interpretation = No`; otherwise `interpretation` is `Unknown`.
+
+User-agent rules (substring tests):
+
+| Engine | Rule | SDR only |
+|---|---|---|
+| Firefox | `Firefox/`, and `Windows`, or `Linux` or `X11` without `Android` | yes |
+| WebKitGTK | `AppleWebKit/`, `Linux` or `X11`, no `Android`, no `Chrome/` or `Chromium/` | yes |
+| other | – | no |
+
+**Unverified:** these rules come from documentation and bug reports. Firefox on Android has no rule.
 
 ### Code to PNG sample
 
@@ -89,7 +107,7 @@ HDR10 metadata: the driver writes PNG `mDCV` and `cLLI` chunks from the resolved
 The client shows the image at one image pixel per display pixel:
 - `open` gives the viewport size in display pixels: $\mathrm{round}(w_{css} \cdot r) \times \mathrm{round}(h_{css} \cdot r)$, $r$ = `devicePixelRatio`.
 - The `<img>` has the CSS size $W / r \times H / r$, `image-rendering: pixelated`, no transform, opacity 1 and `dynamic-range-limit: no-limit`. A transform or an opacity below 1 can clamp HDR to SDR (reported for WebKit).
-- `pixel_exact` is `Yes` only if $r$ is an integer, `visualViewport.scale` is 1 and the client reports a layout size equal to the image size. Otherwise the browser resamples and changes codes. The driver continues and shows a warning.
+- `pixel_exact` is `Yes` only if $r$ is an integer, `visualViewport.scale` is 1 and the client reports a layout size equal to the image size. Otherwise the browser resamples and changes codes. The driver continues and shows a warning. A non-integer $r$ or a scale other than 1 gives `No`. Before the client reports a layout size in `applied`, the result is `Unknown`.
 - iPad: $r = 2$. Safari ignores `user-scalable=no`, so a pinch zoom changes `visualViewport.scale`. The client reports it.
 - Tauri on Windows: the shell starts WebView2 with `--force-device-scale-factor=1`, so $r = 1$ at all Windows scale settings.
 
@@ -110,7 +128,7 @@ WebSocket messages:
 | server → client | `auth_required` | – (the client asks for the code shown by the server) |
 | client → server | `auth` | `code` (string) |
 | server → client | `authenticated` | `token` (random bearer token for this session) |
-| client → server | `hello` | `client` (user agent, `webview` flag), `screen` (`width`, `height` in CSS px), `viewport` (`width`, `height`, `scale`), `pixelRatio`, `dynamicRange` (`high`/`standard`), `colorGamut` (`rec2020`/`p3`/`srgb`), `fullscreen` |
+| client → server | `hello` | `client` (`userAgent` string, `webview` boolean), `screen` (`width`, `height` in CSS px), `viewport` (`width`, `height` in CSS px, `scale`), `pixelRatio`, `dynamicRange` (`high`/`standard`), `colorGamut` (`rec2020`/`p3`/`srgb`), `fullscreen` (boolean) |
 | server → client | `show` | `id`, `width`, `height` |
 | client → server | `applied` | `id`, `naturalWidth`, `naturalHeight`, `layoutWidth`, `layoutHeight` (display px) |
 | client → server | `error` | `id`, `message` (for example decode failure) |
@@ -127,7 +145,7 @@ Limits and error codes:
 | Client message larger than 64 KiB | the server ends the connection |
 | Wrong code | close code 4001 |
 | No `auth` within 60 s | close code 4002 |
-| Malformed, unknown, binary or out-of-order message; `auth` after authentication | close code 4003 |
+| Malformed, unknown, binary or out-of-order message; `auth` after authentication; invalid `hello` | close code 4003 |
 | No random data from the OS for the code or token | close code 1011 |
 
 All frame responses, including errors, have `Cache-Control: no-store`. The server checks the token before it looks up the frame, so a client without the token cannot test frame IDs. The bearer scheme name is case-insensitive.
@@ -161,7 +179,7 @@ The client keeps the latest requested frame ID. After decode, it checks this ID 
 
 ### Mapping to `ModeSettings`
 
-- `hdr_on`: `dynamicRange == "high"`.
+- `hdr_on`: `dynamicRange == "high"`, and `Some(false)` for an SDR-only engine. See [Graphics path](#graphics-path).
 - `gamut`: `colorGamut`.
 - `pixel_ratio`: `pixelRatio`.
 - `wire_depth`, `peak_nits`, `min_nits`, `sdr_white_nits`: `None`. No web API gives them.
@@ -210,7 +228,7 @@ Settings before a measurement on an iPad:
 
 Tests and pass criteria are in [Output verification](testing.md): [browser unit tests](testing.md#browser-output), [browser integration](testing.md#browser-integration), and [physical output criteria](testing.md#pass-criteria). Use a probe for the remote display; a capture on the server does not test it.
 
-Service unit tests (`nitpick-browser`, `service_tests.rs`) cover start, loopback default, bind failures, the embedded page, event order on a Rust executor and bounded shutdown. They also run WebSocket authentication over real HTTP with a `tokio-tungstenite` client: `409`, `429`, `401`, `no-store`, revocation on close and the message size limit. Session unit tests (`session_tests.rs`) use a mock transport and the paused Tokio clock. They cover leading-zero and fixed codes, wrong and out-of-order messages, the 60 s timeout, the lock steps, the one-session reservation, token checks, revocation and reconnect. PNG unit tests (`encode_tests.rs`) cover samples, clipping and the cICP chunk; they decode with `zune-png` and check chunk CRCs with `crc32fast`, not with the `png` crate. **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
+Service unit tests (`nitpick-browser`, `service_tests.rs`) cover start, loopback default, bind failures, the embedded page, event order on a Rust executor and bounded shutdown. They also run WebSocket authentication over real HTTP with a `tokio-tungstenite` client: `409`, `429`, `401`, `no-store`, revocation on close and the message size limit. Session unit tests (`session_tests.rs`) use a mock transport and the paused Tokio clock. They cover leading-zero and fixed codes, wrong and out-of-order messages, the 60 s timeout, the lock steps, the one-session reservation, token checks, revocation and reconnect. They also cover `hello` caching, invalid `hello`, the event order on resize and a new display ID for each session. Client unit tests (`client_tests.rs`) cover `hello` validation, display-pixel rounding, the user-agent rules, the capability and mode report, the pixel-mapping rules and the surface geometry. Driver unit tests (`driver_tests.rs`) cover `displays`, `query` and `open` from cached state, disconnect, warnings, and stale, closed or mismatched surfaces in `present` on the first poll. PNG unit tests (`encode_tests.rs`) cover samples, clipping and the cICP chunk; they decode with `zune-png` and check chunk CRCs with `crc32fast`, not with the `png` crate. **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
 
 ## Future enhancements
 

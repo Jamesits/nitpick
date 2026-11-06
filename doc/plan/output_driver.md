@@ -23,22 +23,14 @@ TODO:
 
 - In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
-### 22. Cache browser state and validate surfaces
-
-Requires: 2, 21.
-
-TODO:
-
-- Accept valid authenticated `hello` messages. Implement synchronous `displays`, `query` and `open` from cached state. Apply browser mode and capability rules, including user-agent limits, viewport size and pixel mapping.
-- Verify no client before valid `hello`, disconnect removal, unknown precision and metadata effect, SDR preview and layout warnings. Resize or pixel-ratio change must invalidate the surface and emit a host event. A stale surface must fail presentation without a network wait.
-
 ### 23. Implement browser presentation and cancellation
 
 Requires: 20, 22.
 
 TODO:
 
-- Implement `BrowserDriver::present` with owned encoding jobs, frame storage, `show`, matching `applied` replies and task wakeups. Run acknowledgement timeouts on the server runtime. Bound pending work and release obsolete frame data.
+- Implement `BrowserDriver::present` with owned encoding jobs, frame storage, `show`, matching `applied` replies and task wakeups. Run acknowledgement timeouts on the server runtime. Bound pending work and release obsolete frame data. Replace the current "not implemented" result after the surface checks.
+- Report `pixel_exact = Yes` after an `applied` layout size equal to the image size, under the conditions in [Pixel mapping](../design/output_driver/browser.md#pixel-mapping). Include the open warnings in the status line.
 - Verify acknowledgement ID and dimensions, client errors, timeout from `show`, disconnect, resize, close and cancellation under [Image requests and presentation](../design/output_driver/browser.md#image-requests-and-presentation). Late worker results and replies must not complete a new frame. Service events must remain available during a mutable driver borrow.
 
 ### 24. Add browser authentication and viewport controls

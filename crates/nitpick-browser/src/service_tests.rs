@@ -470,4 +470,39 @@ mod session {
         }
         connect_when_free(addr).await;
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hello_over_http_reaches_the_driver() {
+        use nitpick_core::driver::OutputDriver;
+
+        use crate::driver::BrowserDriver;
+        use crate::test_support::hello_json;
+
+        let (service, mut events) = start_fixed();
+        let addr = service.local_addr();
+        let mut driver = BrowserDriver::new(&service);
+        let (mut ws, _token) = authenticate(addr).await;
+        assert_eq!(driver.displays(), []);
+        send_json(&mut ws, &hello_json()).await;
+        let display = loop {
+            if let ServiceEvent::Client(ClientState::Ready(d)) = events.next().await.unwrap() {
+                break d;
+            }
+        };
+        let displays = driver.displays();
+        assert_eq!(displays.len(), 1);
+        assert_eq!(displays[0].id, display);
+        assert_eq!(displays[0].name, "Safari at 127.0.0.1");
+        let surface = driver
+            .open(&display, nitpick_core::signal::BitDepth::Ten)
+            .unwrap();
+        assert_eq!(surface.size, (2360, 1640));
+
+        ws.close(None).await.unwrap();
+        while !matches!(
+            events.next().await,
+            Some(ServiceEvent::Client(ClientState::Disconnected(_)))
+        ) {}
+        assert_eq!(driver.displays(), []);
+    }
 }

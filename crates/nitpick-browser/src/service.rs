@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -64,8 +64,13 @@ pub enum ClientState {
     Connected,
     Authenticated,
     /// A valid `hello` arrived. Each new `hello` gives this event again;
-    /// the host queries the display again and reopens an open surface.
+    /// the host queries the display again, because the mode can change.
     Ready(DisplayId),
+    /// The viewport size, pixel ratio or zoom changed. Sent before the
+    /// `Ready` of the same `hello`. An open surface of this display is
+    /// stale: the host cancels presentation and measurement timing, then
+    /// opens and renders again.
+    ViewportChanged(DisplayId),
     /// The session closed; the reason is for the status line.
     Disconnected(String),
 }
@@ -249,7 +254,6 @@ impl BrowserService {
         self.events.clone()
     }
 
-    #[allow(dead_code)] // For the driver's frame storage.
     pub(crate) fn hub(&self) -> &Arc<SessionHub> {
         &self.hub
     }
@@ -278,10 +282,14 @@ fn router(hub: Arc<SessionHub>) -> Router {
         .with_state(hub)
 }
 
-async fn websocket(State(hub): State<Arc<SessionHub>>, upgrade: WebSocketUpgrade) -> Response {
+async fn websocket(
+    State(hub): State<Arc<SessionHub>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
     // Reserve before the upgrade: a second client gets an HTTP status, not
     // an open WebSocket that closes at once.
-    let reservation = match hub.reserve() {
+    let reservation = match hub.reserve(peer) {
         Ok(reservation) => reservation,
         Err(ReserveError::Busy) => {
             return (StatusCode::CONFLICT, "another client holds the session").into_response();
@@ -391,7 +399,8 @@ fn serve(
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let (begun_tx, begun_rx) = oneshot::channel();
-        let server = axum::serve(listener, router(hub)).with_graceful_shutdown(async move {
+        let app = router(hub).into_make_service_with_connect_info::<SocketAddr>();
+        let server = axum::serve(listener, app).with_graceful_shutdown(async move {
             // A dropped sender also stops the server.
             let _ = shutdown.await;
             let _ = begun_tx.send(());

@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 
 use super::*;
 use crate::service::ServiceEvents;
+use crate::test_support::{PEER, hello_json, hello_with};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Outgoing {
@@ -83,7 +84,7 @@ fn hub(pairing: Pairing) -> (Arc<SessionHub>, ServiceEvents) {
 }
 
 fn connect(hub: &Arc<SessionHub>) -> Client {
-    let reservation = hub.reserve().expect("slot free");
+    let reservation = hub.reserve(PEER).expect("slot free");
     let (tx, from_client) = mpsc::unbounded_channel();
     let (to_client, rx) = mpsc::unbounded_channel();
     let transport = MockTransport {
@@ -231,10 +232,10 @@ async fn failed_attempts_lock_new_connections() {
         client.finished().await;
 
         let lock = lockout(failures);
-        assert_eq!(hub.reserve().err(), Some(ReserveError::Locked(lock)));
+        assert_eq!(hub.reserve(PEER).err(), Some(ReserveError::Locked(lock)));
         tokio::time::advance(lock.checked_sub(Duration::from_millis(1)).unwrap()).await;
         assert_eq!(
-            hub.reserve().err(),
+            hub.reserve(PEER).err(),
             Some(ReserveError::Locked(Duration::from_millis(1)))
         );
         tokio::time::advance(Duration::from_millis(1)).await;
@@ -246,7 +247,10 @@ async fn failed_attempts_lock_new_connections() {
     client.next().await;
     client.auth("0000");
     client.finished().await;
-    assert_eq!(hub.reserve().err(), Some(ReserveError::Locked(lockout(1))));
+    assert_eq!(
+        hub.reserve(PEER).err(),
+        Some(ReserveError::Locked(lockout(1)))
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -285,7 +289,7 @@ async fn messages_other_than_auth_fail_before_authentication() {
         );
         // Each counts as a failed attempt.
         assert_eq!(
-            hub.reserve().err(),
+            hub.reserve(PEER).err(),
             Some(ReserveError::Locked(lockout(failures)))
         );
         tokio::time::advance(LOCKOUT_MAX).await;
@@ -313,7 +317,7 @@ async fn authentication_times_out_after_60_s() {
         Some(&disconnected("authentication timeout"))
     );
     // No code was tried, so no lock.
-    assert!(hub.reserve().is_ok());
+    assert!(hub.reserve(PEER).is_ok());
 }
 
 #[tokio::test(start_paused = true)]
@@ -322,7 +326,7 @@ async fn client_close_before_auth_is_not_a_failure() {
     let mut client = connect(&hub);
     client.next().await;
     client.finished().await;
-    assert!(hub.reserve().is_ok());
+    assert!(hub.reserve(PEER).is_ok());
 }
 
 #[tokio::test(start_paused = true)]
@@ -330,11 +334,11 @@ async fn second_client_is_rejected_during_and_after_authentication() {
     let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
     let mut client = connect(&hub);
     client.next().await;
-    assert_eq!(hub.reserve().err(), Some(ReserveError::Busy));
+    assert_eq!(hub.reserve(PEER).err(), Some(ReserveError::Busy));
 
     client.auth("1234");
     let token = expect_token(&mut client).await;
-    assert_eq!(hub.reserve().err(), Some(ReserveError::Busy));
+    assert_eq!(hub.reserve(PEER).err(), Some(ReserveError::Busy));
     // The rejected attempts did not disturb the session.
     assert!(hub.authorize(Some(&bearer(&token))));
     assert_eq!(
@@ -350,7 +354,7 @@ async fn second_client_is_rejected_during_and_after_authentication() {
 async fn authenticated_session_accepts_client_messages_in_order() {
     let (hub, _events) = hub(Pairing::Fixed("1234".into()));
     let (mut client, token) = authenticated_client(&hub, "1234").await;
-    client.send_json(&json!({"type": "hello", "pixelRatio": 2}));
+    client.send_json(&hello_json());
     client.send_json(&json!({"type": "applied", "id": 1}));
     client.send_json(&json!({"type": "error", "id": 1, "message": "decode"}));
     // Long after the authentication timeout: it no longer applies.
@@ -426,7 +430,7 @@ async fn aborted_session_releases_the_slot() {
     client.task.abort();
     let _ = client.task.await;
     assert!(!hub.authorize(Some(&bearer(&token))));
-    assert!(hub.reserve().is_ok());
+    assert!(hub.reserve(PEER).is_ok());
     assert!(drain(&mut events).contains(&disconnected("server stopped or upgrade failed")));
 }
 
@@ -438,4 +442,99 @@ fn frame_lookup_matches_the_current_id_only() {
     hub.set_frame(7, Bytes::from_static(b"png"));
     assert_eq!(hub.frame(7), Some(Bytes::from_static(b"png")));
     assert_eq!(hub.frame(6), None);
+}
+
+/// Waits for the next client event other than `Connected` and
+/// `Authenticated`.
+async fn next_client_event(events: &mut ServiceEvents) -> ClientState {
+    loop {
+        match events.next().await.expect("event") {
+            ServiceEvent::Client(ClientState::Connected | ClientState::Authenticated)
+            | ServiceEvent::PairingCode(_) => {}
+            ServiceEvent::Client(state) => return state,
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn valid_hello_caches_the_client_state() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (client, _token) = authenticated_client(&hub, "1234").await;
+    assert_eq!(hub.client(), None, "no hello yet");
+    client.send_json(&hello_json());
+    let ClientState::Ready(display) = next_client_event(&mut events).await else {
+        panic!("expected Ready");
+    };
+    assert_eq!(display.driver, DRIVER);
+    let record = hub.client().expect("cached");
+    assert_eq!(record.display, display);
+    assert_eq!(record.peer, PEER);
+    assert_eq!(record.hello.surface_size(), (2360, 1640));
+    let generation = record.generation;
+
+    // Same geometry: `Ready` only, same generation.
+    client.send_json(&hello_with(&[("dynamicRange", Some(json!("standard")))]));
+    assert_eq!(
+        next_client_event(&mut events).await,
+        ClientState::Ready(display.clone())
+    );
+    assert_eq!(hub.client().unwrap().generation, generation);
+
+    // Resize: `ViewportChanged` before `Ready`, new generation.
+    client.send_json(&hello_with(&[("viewport.height", Some(json!(700)))]));
+    assert_eq!(
+        next_client_event(&mut events).await,
+        ClientState::ViewportChanged(display.clone())
+    );
+    assert_eq!(
+        next_client_event(&mut events).await,
+        ClientState::Ready(display.clone())
+    );
+    let record = hub.client().unwrap();
+    assert_ne!(record.generation, generation);
+    assert_eq!(record.hello.surface_size(), (2360, 1400));
+
+    client.finished().await;
+    assert_eq!(hub.client(), None, "removed on disconnect");
+}
+
+#[tokio::test(start_paused = true)]
+async fn invalid_hello_ends_the_session() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, token) = authenticated_client(&hub, "1234").await;
+    client.send_json(&hello_json());
+    next_client_event(&mut events).await;
+    client.send_json(&hello_with(&[("pixelRatio", Some(json!(0)))]));
+    assert_eq!(
+        client.next().await,
+        Some(Outgoing::Close(close::PROTOCOL, "invalid hello"))
+    );
+    client.finished().await;
+    assert_eq!(hub.client(), None);
+    assert!(!hub.authorize(Some(&bearer(&token))));
+    assert_eq!(
+        next_client_event(&mut events).await,
+        ClientState::Disconnected("protocol violation: invalid hello".into())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_session_gets_a_new_display_id() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let mut displays = Vec::new();
+    for _ in 0..2 {
+        let (client, _token) = authenticated_client(&hub, "1234").await;
+        client.send_json(&hello_json());
+        let ClientState::Ready(display) = next_client_event(&mut events).await else {
+            panic!("expected Ready");
+        };
+        displays.push(display);
+        client.finished().await;
+        assert!(matches!(
+            next_client_event(&mut events).await,
+            ClientState::Disconnected(_)
+        ));
+    }
+    assert_ne!(displays[0], displays[1]);
 }

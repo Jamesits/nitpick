@@ -7,12 +7,16 @@
 
 use std::fmt::Write as _;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use axum::body::Bytes;
+use nitpick_core::driver::DisplayId;
 use tokio::time::Instant;
 
+use crate::client::{ClientRecord, Hello};
+use crate::driver::DRIVER;
 use crate::protocol::{ClientMessage, ServerMessage, close};
 use crate::service::{ClientState, EventSender, ServiceEvent};
 
@@ -102,6 +106,12 @@ struct HubState {
     consecutive_failures: u32,
     locked_until: Option<Instant>,
     frame: Option<(u64, Bytes)>,
+    /// Authenticated sessions so far; numbers the display IDs.
+    sessions: u64,
+    /// Last [`ClientRecord::generation`].
+    generation: u64,
+    /// Set only between a valid `hello` and the end of the session.
+    client: Option<ClientRecord>,
 }
 
 /// State shared by the HTTP handlers and the session task.
@@ -129,7 +139,7 @@ impl SessionHub {
 
     /// Reserves the slot before the WebSocket upgrade completes. The slot
     /// stays reserved until the returned value is dropped.
-    pub(crate) fn reserve(self: &Arc<Self>) -> Result<Reservation, ReserveError> {
+    pub(crate) fn reserve(self: &Arc<Self>, peer: SocketAddr) -> Result<Reservation, ReserveError> {
         {
             let mut state = self.state();
             if state.busy {
@@ -147,6 +157,7 @@ impl SessionHub {
             .send(ServiceEvent::Client(ClientState::Connected));
         Ok(Reservation {
             hub: Arc::clone(self),
+            peer,
             // Kept only if the session task never ends normally.
             reason: "server stopped or upgrade failed".into(),
         })
@@ -185,11 +196,55 @@ impl SessionHub {
         state.locked_until = Some(Instant::now() + lockout(state.consecutive_failures));
     }
 
-    fn accept(&self, token: String) {
+    /// Returns the display ID of the new session. A new ID for each session
+    /// keeps a host from using a surface of an earlier client.
+    pub(crate) fn accept(&self, token: String) -> DisplayId {
         let mut state = self.state();
         state.token = Some(token);
         state.consecutive_failures = 0;
         state.locked_until = None;
+        state.sessions += 1;
+        DisplayId {
+            driver: DRIVER,
+            key: format!("client-{}", state.sessions),
+        }
+    }
+
+    /// Caches a valid `hello` and notifies the host: `ViewportChanged`
+    /// first if the surface geometry changed, then `Ready`.
+    pub(crate) fn update_client(&self, display: &DisplayId, peer: SocketAddr, hello: Hello) {
+        let changed = {
+            let mut state = self.state();
+            let changed = state
+                .client
+                .as_ref()
+                .map(|old| old.hello.geometry() != hello.geometry());
+            if changed != Some(false) {
+                state.generation += 1;
+            }
+            let generation = state.generation;
+            state.client = Some(ClientRecord {
+                display: display.clone(),
+                peer,
+                hello,
+                generation,
+            });
+            changed == Some(true)
+        };
+        if changed {
+            self.events
+                .send(ServiceEvent::Client(ClientState::ViewportChanged(
+                    display.clone(),
+                )));
+        }
+        self.events
+            .send(ServiceEvent::Client(ClientState::Ready(display.clone())));
+    }
+
+    /// The cached client state; `None` before the first valid `hello` and
+    /// after the session ends.
+    pub(crate) fn client(&self) -> Option<ClientRecord> {
+        self.state().client.clone()
     }
 }
 
@@ -208,6 +263,7 @@ pub(crate) fn lockout(failures: u32) -> Duration {
 #[derive(Debug)]
 pub(crate) struct Reservation {
     hub: Arc<SessionHub>,
+    peer: SocketAddr,
     reason: String,
 }
 
@@ -216,6 +272,7 @@ impl Drop for Reservation {
         {
             let mut state = self.hub.state();
             state.token = None;
+            state.client = None;
             state.busy = false;
         }
         self.hub
@@ -276,7 +333,9 @@ impl End {
 /// Runs one session to its end and then releases the reservation.
 pub(crate) async fn run_session<T: Transport>(mut transport: T, mut reservation: Reservation) {
     let end = match authenticate(&mut transport, &reservation.hub).await {
-        Ok(()) => authenticated(&mut transport).await,
+        Ok(display) => {
+            authenticated(&mut transport, &reservation.hub, &display, reservation.peer).await
+        }
         Err(end) => end,
     };
     if let Some((code, text)) = end.close {
@@ -289,7 +348,7 @@ async fn send<T: Transport>(transport: &mut T, message: &ServerMessage) -> Resul
     transport.send(message.to_json()).await.map_err(End::client)
 }
 
-async fn authenticate<T: Transport>(transport: &mut T, hub: &SessionHub) -> Result<(), End> {
+async fn authenticate<T: Transport>(transport: &mut T, hub: &SessionHub) -> Result<DisplayId, End> {
     let deadline = Instant::now() + AUTH_TIMEOUT;
     let code = hub
         .pairing
@@ -320,27 +379,35 @@ async fn authenticate<T: Transport>(transport: &mut T, hub: &SessionHub) -> Resu
     Err(failure)
 }
 
-async fn accept<T: Transport>(transport: &mut T, hub: &SessionHub) -> Result<(), End> {
+async fn accept<T: Transport>(transport: &mut T, hub: &SessionHub) -> Result<DisplayId, End> {
     let token = random_token()
         .map_err(|_| End::closing(close::INTERNAL, "no random data for the token"))?;
     // Before the reply: the client can fetch as soon as it has the token.
-    hub.accept(token.clone());
+    let display = hub.accept(token.clone());
     send(transport, &ServerMessage::Authenticated { token }).await?;
     hub.events
         .send(ServiceEvent::Client(ClientState::Authenticated));
-    Ok(())
+    Ok(display)
 }
 
-async fn authenticated<T: Transport>(transport: &mut T) -> End {
+async fn authenticated<T: Transport>(
+    transport: &mut T,
+    hub: &SessionHub,
+    display: &DisplayId,
+    peer: SocketAddr,
+) -> End {
     loop {
         match transport.recv().await {
             Incoming::Closed(reason) => return End::client(reason),
             Incoming::Binary => return End::violation("binary message"),
             Incoming::Text(text) => match ClientMessage::parse(&text) {
                 Ok(ClientMessage::Auth { .. }) => return End::violation("already authenticated"),
-                // Client state and acknowledgements are not used by the
-                // service yet; the session only enforces message order.
-                Ok(_) => {}
+                Ok(ClientMessage::Hello(fields)) => match Hello::parse(fields) {
+                    Ok(hello) => hub.update_client(display, peer, hello),
+                    Err(_) => return End::violation("invalid hello"),
+                },
+                // Acknowledgements are not used by the service yet.
+                Ok(ClientMessage::Applied(_) | ClientMessage::Error(_)) => {}
                 Err(_) => return End::violation("malformed message"),
             },
         }
