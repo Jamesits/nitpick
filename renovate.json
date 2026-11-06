@@ -3,5 +3,14 @@
     "extends": [
         "github>jamesits/.github//renovate/default",
         "github>jamesits/.github//renovate/group-monorepo"
-    ]
+    ],
+    "pep621": {
+        "ignorePaths": [
+            "**/node_modules/**",
+            "**/bower_components/**",
+            "**/vendor/**",
+            "**/examples/**",
+            "**/__fixtures__/**"
+        ]
+    }
 }
