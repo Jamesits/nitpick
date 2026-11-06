@@ -53,7 +53,8 @@ cargo make package
 
 ### Linux
 
-Requirements:
+<details>
+<summary>Requirements</summary>
 
 - GCC or Clang
 - Vulkan headers (`libvulkan-dev` on Debian and Ubuntu)
@@ -63,6 +64,8 @@ Requirements:
 uvx --from aqtinstall aqt install-qt linux desktop 6.12.0 linux_gcc_64 -m qtshadertools -O ~/Qt
 ```
 
+</details>
+
 Development build:
 
 ```sh
@@ -70,6 +73,40 @@ export QMAKE=~/Qt/6.12.0/gcc_64/bin/qmake
 cargo run -p nitpick-app
 ```
 
-The binary finds the Qt libraries through its run path. The build warning "Neither mold, lld, nor gold linkers were found" has no effect: Rust links with its own `rust-lld`.
+Notes:
 
-Packaging for release: TBD
+- The binary finds the Qt libraries through its run path
+- The build warning "Neither mold, lld, nor gold linkers were found" can be safely ignored, Rust links with its own `rust-lld`
+
+<details>
+<summary>Packaging for release</summary>
+
+Build requirements (in addition to the above ones):
+
+- `patchelf`
+- Python 3
+
+Run:
+
+```sh
+export QMAKE=~/Qt/6.12.0/gcc_64/bin/qmake
+cargo install cargo-make
+cargo make package
+```
+
+Runtime dependencies:
+
+- glibc >=2.34
+- libstdc++
+- An X11 or Wayland session, an OpenGL (EGL or GLX) driver and a Vulkan driver
+- Desktop libraries
+
+```sh
+# Debian/Ubuntu
+sudo apt install libdbus-1-3 libegl1 libfontconfig1 libfreetype6 libgl1 libglib2.0-0t64 libgssapi-krb5-2 \
+  libwayland-client0 libwayland-cursor0 libwayland-egl1 libx11-6 libx11-xcb1 libxcb1 libxcb-cursor0 \
+  libxcb-glx0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render0 libxcb-render-util0 \
+  libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-util1 libxcb-xfixes0 libxcb-xkb1 libxkbcommon0 \
+  libxkbcommon-x11-0 libvulkan1 fonts-dejavu-core
+```
+</details>

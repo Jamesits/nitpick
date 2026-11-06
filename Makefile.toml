@@ -9,12 +9,12 @@ description = "Release build of the nitpick launcher"
 command = "cargo"
 args = ["build", "-p", "nitpick-app", "--release"]
 
-# windeployqt and macdeployqt have no counterpart on Linux.
 [tasks.package]
 clear = true
 description = "Self-contained package of the nitpick launcher for the host OS"
 windows_alias = "package-windows"
 mac_alias = "package-macos"
+linux_alias = "package-linux"
 script = '''
 echo "package: not supported on this OS" >&2
 exit 1
@@ -36,3 +36,11 @@ condition = { platforms = ["mac"] }
 dependencies = ["release"]
 command = "bash"
 args = ["crates/nitpick-app/packaging/macos/package.sh"]
+
+[tasks.package-linux]
+clear = true
+description = "Self-contained Linux folder and tar.gz archive"
+condition = { platforms = ["linux"] }
+dependencies = ["release"]
+command = "bash"
+args = ["crates/nitpick-app/packaging/linux/package.sh"]
