@@ -25,8 +25,8 @@ pub const PREPARED_CHANGE_VERSION: u32 = 1;
 pub struct DeviceId {
     pub backend: String,
     /// Native identity, for example a `DisplayConfig` target path, a
-    /// `ColorSync` device UUID or a colord device ID. Not screen order or a
-    /// display name.
+    /// `ColorSync` device UUID or a DRM connector with its EDID identity.
+    /// Not screen order or a display name.
     pub key: String,
 }
 

@@ -6,19 +6,6 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 7. Implement Linux device and capability enumeration
-
-Requires: 4.
-
-Open questions:
-
-- Which capability fields can the selected Wayland compositor or XRandR backend report, and how can its output identity be matched to colord?
-
-TODO:
-
-- Add the native output queries in [Platform implementations](../design/display_device.md#platform-implementations). Keep capability discovery usable when the profile service is absent. Use compositor or DRM colour state only where available.
-- Verify missing protocols, unknown HDR or depth, output replacement and ambiguous identity with injected calls. Check reported fields on the selected desktop. Missing metadata must not be replaced with guessed display values.
-
 ### 11. Report QRhi capabilities and reject unknown FP16 scales
 
 Requires: 2, 5, 6, 7, 9, 10.
@@ -63,6 +50,10 @@ TODO:
 ### 16. Use the driver lifecycle in the Qt launcher
 
 Requires: 14, 15.
+
+Open questions:
+
+- How does the host map a Qt screen to a Linux device? Qt on Wayland gives the compositor's output name, which can differ from the kernel connector name in the device key; see [Linux reports](../design/display_device.md#linux-reports).
 
 TODO:
 

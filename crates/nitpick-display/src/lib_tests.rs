@@ -5,7 +5,7 @@ fn native_backend_is_send() {
     assert_send(&*super::native());
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 #[test]
 fn platform_without_backend_reports_why() {
     use nitpick_core::device::DeviceError;
