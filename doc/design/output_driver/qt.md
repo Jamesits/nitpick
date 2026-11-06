@@ -6,8 +6,11 @@ The QRhi driver shows test patterns in a borderless full-screen Qt window on a l
 
 ```mermaid
 graph LR
-    L[launcher.rs] -->|OutputDriver| Q[QrhiDriver<br/>display.rs]
-    Q -->|hdr10_bytes, scrgb_bytes| O[nitpick-core<br/>output]
+    L[launcher.rs] -->|OutputDriver| Q[QrhiDriver<br/>qrhi_driver.rs]
+    L -->|spawn_local| E[gui_executor.rs] -->|poll present| Q
+    Q -->|owned frame copy| J[worker thread]
+    J -->|hdr10_bytes, scrgb_bytes| O
+    O[nitpick-core<br/>output]
     Q -->|screen size, window, pixels| D[display.rs<br/>cxx bridge]
     Q -->|native metadata| M[hdr_metadata.rs<br/>MetadataSink] --> D
     Q -->|device identity, capabilities, mode| N[nitpick-display<br/>DisplayDeviceControl]
@@ -17,12 +20,12 @@ graph LR
 
 Mapping to `OutputDriver`:
 
-| Trait call | Adapter (`display.rs`) |
+| Trait call | Adapter (`qrhi_driver.rs`) |
 |---|---|
 | `displays` | Map Qt screens to native devices from `DisplayDeviceControl`; get window pixel geometry from Qt |
 | `query` | Combine the refreshed native device report with QRhi path support and conversion limits; report a remapped path, such as an FP16 path without a known luminance scale, as `Unknown` |
 | `open` | `openPatternWindow(screen, fp16)`; `fp16` from the bit depth (see [Swap chain output](#swap-chain-output)) |
-| `present` | Send the [HDR10 static metadata](#hdr10-static-metadata), then `presentPattern(pixels, width, height)`; wait for successful submission of this frame |
+| `present` | Convert on a worker (see [Asynchronous presentation](#asynchronous-presentation)). Then send the [HDR10 static metadata](#hdr10-static-metadata) and `presentPattern(pixels, width, height)`; wait for successful submission of this frame |
 
 The pattern window closes on Esc, Q, Space or a double click.
 
@@ -48,7 +51,7 @@ The bridge gives only the native identity of a Qt screen (`screenIdentity`). The
 | macOS | `NSScreenNumber` of the `NSScreen` | The active display with this `CGDirectDisplayID`. |
 | Linux | `QScreen::name()` | Not implemented. See [Linux reports](../display_device.md#linux-reports) for the planned rule. |
 
-A screen without one match has an unknown device report with the reason. Output continues with the path rules below and warnings. **Status:** the launcher queries the device on the Qt GUI thread for each reference table and each "Show pattern". This deviates from the worker rule in [Identity and execution](../display_device.md#identity-and-execution). **Unverified:** the macOS mapping; it was not built or run on macOS.
+A screen without one match has an unknown device report with the reason. Output continues with the path rules below and warnings. **Status:** the launcher and `QrhiDriver::query` query the device on the Qt GUI thread for each reference table and each "Show pattern". This deviates from the worker rule in [Identity and execution](../display_device.md#identity-and-execution). **Unverified:** the macOS mapping; it was not built or run on macOS.
 
 ### Output report
 
@@ -86,7 +89,23 @@ The bridge queues the frame and returns to the Qt event loop. It reports the fra
 
 Cancellation removes the completion. A cancelled frame that is queued can still upload, because the window can show it until a replacement. Late events of other frame IDs do nothing. The timeout timer of a cancelled frame stays in Qt until it expires or the window closes; it then does nothing.
 
-**Status:** the launcher does not use `OutputDriver` yet. It shows "Submitting pattern" and sets the result status from the completion. A new "Show pattern" cancels the earlier completion before it opens the new window.
+### Asynchronous presentation
+
+`QrhiDriver::present` follows [Asynchronous presentation](overview.md#asynchronous-presentation):
+1. On the GUI thread: check the surface, the depth, the image size and `check_frame`. A failed check spawns no worker.
+2. A worker thread gets a copy of the image, the format and the metadata request. It makes the swap chain bytes and resolves the metadata. The result goes back through a oneshot channel, which wakes the task.
+3. On the GUI thread: send the metadata, then queue the frame through `submission.rs`. No await occurs between these two calls.
+4. The `submission.rs` completion sends the result through a second oneshot channel, which wakes the task. The future returns the status line: surface, device mode, metadata result and warnings.
+
+Dropping the future drops both receivers and the submission registration. It does not wait for the worker. A worker that has not started skips the conversion; a running worker discards its result. A queued frame can still upload, as in the table above.
+
+`gui_executor.rs` runs the future on the GUI thread. `async-task` keeps the task. A wake, also from a worker thread, posts the next poll through `CxxQtThread::queue` of the launcher. The first poll is also posted, so "Show pattern" returns before the task runs. Counter-intuitive behaviour:
+- Dropping the `LocalTask` handle drops the future at once. `async-task` alone drops a cancelled future at the next event loop pass, after the launcher borrows the driver again.
+- If the event loop rejects a post from a worker thread (at exit, after the launcher is destroyed), the task step is leaked. `async-task` panics if a local task step drops on another thread.
+
+The launcher keeps the driver in `Rc<RefCell<…>>`. The task holds the driver borrow until `present` completes. "Show pattern" drops the earlier task before it borrows the driver, so the earlier `Disconnected` does not reach the status line. `query` and `open` stay synchronous. `open` still runs a nested event loop without user input for up to 5 s, see above.
+
+**Unverified:** that Qt timers and controls stay active during conversion and submission in the real Qt event loop. The unit tests use a simulated event loop with controlled workers.
 
 ## Signalling
 
@@ -165,6 +184,8 @@ Automatic light levels use $D / (2^n - 1)$ as full-range PQ for every input enco
 | Remapped output (HDR off, QRhi format fallback) | fail; show the pattern with a warning | show the pattern with a warning | The OS or the compositor remaps the output, but the pattern stays usable for a visual check. `exact` and the warnings prevent a false claim of exact output. |
 | Adapter (Windows) | default adapter; adapter of the monitor | adapter of the monitor | Prevents a cross-adapter copy on hybrid-GPU systems. QRhi gets the adapter LUID. |
 | Metadata on Linux | Qt private API; none | Qt private API | QRhi exposes no `VkSwapchainKHR`. Cost: the binary must use the exact Qt version of its private headers. |
+| GUI-thread executor | `qmetaobject` `execute_async`; a C++ bridge that posts with `QMetaObject::invokeMethod`; `async-task` with `CxxQtThread::queue` | `async-task` with `CxxQtThread::queue` | `qmetaobject` is a different Qt binding. `CxxQtThread::queue` is the existing cxx-qt path to the GUI thread and accepts jobs from any thread. `async-task` gives the task state and wakers; the glue code is only the post and the drop handle. |
+| Wake channels | custom wakers in `submission.rs`; `futures-channel` oneshot | `futures-channel` oneshot | The receiver wakes the task on send. A dropped receiver tells the worker that the result is not needed. |
 
 ## Testing
 

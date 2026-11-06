@@ -6,28 +6,15 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 14. Implement asynchronous QrhiDriver
-
-Requires: 2, 13.
-
-Open questions:
-
-- Which existing executor integration can poll a local future and wake the Qt GUI thread? Check available libraries before adding a custom bridge.
-
-TODO:
-
-- Implement `OutputDriver` in `display.rs`. Run conversion in worker jobs with owned data; keep window and QRhi calls on the GUI thread. Resolve the future from bridge callbacks and wake the Rust task.
-- Verify with controlled workers that Qt timers remain active during conversion and submission. Dropping the future must release its wait and callbacks without waiting for workers. Late results must not affect a new frame. Do not block or run a nested GUI event loop.
-
 ### 16. Use the driver lifecycle in the Qt launcher
 
-Requires: 14, 15.
+Requires: 15.
 
 TODO:
 
-- Change `launcher.rs` and `qml/main.qml` to refresh native device state on a worker before the synchronous output query and open; the launcher now queries on the GUI thread. Replace the screen-index `DisplayId` with the native screen mapping in `display.rs`. Render at the returned size, pass metadata requests and retain frame data until completion or cancellation.
+- Change `launcher.rs` and `qml/main.qml` to refresh native device state on a worker before the synchronous output query and open; the launcher and `QrhiDriver::query` now query on the GUI thread. Replace the screen-index `DisplayId` with the native screen mapping in `display.rs`. Use `displays` for the screen list.
 - Add the Linux screen mapping in [Linux reports](../design/display_device.md#linux-reports) as a portable function in `nitpick-display`, next to the evidence format it reads. Use it in the Linux branch of `display.rs`; Windows and macOS map by GDI name and display ID. Run the macOS mapping on a Mac. With injected device lists, verify kernel names, the GNOME `HDMI` form, an unknown name, one name on two cards, and the X11 EDID MD5 rule. On GNOME 50, map both screens with the Wayland and xcb Qt platforms.
-- Verify depth selection, mode reporting and warnings. Keep QRhi narrow PQ and HLG selectable. Replacement, display change and closure must drop the future before reusing or closing the driver. Controls must remain active, and late results must not change the current status.
+- Verify depth selection, mode reporting and warnings. Keep QRhi narrow PQ and HLG selectable. Replacement, display change and closure must drop the future before reusing or closing the driver. In the running launcher, Qt timers and controls must remain active during conversion and submission, and late results must not change the current status.
 
 ### 17. Add the Qt measurement delay
 
@@ -215,7 +202,7 @@ TODO:
 
 ### 37. Verify QRhi offscreen draw readback
 
-Requires: 9, 10, 14, 34.
+Requires: 9, 10, 34.
 
 TODO:
 

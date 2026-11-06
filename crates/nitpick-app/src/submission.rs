@@ -151,16 +151,15 @@ impl Drop for Registration {
     }
 }
 
-/// Queues `pixels` in the open window under a new frame ID. `done` runs
-/// once on the GUI thread with the acknowledgement, a failure, a timeout
-/// or `Disconnected`; it does not run after the registration is dropped.
+/// Queues a frame under a new frame ID. `queue` hands the pixels with
+/// this ID to the window, see `ffi::present_pattern`. `done` runs once on
+/// the GUI thread with the acknowledgement, a failure, a timeout or
+/// `Disconnected`; it does not run after the registration is dropped.
 ///
 /// # Errors
-/// The window rejected the frame; `done` is not called.
+/// `queue` failed; `done` is not called.
 pub fn present(
-    pixels: &[u8],
-    width: i32,
-    height: i32,
+    queue: impl FnOnce(FrameId) -> Result<(), String>,
     done: impl FnOnce(Result<(), OutputError>) + 'static,
 ) -> Result<Registration, String> {
     let id = with(Submissions::next_frame_id);
@@ -171,8 +170,7 @@ pub fn present(
     };
     // The window only posts an update request here, so no render event
     // can run before `queued`.
-    crate::display::ffi::present_pattern(pixels, width, height, id, ACK_TIMEOUT_MS)
-        .map_err(|e| e.to_string())?;
+    queue(id)?;
     with(|s| s.queued(id));
     Ok(registration)
 }

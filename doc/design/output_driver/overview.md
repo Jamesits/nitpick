@@ -19,7 +19,7 @@ graph LR
     CLI -->|displays, query, open, present| API
     L -->|render, reference_table| C[nitpick-core<br/>pattern]
     L -->|displays, query, open, present| API[nitpick-core::driver<br/>OutputDriver]
-    API --> Q[QrhiDriver<br/>nitpick-app/display.rs]
+    API --> Q[QrhiDriver<br/>nitpick-app/qrhi_driver.rs]
     API --> B[BrowserDriver<br/>nitpick-browser]
     Q --> W[pattern_window.cpp<br/>QRhi swap chain]
     B -->|HTTP + WebSocket| P[web client<br/>img element]

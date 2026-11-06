@@ -79,6 +79,11 @@ pub mod ffi {
     unsafe extern "C++" {
         include!("nitpick-app/cpp/pattern_window.h");
 
+        /// `QGuiApplication::screens().size()`.
+        #[namespace = "nitpick"]
+        #[cxx_name = "screenCount"]
+        fn screen_count() -> i32;
+
         /// Pixel size of the pattern area of a full-screen window on screen
         /// `screen` (index into `QGuiApplication::screens()`): the native size
         /// without the safe-area insets.
@@ -100,11 +105,16 @@ pub mod ffi {
         #[cxx_name = "openPatternWindow"]
         fn open_pattern_window(screen: i32, fp16: bool) -> Result<PatternSurface>;
 
+        /// Closes the open pattern window, if any.
+        #[namespace = "nitpick"]
+        #[cxx_name = "closePatternWindow"]
+        fn close_pattern_window();
+
         /// Queues `pixels` as frame `frame` in the open window and returns:
         /// tightly packed rows in the swap chain format, `width × height`
         /// equal to the pattern area size. The window reports the frame
         /// through the `extern "Rust"` functions below and times it out
-        /// after `timeout_ms`. Use it through `submission::present`.
+        /// after `timeout_ms`. Use it through `qrhi_driver::QrhiDriver`.
         #[namespace = "nitpick"]
         #[cxx_name = "presentPattern"]
         fn present_pattern(

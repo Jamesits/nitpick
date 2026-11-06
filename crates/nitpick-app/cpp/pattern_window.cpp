@@ -608,6 +608,8 @@ PatternWindow &openWindow() {
 
 namespace nitpick {
 
+std::int32_t screenCount() { return std::int32_t(QGuiApplication::screens().size()); }
+
 std::int32_t screenPixelWidth(std::int32_t screen) {
     return screenPatternSize(screenAt(screen)).width();
 }
@@ -643,6 +645,8 @@ PatternSurface openPatternWindow(std::int32_t screen, bool fp16) {
     g_window = window.release();
     return surface;
 }
+
+void closePatternWindow() { delete g_window.data(); }
 
 void presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
                     std::int32_t height, std::uint64_t frame, std::int32_t timeoutMs) {

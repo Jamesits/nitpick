@@ -14,10 +14,12 @@ struct PatternSurface;
 struct ScreenIdentity;
 
 // All functions throw std::runtime_error on failure; cxx maps it to Err.
+std::int32_t screenCount();
 std::int32_t screenPixelWidth(std::int32_t screen);
 std::int32_t screenPixelHeight(std::int32_t screen);
 ScreenIdentity screenIdentity(std::int32_t screen);
 PatternSurface openPatternWindow(std::int32_t screen, bool fp16);
+void closePatternWindow();
 void presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
                     std::int32_t height, std::uint64_t frame, std::int32_t timeoutMs);
 void setDxgiHdrMetadata(const DxgiHdrMetadata &metadata);

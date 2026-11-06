@@ -1,11 +1,13 @@
 //! nitpick: HDR/WCG test pattern launcher.
 
 mod display;
+mod gui_executor;
 mod hdr_metadata;
 // The cxx-qt generated constructor boxes the Rust struct; cxx-qt rejects
 // attributes on the bridge module itself.
 #[allow(clippy::unnecessary_box_returns)]
 mod launcher;
+mod qrhi_driver;
 mod submission;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};

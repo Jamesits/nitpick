@@ -50,40 +50,45 @@ pub mod qobject {
 }
 
 use core::pin::Pin;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use nitpick_core::driver::{
-    ContentLightLevel, Hdr10Request, OutputError, OutputLimits, Query, check_frame, check_open,
+    ContentLightLevel, Frame, Hdr10Request, OutputDriver, OutputLimits, Query, Surface,
 };
+use nitpick_core::image::Image;
 use nitpick_core::metadata::MasteringPrimaries;
-use nitpick_core::output::{SwapChainFormat, swap_chain_bytes};
+use nitpick_core::output::SwapChainFormat;
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, D65, Encoding, Format};
 use serde_json::{Value, json};
 
 use crate::display::{self, Backend, ffi};
-use crate::hdr_metadata::{self, BridgeSink, SwapChainMetadata};
-use crate::submission::{self, Registration};
+use crate::gui_executor::{self, LocalTask};
+use crate::qrhi_driver::QrhiDriver;
 
 #[derive(Default)]
 pub struct LauncherRust {
     status: QString,
-    /// Completion of the last submitted frame. Dropping it cancels the
-    /// completion.
-    pending: Option<Registration>,
+    driver: Rc<RefCell<QrhiDriver>>,
+    /// Presentation of the last frame. It holds the driver borrow until it
+    /// completes; dropping it cancels the presentation.
+    pending: Option<LocalTask>,
     /// Counts "Show pattern" requests. A queued status update of an older
     /// request does not apply.
     generation: u64,
 }
 
-/// A converted pattern for the open window.
+/// A rendered pattern for the open surface.
 struct Prepared {
-    pixels: Vec<u8>,
-    width: i32,
-    height: i32,
-    /// Status line after the acknowledgement.
-    status: String,
+    surface: Surface,
+    image: Image,
+    format: Format,
+    request: Option<Hdr10Request>,
+    /// Status line text before the driver status.
+    label: String,
 }
 
 fn parse(
@@ -140,7 +145,11 @@ fn request_from_json(json: &str) -> Result<Option<Hdr10Request>, String> {
     }))
 }
 
+/// Opens the surface and renders the pattern at its size. The driver
+/// rejects an unavailable path before the window opens; remapped paths,
+/// such as Windows with HDR off, only warn.
 fn prepare(
+    driver: &mut QrhiDriver,
     pattern: &QString,
     encoding: &QString,
     depth: &QString,
@@ -149,42 +158,19 @@ fn prepare(
 ) -> Result<Prepared, String> {
     let (kind, format) = parse(pattern, encoding, depth)?;
     let request = request_from_json(&metadata.to_string())?;
-    // Rejects an unavailable path before the window opens and before any
-    // conversion. Remapped paths, such as Windows with HDR off, only warn.
-    let query = screen_query(screen);
-    let caps = &query.capabilities;
-    let mut warnings = check_open(caps, format.depth).map_err(|e| e.to_string())?;
-    warnings.extend(check_frame(caps, format, request.as_ref()).map_err(|e| e.to_string())?);
-    let swap_chain = SwapChainFormat::for_depth(format.depth);
-    let opened = ffi::open_pattern_window(screen, swap_chain == SwapChainFormat::ScRgb)
-        .map_err(|e| e.to_string())?;
-    let surface =
-        display::surface(display::display_id(screen), &opened).map_err(|e| e.to_string())?;
-    warnings.extend(display::surface_warning(format.depth, &opened));
+    let id = display::display_id(screen);
+    driver.query(&id).map_err(|e| e.to_string())?;
+    let surface = driver.open(&id, format.depth).map_err(|e| e.to_string())?;
     let (width, height) = surface.size;
     let image = kind
         .render(format, width, height)
         .map_err(|e| e.to_string())?;
-    let pixels = swap_chain_bytes(&image, format).map_err(|e| e.to_string())?;
-    let md = hdr_metadata::resolve(request.as_ref(), &image, format.depth);
-    // The window is new, so its swap chain has no metadata yet.
-    let result =
-        SwapChainMetadata::default().apply(&mut BridgeSink, Backend::current(), md.as_ref());
-    let warnings = if warnings.is_empty() {
-        String::new()
-    } else {
-        format!(" Warnings: {}.", warnings.join("; "))
-    };
     Ok(Prepared {
-        pixels,
-        width: opened.width,
-        height: opened.height,
-        status: format!(
-            "{} ({format}) at {width}x{height}. {}. {}. {result}{warnings} Esc closes the pattern.",
-            kind.label(),
-            surface.description,
-            query.mode.description,
-        ),
+        surface,
+        image,
+        format,
+        request,
+        label: format!("{} ({format}) at {width}x{height}", kind.label()),
     })
 }
 
@@ -248,6 +234,9 @@ impl qobject::Launcher {
         QString::from(&text)
     }
 
+    // The task holds the driver borrow across the await. The launcher
+    // drops the task before it borrows the driver again.
+    #[allow(clippy::await_holding_refcell_ref)]
     pub fn show_pattern(
         mut self: Pin<&mut Self>,
         pattern: &QString,
@@ -256,43 +245,58 @@ impl qobject::Launcher {
         screen: i32,
         metadata: &QString,
     ) {
-        // Cancel the earlier completion before its window closes, so that
-        // its `Disconnected` does not reach the status line.
-        let generation = {
+        // Dropping the earlier task cancels its presentation and releases
+        // its driver borrow before the window closes, so that its
+        // `Disconnected` does not reach the status line.
+        let (driver, generation) = {
             let mut state = self.as_mut().rust_mut();
             state.pending = None;
             state.generation += 1;
-            state.generation
+            (Rc::clone(&state.driver), state.generation)
+        };
+        let prepared = prepare(
+            &mut driver.borrow_mut(),
+            pattern,
+            encoding,
+            depth,
+            screen,
+            metadata,
+        );
+        let Prepared {
+            surface,
+            image,
+            format,
+            request,
+            label,
+        } = match prepared {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_status(QString::from(&format!("Error: {e}")));
+                return;
+            }
         };
         let thread = self.qt_thread();
-        let submitted = prepare(pattern, encoding, depth, screen, metadata).and_then(|p| {
-            let Prepared {
-                pixels,
-                width,
-                height,
-                status,
-            } = p;
-            let done = move |result: Result<(), OutputError>| {
-                let text = match result {
-                    Ok(()) => status,
-                    Err(e) => format!("Error: {e}"),
-                };
-                // The launcher may be gone at exit.
-                let _ = thread.queue(move |mut launcher| {
-                    if launcher.rust().generation == generation {
-                        launcher.as_mut().rust_mut().pending = None;
-                        launcher.set_status(QString::from(&text));
-                    }
-                });
+        let status = thread.clone();
+        let task = gui_executor::spawn_local(thread, async move {
+            let frame = Frame {
+                image: &image,
+                format,
+                metadata: request.as_ref(),
             };
-            submission::present(&pixels, width, height, done)
+            let result = driver.borrow_mut().present(&surface, &frame).await;
+            let text = match result {
+                Ok(s) => format!("{label}. {s} Esc closes the pattern."),
+                Err(e) => format!("Error: {e}"),
+            };
+            // The launcher may be gone at exit.
+            let _ = status.queue(move |mut launcher| {
+                if launcher.rust().generation == generation {
+                    launcher.as_mut().rust_mut().pending = None;
+                    launcher.set_status(QString::from(&text));
+                }
+            });
         });
-        match submitted {
-            Ok(registration) => {
-                self.as_mut().rust_mut().pending = Some(registration);
-                self.set_status(QString::from("Submitting pattern"));
-            }
-            Err(e) => self.set_status(QString::from(&format!("Error: {e}"))),
-        }
+        self.as_mut().rust_mut().pending = Some(task);
+        self.set_status(QString::from("Submitting pattern"));
     }
 }
