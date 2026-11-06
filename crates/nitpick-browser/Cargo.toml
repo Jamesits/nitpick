@@ -1,0 +1,17 @@
+[package]
+name = "nitpick-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Browser output driver and HTTP/WebSocket service for nitpick"
+
+# No Qt, Tauri or nitpick-app here: the command-line host builds this
+# crate without a window system.
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+nitpick-core = { path = "../nitpick-core" }
+tokio = { version = "1.54.1", features = ["macros", "net", "rt", "sync", "time"] }
+
+[lints]
+workspace = true

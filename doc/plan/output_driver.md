@@ -23,15 +23,6 @@ TODO:
 
 - In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
-### 18. Add the independent browser service
-
-Requires: 2.
-
-TODO:
-
-- Add `nitpick-browser` with embedded client assets, `axum`, a dedicated Tokio thread and the separate Rust service handle. Supply URL, pairing-code and client-state events, plus shutdown. Use the [host boundary](../design/output_driver/overview.md#host-and-dependency-boundary).
-- Verify start, bind failure, event delivery and shutdown on a Rust executor. Build by package and inspect its dependency graph: Qt, Tauri and `nitpick-app` must be absent. Loopback is the default; a LAN bind requires an explicit host setting.
-
 ### 19. Encode browser PNG samples and colour tags
 
 Requires: 18.

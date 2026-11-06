@@ -159,7 +159,7 @@ The client keeps the latest requested frame ID. After decode, it checks this ID 
 | PNG encoder | `png` crate; own encoder | `png` crate | Writes 16-bit RGB. **Unverified:** it writes `cICP`, `mDCV` and `cLLI`. If not, the driver writes them with `Writer::write_chunk`. |
 | Local test window | system browser; Tauri; `wry` direct | system browser for basic use; optional Tauri process for controlled tests | Tauri gives a fixed engine (WebView2 on Windows), monitor selection and browser arguments. A separate process keeps its event loop independent of the host. |
 | Monitor selection (Tauri) | monitor index; screen position | screen position | The shell accepts a position and selects the monitor that contains it. The Qt launcher derives the position from its screen list; a command-line caller can supply it. The server does not use Qt screen geometry. |
-| Access | open; token in the URL; WebSocket authentication and bearer token | fixed API paths and [session authentication](#authentication), server bound to localhost by default | The server code controls display access. The bearer token controls image access without a secret in the URL. A LAN address only when the user turns on remote displays. |
+| Access | open; token in the URL; WebSocket authentication and bearer token | fixed API paths and [session authentication](#authentication), server bound to localhost by default | The server code controls display access. The bearer token controls image access without a secret in the URL. A LAN address only when the user turns on remote displays. The host gives a specific interface address; the service rejects an unspecified address (`0.0.0.0`, `::`), because the URL shown to the user contains the bound address. |
 | Sessions | multiple clients; one client | one session, including authentication | One client controls the display state. A second connection cannot replace it. |
 | Full screen | Fullscreen API; Home Screen web app | Fullscreen API with a "Full screen" button | The API needs a user gesture. The client shows the button until `fullscreen` is true. |
 
@@ -189,7 +189,7 @@ Settings before a measurement on an iPad:
 
 Tests and pass criteria are in [Output verification](testing.md): [browser unit tests](testing.md#browser-output), [browser integration](testing.md#browser-integration), and [physical output criteria](testing.md#pass-criteria). Use a probe for the remote display; a capture on the server does not test it.
 
-**Not done:** all tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
+Service unit tests (`nitpick-browser`, `service_tests.rs`) cover start, loopback default, bind failures, the embedded page, event order on a Rust executor and bounded shutdown. **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
 
 ## Future enhancements
 

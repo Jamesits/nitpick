@@ -33,7 +33,7 @@ graph LR
 |---|---|---|
 | `nitpick-core` | patterns, reference values, pixel calculations, output and device traits | Rust data and arithmetic; no GUI, server or executor |
 | `nitpick-display` | native device and capability enumeration, ICC assignment and restoration | `nitpick-core`, native OS bindings; no Qt, Tauri or Little CMS |
-| `nitpick-browser` (planned) | browser driver, PNG encoder, HTTP and WebSocket service | `nitpick-core`, Rust server and image libraries; no Qt or Tauri |
+| `nitpick-browser` | browser driver, PNG encoder, HTTP and WebSocket service | `nitpick-core`, Rust server and image libraries; no Qt or Tauri |
 | `nitpick-cli` (planned) | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, a Rust executor; optional `nitpick-display`; no `nitpick-app` |
 | `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, `nitpick-display`, Qt and its C++ bridge |
 | `nitpick-webview` (planned) | optional local display process | Tauri; connects to the server by URL |
