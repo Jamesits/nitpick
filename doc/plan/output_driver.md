@@ -23,15 +23,6 @@ TODO:
 
 - In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
-### 20. Encode browser metadata from stored samples
-
-Requires: 19.
-
-TODO:
-
-- Resolve automatic PQ light levels after PNG clipping and rounding. Reject automatic HLG light levels and accept explicit values. Write PNG `mDCV` and `cLLI` separately from the existing SEI helpers.
-- Run [browser metadata and light-level checks](../design/output_driver/testing.md#browser-output). Verify chunk widths, order and units, disabled omission, the uniform 10-bit code-940 case, and values affected by sample rounding. Browser use of these chunks remains unverified.
-
 ### 21. Implement browser session authentication
 
 Requires: 18.

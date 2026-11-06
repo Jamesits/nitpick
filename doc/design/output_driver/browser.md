@@ -82,7 +82,7 @@ The [PNG specification](https://www.w3.org/TR/png-3/#cICP-chunk) permits narrow-
 
 QRhi instead transports the input codes under full-range PQ signalling. See [Signalling](qt.md#signalling).
 
-HDR10 metadata: the driver writes PNG `mDCV` and `cLLI` chunks from the resolved values in [HDR10 static metadata](../test_patterns.md#hdr10-static-metadata). For automatic PQ light levels, it supplies $V / 65535$ to the shared calculation after clipping and quantization. HLG requires explicit light levels. PNG chunk layouts and units come from the [PNG specification](https://www.w3.org/TR/png-3/#mDCV-chunk); do not copy the core SEI payload bytes into these chunks. **Unverified:** a browser uses these chunks for tone mapping.
+HDR10 metadata: the driver writes PNG `mDCV` and `cLLI` chunks from the resolved values in [HDR10 static metadata](../test_patterns.md#hdr10-static-metadata). For automatic PQ light levels, it supplies $V / 65535$ to the shared calculation after clipping and quantization. HLG requires explicit light levels. PNG chunk layouts and units come from the [PNG specification](https://www.w3.org/TR/png-3/#mDCV-chunk); do not copy the core SEI payload bytes into these chunks. `mDCV` stores the primaries in the order red, green, blue; the SEI payload uses green, blue, red. `cLLI` stores two 32-bit values in 0.0001 cd/m²; the SEI payload uses two 16-bit values in whole cd/m². PNG reads a `cLLI` value of 0 as "unknown". An automatic light level of an all-black frame is 0, so the chunk states "unknown" for that frame. **Unverified:** a browser uses these chunks for tone mapping.
 
 ### Pixel mapping
 

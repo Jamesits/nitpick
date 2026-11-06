@@ -1,10 +1,12 @@
 //! Conversion of pattern codes to 16-bit PNG samples and the PNG encoding
-//! with its cICP tag. See "Code to PNG sample" in
+//! with its cICP tag and HDR10 metadata chunks. See "Code to PNG sample" in
 //! `doc/design/output_driver/browser.md`.
 
 use std::fmt;
 
+use nitpick_core::driver::{ContentLightLevel, Hdr10Request, OutputError};
 use nitpick_core::image::Image;
+use nitpick_core::metadata::{self, Hdr10Metadata, LightLevel};
 use nitpick_core::output::{CodeRangeError, check_codes};
 use nitpick_core::signal::{Encoding, Format, Rgb};
 use png::chunk;
@@ -18,6 +20,46 @@ pub fn cicp(encoding: Encoding) -> [u8; 4] {
     // 9: BT.2020 primaries. 16: PQ. 18: HLG. 0: RGB (identity matrix).
     let transfer = if encoding.is_pq() { 16 } else { 18 };
     [9, transfer, 0, 1]
+}
+
+/// PNG `mDCV` chunk data (PNG 3rd edition, 11.3.2.7): primaries and white
+/// point as x, y pairs of 16-bit values in 0.00002 units, then maximum and
+/// minimum luminance as 32-bit values in 0.0001 cd/m².
+///
+/// The primary order differs from the SEI payload in
+/// [`Hdr10Metadata::mastering_display_bytes`] (green, blue, red). PNG orders
+/// by the largest x, then the largest y, which is red, green, blue for both
+/// mastering presets.
+#[must_use]
+pub fn mdcv(md: &Hdr10Metadata) -> [u8; 24] {
+    let [r, g, b] = md.primaries;
+    let xy = [r, g, b, md.white]
+        .into_iter()
+        .flatten()
+        .flat_map(|v| Hdr10Metadata::chromaticity_code(v).to_be_bytes());
+    let luminance = [md.max_mastering_nits, md.min_mastering_nits]
+        .into_iter()
+        .flat_map(|v| Hdr10Metadata::luminance_code(v).to_be_bytes());
+    let mut out = [0; 24];
+    for (o, v) in out.iter_mut().zip(xy.chain(luminance)) {
+        *o = v;
+    }
+    out
+}
+
+/// PNG `cLLI` chunk data (PNG 3rd edition, 11.3.2.8): `MaxCLL`, then
+/// `MaxFALL`, as 32-bit values in 0.0001 cd/m². Not the two 16-bit whole
+/// cd/m² fields of the CTA-861.3 SEI payload.
+///
+/// PNG reads 0 as "unknown". An all-black frame gives 0 from the
+/// calculation, so its chunk states "unknown".
+#[must_use]
+pub fn clli(md: &Hdr10Metadata) -> [u8; 8] {
+    let mut out = [0; 8];
+    let (cll, fall) = out.split_at_mut(4);
+    cll.copy_from_slice(&Hdr10Metadata::luminance_code(md.max_cll).to_be_bytes());
+    fall.copy_from_slice(&Hdr10Metadata::luminance_code(md.max_fall).to_be_bytes());
+    out
 }
 
 /// Clip state of one component.
@@ -142,12 +184,56 @@ impl PngSamples {
         self.clipping
     }
 
+    /// `MaxCLL` and `MaxFALL` of the stored samples: $V / 65535$ is the PQ
+    /// signal after clipping and rounding, not the input code.
+    ///
+    /// # Errors
+    /// `Unsupported` for HLG: absolute light levels need a display and
+    /// viewing model.
+    pub fn light_level(&self) -> Result<LightLevel, OutputError> {
+        if !self.format.encoding.is_pq() {
+            return Err(OutputError::Unsupported {
+                feature: "HDR10 metadata automatic light level".into(),
+                reason: "HLG output has no absolute light level; enter explicit values".into(),
+            });
+        }
+        let max = f64::from(u16::MAX);
+        Ok(metadata::light_level(
+            self.samples
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|px| px.map(|v| f64::from(v) / max)),
+        ))
+    }
+
+    /// Resolves `request` for these samples. Explicit light levels bypass
+    /// the calculation for every encoding.
+    ///
+    /// # Errors
+    /// See [`Self::light_level`]; only for automatic light levels.
+    pub fn resolve(&self, request: &Hdr10Request) -> Result<Hdr10Metadata, OutputError> {
+        let level = match request.light_level {
+            ContentLightLevel::FromFrame => Some(self.light_level()?),
+            ContentLightLevel::Explicit { .. } => None,
+        };
+        // `resolve` calls the closure only for `FromFrame`, where `level`
+        // is set.
+        Ok(request.resolve(|| {
+            level.unwrap_or(LightLevel {
+                max_cll: 0.0,
+                max_fall: 0.0,
+            })
+        }))
+    }
+
     /// 16-bit RGB PNG with only the cICP colour tag: no sRGB, gAMA, cHRM
-    /// or iCCP chunk can compete with it.
+    /// or iCCP chunk can compete with it. With `metadata`, it also writes
+    /// `mDCV` and `cLLI`; without, it writes neither.
     ///
     /// # Errors
     /// An empty image, a dimension above `u32`, or an encoder failure.
-    pub fn encode(&self) -> Result<EncodedFrame, EncodeError> {
+    pub fn encode(&self, metadata: Option<&Hdr10Metadata>) -> Result<EncodedFrame, EncodeError> {
         let (Ok(w), Ok(h)) = (u32::try_from(self.width), u32::try_from(self.height)) else {
             return Err(EncodeError(format!(
                 "image size {}×{} exceeds the PNG limit",
@@ -163,30 +249,47 @@ impl PngSamples {
         // cICP must precede PLTE and IDAT.
         // `png` 0.18.1 decodes cICP, but its encoder does not write it.
         writer.write_chunk(chunk::cICP, &cicp(self.format.encoding))?;
+        // mDCV and cLLI must also precede PLTE and IDAT, and the encoder
+        // does not write them either.
+        if let Some(md) = metadata {
+            writer.write_chunk(chunk::mDCV, &mdcv(md))?;
+            writer.write_chunk(chunk::cLLI, &clli(md))?;
+        }
         writer.write_image_data(&data)?;
         writer.finish()?;
         Ok(EncodedFrame {
             bytes,
             size: (self.width, self.height),
             clipping: self.clipping,
+            metadata: metadata.copied(),
         })
     }
 }
 
-/// An encoded PNG and the clipping of its samples.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An encoded PNG, the clipping of its samples and the metadata in its
+/// chunks.
+#[derive(Debug, Clone, PartialEq)]
 pub struct EncodedFrame {
     pub bytes: Vec<u8>,
     pub size: (usize, usize),
     pub clipping: Clipping,
+    pub metadata: Option<Hdr10Metadata>,
 }
 
-/// Converts and encodes one frame.
+/// Converts one frame, resolves `metadata` from the stored samples and
+/// encodes it.
 ///
 /// # Errors
-/// See [`PngSamples::from_image`] and [`PngSamples::encode`].
-pub fn encode_frame(image: &Image, format: Format) -> Result<EncodedFrame, EncodeError> {
-    PngSamples::from_image(image, format)?.encode()
+/// `Unsupported` from [`PngSamples::resolve`]; `Platform` for the errors of
+/// [`PngSamples::from_image`] and [`PngSamples::encode`].
+pub fn encode_frame(
+    image: &Image,
+    format: Format,
+    metadata: Option<&Hdr10Request>,
+) -> Result<EncodedFrame, OutputError> {
+    let samples = PngSamples::from_image(image, format).map_err(EncodeError::from)?;
+    let resolved = metadata.map(|r| samples.resolve(r)).transpose()?;
+    Ok(samples.encode(resolved.as_ref())?)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +306,12 @@ impl std::error::Error for EncodeError {}
 impl From<CodeRangeError> for EncodeError {
     fn from(e: CodeRangeError) -> Self {
         Self(e.to_string())
+    }
+}
+
+impl From<EncodeError> for OutputError {
+    fn from(e: EncodeError) -> Self {
+        Self::Platform(e.to_string())
     }
 }
 

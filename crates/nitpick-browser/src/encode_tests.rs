@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use nitpick_core::signal::BitDepth;
+use nitpick_core::signal::{BitDepth, pq_eotf};
 use zune_png::PngDecoder;
 use zune_png::zune_core::result::DecodingResult;
 
@@ -73,7 +73,7 @@ fn assert_sample(code: u16, v: u16, format: Format) {
 fn every_code_decodes_to_its_sample() {
     for format in formats() {
         let img = all_codes(format);
-        let frame = encode_frame(&img, format).unwrap();
+        let frame = encode_frame(&img, format, None).unwrap();
         assert_eq!(frame.size, (img.width(), img.height()));
         let (size, samples) = decode(&frame.bytes);
         assert_eq!(size, frame.size, "{format}");
@@ -138,7 +138,7 @@ fn clipping_counts_pixels() {
     img.set(0, 0, Rgb::new(63, 500, 500));
     img.set(1, 0, Rgb::new(941, 941, 500));
     img.set(2, 0, Rgb::new(0, 1023, 500));
-    let frame = encode_frame(&img, f).unwrap();
+    let frame = encode_frame(&img, f, None).unwrap();
     let want = Clipping {
         below_black: 2,
         above_peak: 2,
@@ -147,7 +147,7 @@ fn clipping_counts_pixels() {
     assert!(frame.clipping.warning().unwrap().contains('2'));
 
     let full = Format::new(Encoding::PqFull, BitDepth::Ten);
-    let frame = encode_frame(&img, full).unwrap();
+    let frame = encode_frame(&img, full, None).unwrap();
     assert!(frame.clipping.is_empty());
     assert_eq!(frame.clipping.warning(), None);
 }
@@ -157,14 +157,17 @@ fn rejects_code_above_depth() {
     let f = Format::new(Encoding::PqFull, BitDepth::Ten);
     let mut img = Image::new(2, 2, Rgb::grey(0));
     img.set(1, 1, Rgb::new(0, 1024, 0));
-    let err = encode_frame(&img, f).unwrap_err();
-    assert!(err.0.contains("(1, 1)"), "{err}");
+    let err = encode_frame(&img, f, None).unwrap_err();
+    let OutputError::Platform(msg) = err else {
+        panic!("{err}");
+    };
+    assert!(msg.contains("(1, 1)"), "{msg}");
 }
 
 #[test]
 fn rejects_empty_image() {
     let f = Format::new(Encoding::PqFull, BitDepth::Ten);
-    assert!(encode_frame(&Image::new(0, 4, Rgb::default()), f).is_err());
+    assert!(encode_frame(&Image::new(0, 4, Rgb::default()), f, None).is_err());
 }
 
 struct Chunk {
@@ -211,7 +214,7 @@ fn chunk_layout_and_colour_tag() {
         for (e, tag) in want {
             let f = Format::new(e, depth);
             let img = Image::new(3, 2, Rgb::grey(f.white()));
-            let list = chunks(&encode_frame(&img, f).unwrap().bytes);
+            let list = chunks(&encode_frame(&img, f, None).unwrap().bytes);
             let kinds: Vec<&[u8; 4]> = list.iter().map(|c| &c.kind).collect();
 
             assert_eq!(kinds[0], b"IHDR");
@@ -226,11 +229,176 @@ fn chunk_layout_and_colour_tag() {
             let first_idat = kinds.iter().position(|k| *k == b"IDAT").unwrap();
             assert!(cicp_at[0] < first_idat, "{f}");
 
-            for other in [b"sRGB", b"gAMA", b"cHRM", b"iCCP", b"PLTE"] {
-                assert!(!kinds.contains(&other), "{f}: competing chunk");
+            // Metadata is off: no mDCV or cLLI.
+            for other in [
+                b"sRGB", b"gAMA", b"cHRM", b"iCCP", b"PLTE", b"mDCV", b"cLLI",
+            ] {
+                assert!(!kinds.contains(&other), "{f}: unexpected chunk");
             }
             assert_eq!(kinds.last().unwrap(), &b"IEND");
             assert_eq!(list.last().unwrap().data, Vec::<u8>::new());
         }
+    }
+}
+
+fn request(light_level: ContentLightLevel) -> Hdr10Request {
+    Hdr10Request {
+        primaries: [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],
+        white: [0.3127, 0.3290],
+        max_mastering_nits: 1000.0,
+        min_mastering_nits: 0.0001,
+        light_level,
+    }
+}
+
+const EXPLICIT: ContentLightLevel = ContentLightLevel::Explicit {
+    max_cll: 1234.5678,
+    max_fall: 400.25,
+};
+
+fn be16(b: &[u8]) -> Vec<u16> {
+    b.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_be_bytes(*c))
+        .collect()
+}
+
+fn be32(b: &[u8]) -> Vec<u32> {
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_be_bytes(*c))
+        .collect()
+}
+
+/// `cLLI` values in 0.0001 cd/m².
+fn clli_of(bytes: &[u8]) -> [u32; 2] {
+    let list = chunks(bytes);
+    let c = list.iter().find(|c| &c.kind == b"cLLI").expect("cLLI");
+    assert_eq!(c.data.len(), 8);
+    be32(&c.data).try_into().unwrap()
+}
+
+#[test]
+fn metadata_chunk_widths_order_and_units() {
+    for format in formats() {
+        let img = Image::new(3, 2, Rgb::grey(format.white()));
+        let frame = encode_frame(&img, format, Some(&request(EXPLICIT))).unwrap();
+        let list = chunks(&frame.bytes);
+        let kinds: Vec<&[u8; 4]> = list.iter().map(|c| &c.kind).collect();
+        let at = |k: &[u8; 4]| {
+            let found: Vec<usize> = (0..list.len()).filter(|&i| kinds[i] == k).collect();
+            assert_eq!(found.len(), 1, "{format}: {}", String::from_utf8_lossy(k));
+            found[0]
+        };
+        let first_idat = kinds.iter().position(|k| *k == b"IDAT").unwrap();
+        assert!(at(b"cICP") < first_idat);
+        assert!(at(b"mDCV") < first_idat, "{format}");
+        assert!(at(b"cLLI") < first_idat, "{format}");
+
+        // PNG 3rd edition 11.3.2.7: R, G, B, white as 16-bit x, y in
+        // 0.00002 units, then maximum and minimum luminance as 32-bit
+        // values in 0.0001 cd/m².
+        let mdcv = &list[at(b"mDCV")].data;
+        assert_eq!(mdcv.len(), 24);
+        assert_eq!(
+            be16(&mdcv[..16]),
+            [35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450]
+        );
+        assert_eq!(be32(&mdcv[16..]), [10_000_000, 1]);
+
+        // Two 32-bit values in 0.0001 cd/m², not 16-bit whole cd/m².
+        assert_eq!(clli_of(&frame.bytes), [12_345_678, 4_002_500], "{format}");
+        assert_eq!(frame.metadata.unwrap().max_cll, 1234.5678);
+    }
+}
+
+#[test]
+fn mdcv_is_not_the_sei_payload() {
+    let md = request(EXPLICIT).resolve(|| unreachable!());
+    // The SEI payload starts with green; mDCV starts with red.
+    assert_ne!(mdcv(&md), md.mastering_display_bytes());
+    assert_eq!(be16(&mdcv(&md)[..4]), [35400, 14600]);
+    assert_eq!(be16(&md.mastering_display_bytes()[..4]), [8500, 39850]);
+    assert_ne!(clli(&md)[..4], md.content_light_level_bytes());
+}
+
+#[test]
+fn mdcv_matches_spec_p3_example() {
+    let md = Hdr10Request {
+        primaries: [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]],
+        ..request(EXPLICIT)
+    }
+    .resolve(|| unreachable!());
+    // The spec's example 9 gives 13520 for green x; 0.265 / 0.00002 is
+    // 13250.
+    assert_eq!(
+        be16(&mdcv(&md)[..12]),
+        [34000, 16000, 13250, 34500, 7500, 3000]
+    );
+}
+
+#[test]
+fn uniform_10bit_peak_is_10000_nits_in_the_browser() {
+    let narrow = Format::new(Encoding::PqNarrow, BitDepth::Ten);
+    let img = Image::new(4, 4, Rgb::grey(940));
+    let auto = request(ContentLightLevel::FromFrame);
+    let frame = encode_frame(&img, narrow, Some(&auto)).unwrap();
+    // Narrow 940 stores 65535: E' = 1.
+    assert_eq!(clli_of(&frame.bytes), [100_000_000, 100_000_000]);
+
+    // QRhi reads the same codes as full-range PQ.
+    let qrhi = metadata::light_level([[940.0 / 1023.0; 3]]);
+    assert!((qrhi.max_cll - 4654.397).abs() < 1e-3, "{}", qrhi.max_cll);
+
+    // Browser full-range PQ stores round(65535 · 940 / 1023).
+    let full = Format::new(Encoding::PqFull, BitDepth::Ten);
+    let frame = encode_frame(&img, full, Some(&auto)).unwrap();
+    let md = frame.metadata.unwrap();
+    assert!((md.max_cll - 4654.4).abs() < 0.1, "{}", md.max_cll);
+}
+
+#[test]
+fn automatic_levels_use_rounded_samples() {
+    // 12-bit narrow 840 stores 10923, not E' = 10922.5 / 65535.
+    let f = Format::new(Encoding::PqNarrow, BitDepth::Twelve);
+    let mut img = Image::new(2, 1, Rgb::grey(840));
+    // Below black: stored as 0 and counted in the average.
+    img.set(1, 0, Rgb::new(10, 840, 3));
+    let samples = PngSamples::from_image(&img, f).unwrap();
+    let level = samples.light_level().unwrap();
+
+    let stored = pq_eotf(10923.0 / 65535.0);
+    let unrounded = pq_eotf(10922.5 / 65535.0);
+    assert!(stored > unrounded);
+    assert_eq!(level.max_cll, stored);
+    assert_eq!(level.max_fall, stored);
+
+    // Above peak clips to 65535 → 10000 cd/m².
+    img.set(1, 0, Rgb::new(4000, 256, 256));
+    let level = PngSamples::from_image(&img, f)
+        .unwrap()
+        .light_level()
+        .unwrap();
+    assert_eq!(level.max_cll, pq_eotf(1.0));
+    assert!((level.max_fall - f64::midpoint(10_000.0, stored)).abs() < 1e-9);
+}
+
+#[test]
+fn hlg_needs_explicit_light_levels() {
+    for depth in BitDepth::ALL {
+        let f = Format::new(Encoding::HlgNarrow, depth);
+        let img = Image::new(2, 2, Rgb::grey(f.white()));
+        let err = encode_frame(&img, f, Some(&request(ContentLightLevel::FromFrame))).unwrap_err();
+        assert!(matches!(err, OutputError::Unsupported { .. }), "{err}");
+
+        let frame = encode_frame(&img, f, Some(&request(EXPLICIT))).unwrap();
+        assert_eq!(clli_of(&frame.bytes), [12_345_678, 4_002_500]);
+        let tag = chunks(&frame.bytes)
+            .into_iter()
+            .find(|c| &c.kind == b"cICP")
+            .unwrap();
+        assert_eq!(tag.data, [9, 18, 0, 1]);
     }
 }
