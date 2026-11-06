@@ -49,7 +49,10 @@ pub mod qobject {
 use core::pin::Pin;
 
 use cxx_qt_lib::QString;
-use nitpick_core::driver::{ContentLightLevel, Hdr10Request};
+use nitpick_core::driver::{
+    Capabilities, ContentLightLevel, Conversion, DepthSupport, EncodingSupport, Hdr10Request,
+    OutputLimits, Support,
+};
 use nitpick_core::image::Image;
 use nitpick_core::metadata::{self, Hdr10Metadata, MasteringPrimaries};
 use nitpick_core::output::{SwapChainFormat, swap_chain_bytes};
@@ -72,6 +75,50 @@ fn parse(
     let encoding: Encoding = encoding.to_string().parse()?;
     let depth: BitDepth = depth.to_string().parse()?;
     Ok((pattern.to_string().parse()?, Format::new(encoding, depth)))
+}
+
+/// Output path report of the current window code, which does not query the
+/// device yet. Values follow the `QRhi` feature matrix of the output driver
+/// design.
+fn qrhi_capabilities() -> Capabilities {
+    let depth = |d: BitDepth| {
+        let support = match SwapChainFormat::for_depth(d) {
+            SwapChainFormat::Hdr10 => DepthSupport {
+                available: Support::Yes,
+                path: "HDR10 swap chain".into(),
+                conversion: Conversion::Direct,
+                exact: Support::Unknown("the compositor can change codes".into()),
+            },
+            SwapChainFormat::ScRgb => DepthSupport {
+                available: Support::Yes,
+                path: "FP16 scRGB swap chain, 1.0 = 80 cd/m2".into(),
+                conversion: Conversion::ScRgb80,
+                exact: Support::No("FP16 cannot carry the levels marked *".into()),
+            },
+        };
+        (d, support)
+    };
+    let encoding = |e: Encoding| {
+        let interpretation = match e {
+            Encoding::PqFull => Support::Yes,
+            Encoding::PqNarrow => Support::No("codes are sent as full-range PQ".into()),
+            Encoding::HlgNarrow => {
+                Support::No("scope use only: codes are sent as full-range PQ".into())
+            }
+        };
+        let support = EncodingSupport {
+            input: Support::Yes,
+            interpretation,
+            auto_light_level: Support::Yes,
+        };
+        (e, support)
+    };
+    Capabilities {
+        depths: BitDepth::ALL.into_iter().map(depth).collect(),
+        encodings: Encoding::ALL.into_iter().map(encoding).collect(),
+        hdr_metadata: Support::Yes,
+        pixel_exact: Support::Yes,
+    }
 }
 
 fn screen_size(screen: i32) -> Result<(usize, usize), String> {
@@ -232,7 +279,8 @@ impl qobject::Launcher {
     ) -> QString {
         let text = parse(pattern, encoding, depth)
             .and_then(|(kind, format)| {
-                kind.reference_table(format, screen_size(screen)?)
+                let limits = OutputLimits::for_frame(&qrhi_capabilities(), format, None);
+                kind.reference_table(format, screen_size(screen)?, &limits)
                     .map_err(|e| e.to_string())
             })
             .unwrap_or_else(|e| e);

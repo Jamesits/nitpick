@@ -60,15 +60,6 @@ TODO:
 - Implement `OutputDriver` in `display.rs`. Run conversion in worker jobs with owned data; keep window and QRhi calls on the GUI thread. Resolve the future from bridge callbacks and wake the Rust task.
 - Verify with controlled workers that Qt timers remain active during conversion and submission. Dropping the future must release its wait and callbacks without waiting for workers. Late results must not affect a new frame. Do not block or run a nested GUI event loop.
 
-### 15. Make reference tables use output limits
-
-Requires: 2, 10.
-
-TODO:
-
-- Supply selected-path limits to `pattern/catalogue.rs` and its reference table. Show interpretation warnings, FP16 precision marks and browser clipping marks from the relevant output contract.
-- With mock path reports, verify that only the supported QRhi FP16 path has `*` marks. Browser nominal-range excursions must be marked as clipped at both depths. An unavailable path must not claim exact output.
-
 ### 16. Use the driver lifecycle in the Qt launcher
 
 Requires: 14, 15.

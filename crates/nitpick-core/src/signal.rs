@@ -174,6 +174,12 @@ impl Format {
         }
     }
 
+    /// The code is between 0 % and 100 % signal. Full-range codes always are.
+    #[must_use]
+    pub fn is_nominal(self, code: u16) -> bool {
+        (self.black()..=self.white()).contains(&code)
+    }
+
     /// Lowest and highest permitted code values (BT.2100 Table 9):
     /// narrow 4 to 1019 (10-bit) and 16 to 4079 (12-bit).
     #[must_use]

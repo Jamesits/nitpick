@@ -23,6 +23,7 @@ fn depth(available: Support, exact: Support) -> DepthSupport {
     DepthSupport {
         available,
         path: "mock path".into(),
+        conversion: Conversion::Direct,
         exact,
     }
 }

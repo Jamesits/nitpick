@@ -3,12 +3,13 @@
 use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
+use crate::driver::{Conversion, OutputLimits};
 use crate::image::Image;
-use crate::output::{SwapChainFormat, scrgb_is_exact};
+use crate::output::scrgb_is_exact;
 use crate::pattern::bt2111::{self, SizeClass};
 use crate::pattern::grayscale;
 use crate::pattern::model::PatternModel;
-use crate::signal::{Encoding, Format, ycbcr_narrow};
+use crate::signal::{Encoding, Format, Rgb, ycbcr_narrow};
 
 /// Smallest supported output. Below it, label text and narrow regions collapse.
 pub const MIN_SIZE: (usize, usize) = (640, 360);
@@ -134,8 +135,8 @@ impl PatternKind {
 
     /// Text table of every flat level, grouped by section, with its R'G'B'
     /// codes and the Y'Cb'Cr' codes a vectorscope reads, for an output of
-    /// `size` pixels. With the FP16 swap chain (12-bit), a `*` marks the
-    /// levels that it cannot carry exactly (see [`scrgb_is_exact`]).
+    /// `size` pixels. `limits` gives the output path, its warnings and the
+    /// per-level marks of its conversion (see [`Conversion`]).
     ///
     /// # Errors
     /// If the encoding is not supported.
@@ -143,6 +144,7 @@ impl PatternKind {
         self,
         format: Format,
         size: (usize, usize),
+        limits: &OutputLimits,
     ) -> Result<String, PatternError> {
         let model = self.model(format, size)?;
         let depth = format.depth;
@@ -164,41 +166,85 @@ impl PatternKind {
                 ", as a GPU outputs it in YCbCr mode"
             }
         );
+        let _ = match &limits.path {
+            Some(path) => writeln!(s, "Output: {}.", path.description),
+            None => writeln!(
+                s,
+                "Output: unavailable. No claim that these codes reach the display."
+            ),
+        };
+        let conversion = limits.path.as_ref().map(|p| p.conversion);
+        for warning in &limits.warnings {
+            let _ = writeln!(s, "Warning: {warning}");
+        }
         let _ = writeln!(s);
         let _ = writeln!(
             s,
             "{:<22} {:>5} {:>5} {:>5}   {:>5} {:>5} {:>5}",
             "patch", "R'", "G'", "B'", "Y'", "Cb", "Cr"
         );
-        let fp16 = SwapChainFormat::for_depth(depth) == SwapChainFormat::ScRgb;
-        let mut inexact = false;
+        let mut marked = false;
         let mut section = "";
         for level in model.levels() {
             if level.section != section {
                 section = level.section;
-                let _ = writeln!(s, "\n[{section}]");
+                let _ = writeln!(
+                    s,
+                    "
+[{section}]"
+                );
             }
             let (rgb, c) = (level.rgb, ycbcr_narrow(level.rgb, format));
-            let mark = if fp16 && !scrgb_is_exact(rgb, depth) {
-                inexact = true;
-                " *"
-            } else {
-                ""
-            };
+            let mark = conversion.and_then(|k| level_mark(k, rgb, format));
+            marked |= mark.is_some();
             let _ = writeln!(
                 s,
-                "{:<22} {:>5} {:>5} {:>5}   {:>5} {:>5} {:>5}{mark}",
-                level.name, rgb.r, rgb.g, rgb.b, c.y, c.cb, c.cr
+                "{:<22} {:>5} {:>5} {:>5}   {:>5} {:>5} {:>5}{}",
+                level.name,
+                rgb.r,
+                rgb.g,
+                rgb.b,
+                c.y,
+                c.cb,
+                c.cr,
+                mark.map(|m| format!(" {m}")).unwrap_or_default()
             );
         }
-        if inexact {
+        if let (true, Some(k)) = (marked, conversion) {
             let _ = writeln!(
                 s,
-                "\n* The FP16 scRGB swap chain cannot carry these codes exactly: a component \
-                 near black next to bright components moves by one or more codes."
+                "
+{}",
+                mark_note(k)
             );
         }
         Ok(s)
+    }
+}
+
+/// Mark of a level that the conversion cannot carry exactly.
+fn level_mark(conversion: Conversion, rgb: Rgb, format: Format) -> Option<&'static str> {
+    match conversion {
+        Conversion::Direct => None,
+        Conversion::ScRgb80 => (!scrgb_is_exact(rgb, format.depth)).then_some("*"),
+        Conversion::Png16 => {
+            let nominal = [rgb.r, rgb.g, rgb.b]
+                .into_iter()
+                .all(|v| format.is_nominal(v));
+            (!nominal).then_some("clipped")
+        }
+    }
+}
+
+fn mark_note(conversion: Conversion) -> &'static str {
+    match conversion {
+        Conversion::Direct => "",
+        Conversion::ScRgb80 => {
+            "* The FP16 scRGB swap chain cannot carry these codes exactly: a component              near black next to bright components moves by one or more codes."
+        }
+        Conversion::Png16 => {
+            "clipped: a component is below 0 % or above 100 % signal. The full-range PNG              stores it at the nominal limit, so the level does not test that excursion."
+        }
     }
 }
 

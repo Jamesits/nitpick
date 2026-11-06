@@ -76,8 +76,24 @@ pub struct DepthSupport {
     pub available: Support,
     /// For example "HDR10 swap chain" or "16-bit PNG, cICP PQ".
     pub path: String,
+    /// How the path changes codes; it selects the reference table marks.
+    pub conversion: Conversion,
     /// The codes reach the wire or the panel without change.
     pub exact: Support,
+}
+
+/// Code conversion of an output path: only the known per-level limits of
+/// the driver's own conversion. OS and display changes are in `exact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Conversion {
+    /// Codes go to the output unchanged, for example the HDR10 swap chain.
+    Direct,
+    /// FP16 scRGB with 1.0 = 80 cd/m². Some levels do not decode back to
+    /// their codes; see [`crate::output::scrgb_is_exact`].
+    ScRgb80,
+    /// Full-range 16-bit PNG samples. Narrow-range components outside the
+    /// nominal range clip; see [`Format::is_nominal`].
+    Png16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +243,58 @@ pub trait OutputDriver {
     /// waiting. Physical presentation is not confirmed. Use [`check_frame`].
     fn present<'a>(&'a mut self, surface: &'a Surface, frame: &'a Frame<'a>) -> PresentFuture<'a>;
     fn close(&mut self, display: &DisplayId);
+}
+
+/// Limits of the selected output path for one frame format. The reference
+/// table shows them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputLimits {
+    /// `None`: the driver cannot open or present the format. The table then
+    /// makes no claim of exact output.
+    pub path: Option<OutputPath>,
+    /// Warnings of [`check_open`] and [`check_frame`], or the rejection reason.
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputPath {
+    pub description: String,
+    pub conversion: Conversion,
+}
+
+impl OutputLimits {
+    /// Applies [`check_open`] and [`check_frame`] to the reported path.
+    #[must_use]
+    pub fn for_frame(caps: &Capabilities, format: Format, metadata: Option<&Hdr10Request>) -> Self {
+        let checked = check_open(caps, format.depth).and_then(|mut warnings| {
+            warnings.extend(check_frame(caps, format, metadata)?);
+            Ok(warnings)
+        });
+        match checked {
+            Ok(warnings) => Self {
+                // Always found: check_open rejects an unreported depth.
+                path: caps
+                    .depths
+                    .iter()
+                    .find(|(k, _)| *k == format.depth)
+                    .map(|(_, d)| OutputPath {
+                        description: d.path.clone(),
+                        conversion: d.conversion,
+                    }),
+                warnings,
+            },
+            Err(e) => Self::unavailable(e.to_string()),
+        }
+    }
+
+    /// No usable path, for example when `query` fails.
+    #[must_use]
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            path: None,
+            warnings: vec![reason.into()],
+        }
+    }
 }
 
 fn unsupported(feature: impl Into<String>, reason: impl Into<String>) -> OutputError {

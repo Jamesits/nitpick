@@ -82,9 +82,16 @@ pub struct Capabilities {
 }
 
 pub struct DepthSupport {
-    pub available: Support, // the driver can open this output path
-    pub path: String,      // for example "HDR10 swap chain", "16-bit PNG, cICP PQ"
-    pub exact: Support,    // the codes reach the wire or the panel without change
+    pub available: Support,     // the driver can open this output path
+    pub path: String,           // for example "HDR10 swap chain", "16-bit PNG, cICP PQ"
+    pub conversion: Conversion, // the driver's own code conversion
+    pub exact: Support,         // the codes reach the wire or the panel without change
+}
+
+pub enum Conversion {
+    Direct,  // codes unchanged, for example the HDR10 swap chain
+    ScRgb80, // FP16 scRGB, 1.0 = 80 cd/m²
+    Png16,   // full-range 16-bit PNG samples
 }
 
 pub struct EncodingSupport {
@@ -163,6 +170,8 @@ Rules:
 - `interpretation = No` does not reject the frame. The host accepts the encoding and shows the reason in the status and reference table. This permits QRhi scope use with HLG codes and PQ signalling.
 - `exact = No` and `pixel_exact = No` also produce warnings. They do not disable approximate output. For any selected feature with `Unknown`, continue with a warning.
 - The driver resolves `Hdr10Request` to `Hdr10Metadata`. See [content light level calculation](../test_patterns.md#hdr10-static-metadata) for the shared calculation and the HLG rule.
+- The reference table shows the limits of the selected path. `OutputLimits::for_frame` applies `check_open` and `check_frame` to the queried `Capabilities`. It gives the path description, its `Conversion` and the warnings. If a check rejects the format, or `query` fails, the path is unavailable: the table shows the reason and makes no claim of exact output.
+- Per-level marks come only from `Conversion`. `ScRgb80` marks with `*` the levels that the FP16 path cannot carry (see [Swap chain output](qt.md#swap-chain-output)). `Png16` marks as "clipped" the levels with a narrow-range component outside 0 % to 100 % signal (see [Code to PNG sample](browser.md#code-to-png-sample)). `Direct` has no marks. OS and display changes are in `exact` and appear as warnings.
 - The host calls `query` again before each `open`, because the user can change the OS settings (HDR on/off, browser zoom) at any time.
 - `displays`, `query` and `open` do not wait for network replies or user actions. Browser setup supplies the client state before these calls. A viewport change invalidates its surface; the host must open it again and render at the new size.
 
