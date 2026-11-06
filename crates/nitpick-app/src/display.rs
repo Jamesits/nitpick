@@ -29,10 +29,10 @@ pub mod ffi {
     /// safe-area margins of the window.
     #[namespace = "nitpick"]
     struct PatternSurface {
-        /// False if QRhi rejected the swap chain format for this display.
-        /// No window is then open, the size is 0 and `description` gives
-        /// the reason. The window does not fall back to SDR.
-        format_supported: bool,
+        /// Empty if QRhi accepts the swap chain format for this display.
+        /// Otherwise the swap chain that QRhi uses instead. The window
+        /// still shows the pattern; the OS or the compositor remaps it.
+        fallback: String,
         width: i32,
         height: i32,
         description: String,
@@ -123,7 +123,7 @@ impl Backend {
 /// Native device report of a screen, or the reason it is unavailable.
 pub type DeviceReport = Result<DeviceQuery, String>;
 
-/// Reason for the macOS 12-bit rejection. Qt's linear HDR path on Metal
+/// Reason for the macOS 12-bit warning. Qt's linear HDR path on Metal
 /// has 1.0 = the current SDR white, whose luminance is not reported.
 pub const NO_FP16_SCALE: &str = "absolute FP16 luminance scale unavailable";
 
@@ -188,7 +188,15 @@ pub fn capabilities(backend: Backend, device: &DeviceReport) -> Capabilities {
                 available: available(backend, d, device),
                 path: "FP16 scRGB swap chain, 1.0 = 80 cd/m2".into(),
                 conversion: Conversion::ScRgb80,
-                exact: exact(d, device, Some("FP16 cannot carry the levels marked *")),
+                exact: exact(
+                    d,
+                    device,
+                    Some(if backend == Backend::Metal {
+                        NO_FP16_SCALE
+                    } else {
+                        "FP16 cannot carry the levels marked *"
+                    }),
+                ),
             },
         };
         (d, support)
@@ -225,12 +233,17 @@ pub fn capabilities(backend: Backend, device: &DeviceReport) -> Capabilities {
 
 fn available(backend: Backend, depth: BitDepth, device: &DeviceReport) -> Support {
     let fp16 = SwapChainFormat::for_depth(depth) == SwapChainFormat::ScRgb;
+    // The paths below show the pattern, but the OS changes the levels.
+    // They warn instead of rejecting, so the pattern stays usable for a
+    // visual check.
     if fp16 && backend == Backend::Metal {
-        return Support::No(NO_FP16_SCALE.into());
+        return Support::Unknown(format!(
+            "{NO_FP16_SCALE}: 1.0 is the current SDR white, not 80 cd/m2"
+        ));
     }
     // QRhi D3D11 offers both HDR formats only for an output in the DXGI PQ
     // colour space (Qt 6.12 `QDxgiHdrInfo::isHdrCapable`). SDR WCG is not
-    // that colour space.
+    // that colour space. Otherwise QRhi uses an 8-bit SDR swap chain.
     if backend == Backend::D3d11
         && let Ok(q) = device
         && let Report::Known {
@@ -238,8 +251,8 @@ fn available(backend: Backend, depth: BitDepth, device: &DeviceReport) -> Suppor
             source,
         } = &q.mode.hdr_on
     {
-        return Support::No(format!(
-            "Windows HDR is off ({source}); D3D11 has HDR swap chains only with HDR on"
+        return Support::Unknown(format!(
+            "Windows HDR is off ({source}); D3D11 uses an 8-bit SDR swap chain and shows the              codes as SDR values"
         ));
     }
     if fp16 && backend == Backend::Vulkan {
@@ -369,19 +382,8 @@ pub fn display_id(screen: i32) -> DisplayId {
 /// Surface of an opened pattern window.
 ///
 /// # Errors
-/// [`OutputError::Unsupported`] if `QRhi` rejected the swap chain format;
 /// [`OutputError::Platform`] for a negative size.
-pub fn surface(
-    display: DisplayId,
-    depth: BitDepth,
-    s: &ffi::PatternSurface,
-) -> Result<Surface, OutputError> {
-    if !s.format_supported {
-        return Err(OutputError::Unsupported {
-            feature: depth.label().into(),
-            reason: s.description.clone(),
-        });
-    }
+pub fn surface(display: DisplayId, s: &ffi::PatternSurface) -> Result<Surface, OutputError> {
     let size = |v: i32| {
         usize::try_from(v).map_err(|_| OutputError::Platform(format!("invalid pattern size {v}")))
     };
@@ -389,6 +391,19 @@ pub fn surface(
         display,
         size: (size(s.width)?, size(s.height)?),
         description: s.description.clone(),
+    })
+}
+
+/// Status line warning if `QRhi` did not accept the swap chain format of
+/// `depth`.
+#[must_use]
+pub fn surface_warning(depth: BitDepth, s: &ffi::PatternSurface) -> Option<String> {
+    (!s.fallback.is_empty()).then(|| {
+        format!(
+            "{} swap chain not supported by this display: {}",
+            depth.label(),
+            s.fallback
+        )
     })
 }
 

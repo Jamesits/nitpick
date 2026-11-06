@@ -1,12 +1,13 @@
 use nitpick_core::device::{
     DeviceCapabilities, DeviceId, DeviceInfo, DeviceMode, DeviceQuery, EdrHeadroom, Report,
 };
-use nitpick_core::driver::{
-    Capabilities, Gamut, OutputError, OutputLimits, Support, check_frame, check_open,
-};
+use nitpick_core::driver::{Capabilities, Gamut, OutputLimits, Support, check_frame, check_open};
 use nitpick_core::signal::{BitDepth, Encoding, Format};
 
-use super::{Backend, DeviceReport, NO_FP16_SCALE, capabilities, display_id, ffi, mode, surface};
+use super::{
+    Backend, DeviceReport, NO_FP16_SCALE, capabilities, display_id, ffi, mode, surface,
+    surface_warning,
+};
 
 const INFO_2: &str = "DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2";
 
@@ -89,11 +90,17 @@ fn depth(caps: &Capabilities, d: BitDepth) -> &super::DepthSupport {
     &caps.depths.iter().find(|(k, _)| *k == d).unwrap().1
 }
 
-fn rejection(caps: &Capabilities, d: BitDepth) -> String {
-    match check_open(caps, d) {
-        Err(OutputError::Unsupported { reason, .. }) => reason,
-        other => panic!("not rejected: {other:?}"),
+fn unknown_reason(s: &Support) -> &str {
+    match s {
+        Support::Unknown(reason) => reason,
+        other => panic!("not Unknown: {other:?}"),
     }
+}
+
+/// `check_open` accepts `d` and warns about it.
+fn open_warning(caps: &Capabilities, d: BitDepth) -> String {
+    let warnings = check_open(caps, d).unwrap();
+    warnings.join("; ")
 }
 
 fn is_unknown(s: &Support) -> bool {
@@ -107,16 +114,19 @@ fn no_reason(s: &Support) -> &str {
     }
 }
 
-/// The table and `show` use these rules before the window opens, so the
-/// rejection comes before any pixel conversion.
+/// The pattern is shown, but the table and the status line warn that the
+/// luminance scale is not absolute.
 #[test]
-fn macos_twelve_bit_is_rejected_with_the_scale_reason() {
+fn macos_twelve_bit_warns_with_the_scale_reason() {
     for device in [Ok(mac()), Ok(hdr_on()), Err("no report".to_owned())] {
         let caps = capabilities(Backend::Metal, &device);
-        assert_eq!(rejection(&caps, BitDepth::Twelve), NO_FP16_SCALE);
+        let twelve = depth(&caps, BitDepth::Twelve);
+        assert!(unknown_reason(&twelve.available).starts_with(NO_FP16_SCALE));
+        assert!(no_reason(&twelve.exact).contains(NO_FP16_SCALE));
+        assert!(open_warning(&caps, BitDepth::Twelve).contains(NO_FP16_SCALE));
         let format = Format::new(Encoding::PqFull, BitDepth::Twelve);
         let limits = OutputLimits::for_frame(&caps, format, None);
-        assert_eq!(limits.path, None);
+        assert!(limits.path.is_some());
         assert!(limits.warnings[0].contains(NO_FP16_SCALE));
         // 10-bit HDR10 stays available.
         assert!(check_open(&caps, BitDepth::Ten).is_ok());
@@ -145,15 +155,17 @@ fn windows_hdr_on_offers_both_paths() {
     );
 }
 
-/// D3D11 has no HDR swap chain with HDR off; the report says so instead
-/// of an SDR fallback.
+/// D3D11 has no HDR swap chain with HDR off. The pattern is shown on the
+/// SDR fallback with a warning.
 #[test]
-fn windows_hdr_off_rejects_both_paths() {
+fn windows_hdr_off_warns_for_both_paths() {
     let mut off = hdr_on();
     off.mode.hdr_on = known(false);
     let caps = caps(Backend::D3d11, off.clone());
     for d in BitDepth::ALL {
-        assert!(rejection(&caps, d).starts_with("Windows HDR is off"));
+        assert!(unknown_reason(&depth(&caps, d).available).starts_with("Windows HDR is off"));
+        assert!(open_warning(&caps, d).contains("8-bit SDR swap chain"));
+        assert!(no_reason(&depth(&caps, d).exact).contains("HDR is off"));
     }
     let m = mode(&Ok(off));
     assert_eq!(m.hdr_on, Some(false));
@@ -164,7 +176,7 @@ fn windows_hdr_off_rejects_both_paths() {
 fn windows_sdr_wcg_is_not_hdr() {
     let caps = caps(Backend::D3d11, sdr_wcg());
     for d in BitDepth::ALL {
-        assert!(rejection(&caps, d).starts_with("Windows HDR is off"));
+        assert!(unknown_reason(&depth(&caps, d).available).starts_with("Windows HDR is off"));
     }
     let m = mode(&Ok(sdr_wcg()));
     assert_eq!(m.hdr_on, Some(false));
@@ -261,30 +273,27 @@ fn unknown_fields_stay_unknown() {
     );
 }
 
+/// `QRhi` uses another swap chain format; the window stays open and warns.
 #[test]
-fn rejected_swap_chain_is_unsupported_without_fallback() {
-    let rejected = ffi::PatternSurface {
-        format_supported: false,
-        width: 0,
-        height: 0,
-        description: "HDR10 swap chain not supported on this display".into(),
-    };
-    match surface(display_id(0), BitDepth::Ten, &rejected) {
-        Err(OutputError::Unsupported { feature, reason }) => {
-            assert_eq!(feature, BitDepth::Ten.label());
-            assert_eq!(reason, rejected.description);
-        }
-        other => panic!("not rejected: {other:?}"),
-    }
-    let opened = ffi::PatternSurface {
-        format_supported: true,
+fn swap_chain_fallback_is_a_warning() {
+    let fallback = ffi::PatternSurface {
+        fallback: "D3D11 uses an 8-bit SDR swap chain".into(),
         width: 3840,
         height: 2160,
         description: "HDR10 swap chain (D3D11)".into(),
     };
-    let s = surface(display_id(1), BitDepth::Ten, &opened).unwrap();
+    let s = surface(display_id(0), &fallback).unwrap();
     assert_eq!(s.size, (3840, 2160));
+    let warning = surface_warning(BitDepth::Ten, &fallback).unwrap();
+    assert!(warning.starts_with(BitDepth::Ten.label()));
+    assert!(warning.ends_with("D3D11 uses an 8-bit SDR swap chain"));
+    let opened = ffi::PatternSurface {
+        fallback: String::new(),
+        ..fallback
+    };
+    let s = surface(display_id(1), &opened).unwrap();
     assert_eq!(s.display, display_id(1));
+    assert_eq!(surface_warning(BitDepth::Ten, &opened), None);
 }
 
 /// Runs the launcher's screen path for every Qt screen. Run with

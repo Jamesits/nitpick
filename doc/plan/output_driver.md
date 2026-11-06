@@ -269,7 +269,7 @@ Open questions:
 TODO:
 
 - Add the selected HDR stream adapter and retain pixel-buffer attachments, range and preset. Handle permission failure and any explicit YCbCr conversion as specified by [Platform capture adapters](../design/output_driver/testing.md#platform-capture-adapters).
-- Verify buffer layout, timestamps and resize handling. Qualify on supported hardware before numeric HDR comparisons. Do not assign the Windows scRGB scale to generic EDR values or enable QRhi 12-bit output.
+- Verify buffer layout, timestamps and resize handling. Qualify on supported hardware before numeric HDR comparisons. Do not assign the Windows scRGB scale to generic EDR values or claim absolute luminance for QRhi 12-bit output.
 
 ### 41. Add Linux capture with an explicit colour contract
 

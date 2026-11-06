@@ -48,5 +48,5 @@ TODO:
 
 ### 5. Verify pattern and HDR10 metadata
 
-- Run both patterns through the 10-bit HDR10 swap chain on an HDR (EDR) display. Verify that the launcher disables 12-bit output and that a forced 12-bit request fails with the reason that the absolute FP16 luminance scale is unavailable.
+- Run both patterns through the 10-bit HDR10 swap chain on an HDR (EDR) display. Verify that 12-bit output shows the pattern with the warning that the absolute FP16 luminance scale is unavailable.
 - Find out if macOS sends the codes unchanged to an external HDR10 display, or tone maps them.

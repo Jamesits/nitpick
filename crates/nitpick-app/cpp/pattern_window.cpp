@@ -237,8 +237,8 @@ public:
         return s;
     }
 
-    // The display rejected the swap chain format. No SDR fallback is used.
-    bool formatUnsupported() const { return m_unsupported; }
+    // Empty if QRhi accepted the swap chain format; see init().
+    const std::string &fallback() const { return m_fallback; }
 
     std::string present(const std::uint8_t *data, std::size_t size, int width, int height,
                         const HdrMetadata &metadata) {
@@ -374,13 +374,21 @@ private:
         m_sc.reset(m_rhi->newSwapChain());
         m_sc->setWindow(this);
         const auto format = m_fp16 ? QRhiSwapChain::HDRExtendedSrgbLinear : QRhiSwapChain::HDR10;
-        // Without this check QRhi falls back to an SDR swap chain silently.
+        // QRhi changes an unsupported format without an error. The window
+        // still shows the pattern, so that the user can see the remapped
+        // output; the launcher shows the fallback as a warning.
         if (!m_sc->isFormatSupported(format)) {
-            m_unsupported = true;
-            throw std::runtime_error(
-                std::string(m_fp16 ? "FP16 scRGB" : "HDR10") +
-                " swap chain not supported on this display; turn on HDR in the system "
-                "display settings");
+            // Qt 6.12 behaviour of each backend's createOrResize().
+#if defined(Q_OS_WIN)
+            m_fallback = "D3D11 uses an 8-bit SDR swap chain (sRGB, BT.709); the codes are shown "
+                         "as SDR values";
+#elif defined(Q_OS_MACOS)
+            m_fallback = "Metal keeps the format, but the display has no EDR headroom; macOS "
+                         "clips at SDR white";
+#else
+            m_fallback = "Vulkan uses the first surface format of the compositor; the codes are "
+                         "shown as SDR values";
+#endif
         }
         m_sc->setFormat(format);
         m_rp.reset(m_sc->newCompatibleRenderPassDescriptor());
@@ -464,7 +472,12 @@ private:
         d.MinMasteringLuminance = md.min_mastering;
         d.MaxContentLightLevel = md.max_cll;
         d.MaxFrameAverageLightLevel = md.max_fall;
-        check(sc4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof d, &d), "SetHDRMetaData");
+        // Not fatal: an SDR fallback swap chain can refuse metadata.
+        const HRESULT hr = sc4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof d, &d);
+        if (FAILED(hr)) {
+            return sformat("HDR metadata NOT sent: SetHDRMetaData failed: 0x%08lX.",
+                           static_cast<unsigned long>(hr));
+        }
         return "HDR10 metadata: " + values + ".";
 #elif defined(Q_OS_MACOS)
         nitpick::setMetalHdrMetadata(this, md);
@@ -502,8 +515,8 @@ private:
     // Pattern area size of the reference table, see screenPatternSize().
     QSize m_expectedSize;
     bool m_ready = false;
-    // The swap chain format check failed; see init().
-    bool m_unsupported = false;
+    // The swap chain that QRhi uses instead of the requested format; see init().
+    std::string m_fallback;
     std::string m_error;
     std::function<void()> m_onSettled;
     QByteArray m_pending;
@@ -553,18 +566,9 @@ PatternSurface openPatternWindow(std::int32_t screen, bool fp16) {
     auto window = std::make_unique<PatternWindow>(target, fp16);
     window->showFullScreen();
     window->requestActivate();
+    window->waitUntilReady();
     PatternSurface surface{};
-    try {
-        window->waitUntilReady();
-    } catch (const std::exception &e) {
-        if (!window->formatUnsupported()) {
-            throw;
-        }
-        surface.format_supported = false;
-        surface.description = rust::String(e.what());
-        return surface;
-    }
-    surface.format_supported = true;
+    surface.fallback = rust::String(window->fallback());
     surface.width = window->patternArea().width();
     surface.height = window->patternArea().height();
     surface.description = rust::String(window->describe());

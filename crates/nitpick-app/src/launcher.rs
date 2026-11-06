@@ -177,8 +177,8 @@ fn show(
 ) -> Result<String, String> {
     let (kind, format) = parse(pattern, encoding, depth)?;
     let request = request_from_json(&metadata.to_string())?;
-    // Rejects an unavailable path, such as macOS 12-bit, before the window
-    // opens and before any conversion.
+    // Rejects an unavailable path before the window opens and before any
+    // conversion. Remapped paths, such as Windows with HDR off, only warn.
     let query = screen_query(screen);
     let caps = &query.capabilities;
     let mut warnings = check_open(caps, format.depth).map_err(|e| e.to_string())?;
@@ -186,8 +186,9 @@ fn show(
     let swap_chain = SwapChainFormat::for_depth(format.depth);
     let opened = ffi::open_pattern_window(screen, swap_chain == SwapChainFormat::ScRgb)
         .map_err(|e| e.to_string())?;
-    let surface = display::surface(display::display_id(screen), format.depth, &opened)
-        .map_err(|e| e.to_string())?;
+    let surface =
+        display::surface(display::display_id(screen), &opened).map_err(|e| e.to_string())?;
+    warnings.extend(display::surface_warning(format.depth, &opened));
     let (width, height) = surface.size;
     let image = kind
         .render(format, width, height)

@@ -204,8 +204,8 @@ Before a measurement, set the delay for the display and probe, show the pattern,
 | Feature | QRhi | Browser |
 |---|---|---|
 | Displays | local screens (`QGuiApplication::screens()`) | connected web clients |
-| 10-bit | HDR10 swap chain; Windows with HDR off: `available = No`; exact: never `Yes`; see [Output report](qt.md#output-report) | 16-bit PNG, cICP; exact: `Unknown` |
-| 12-bit | FP16 scRGB where the luminance scale is known; macOS: `available = No`; Linux: `Unknown`; see [Swap chain output](qt.md#swap-chain-output) | 16-bit PNG, cICP; exact: `Unknown` |
+| 10-bit | HDR10 swap chain; Windows with HDR off: `available = Unknown` (8-bit SDR fallback); exact: never `Yes`; see [Output report](qt.md#output-report) | 16-bit PNG, cICP; exact: `Unknown` |
+| 12-bit | FP16 scRGB where the luminance scale is known; macOS: `available = Unknown` (scale unknown); Linux: `Unknown`; see [Swap chain output](qt.md#swap-chain-output) | 16-bit PNG, cICP; exact: `Unknown` |
 | `pq-narrow` / `pq-full` | `input = Yes`; written as full-range PQ codes; narrow interpretation: `No` | full-range PQ PNG; narrow input is rescaled; see [Code to PNG sample](browser.md#code-to-png-sample) |
 | `hlg-narrow` | `input = Yes`, `interpretation = No`; scope use only | full-range HLG PNG; narrow input is rescaled; interpretation: `Unknown` |
 | Automatic light levels | full-range PQ interpretation of all input encodings | PQ after PNG sample conversion; HLG: `No` |
