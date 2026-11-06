@@ -5,9 +5,285 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nitpick</title>
 <style>
-html, body { margin: 0; height: 100%; background: #000; color: #888; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #ccc; }
+body { font: 16px/1.4 system-ui, sans-serif; }
+body.hidden-panel { cursor: none; }
+#panel {
+  position: fixed; left: 16px; top: 16px; max-width: calc(100vw - 64px);
+  padding: 12px 16px; background: #222; border: 1px solid #555; border-radius: 6px;
+}
+#panel[hidden], #panel [hidden] { display: none; }
+#panel button, #panel input { font: inherit; margin: 4px 8px 4px 0; }
+#code { width: 8em; }
 </style>
 </head>
 <body>
+<div id="panel">
+  <p id="status">Connecting…</p>
+  <form id="auth" hidden>
+    <label>Code <input id="code" autocomplete="one-time-code" inputmode="numeric" maxlength="256" spellcheck="false"></label>
+    <button id="submit" type="submit">Connect</button>
+  </form>
+  <button id="connect" type="button" hidden>Connect again</button>
+  <button id="fullscreen" type="button" hidden>Full screen</button>
+  <button id="hide" type="button" hidden>Hide</button>
+</div>
+<script>
+"use strict";
+// Protocol: "Interface" in doc/design/output_driver/browser.md.
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const panel = $("panel");
+  const statusLine = $("status");
+  const authForm = $("auth");
+  const codeInput = $("code");
+  const connectButton = $("connect");
+  const fullscreenButton = $("fullscreen");
+  const hideButton = $("hide");
+
+  // The shell `nitpick-webview` adds this query parameter. It only
+  // changes the display name in the host.
+  const webview = new URLSearchParams(location.search).has("webview");
+
+  // Wait for the last of a burst of events. A full-screen change or a
+  // window drag gives many resize events; each `hello` with a new
+  // geometry makes the host cancel and render again.
+  const SETTLE_MS = 100;
+
+  // Bearer token of the current session. Memory only: it must not
+  // outlive the WebSocket, and it must not appear in a URL or storage.
+  let token = null;
+  let socket = null;
+  let lastHello = null;
+  let settleTimer = null;
+  // `null`: the panel follows the state. `false`: the user selected
+  // "Hide". `true`: the user clicked the page to show the panel.
+  let panelShown = null;
+
+  const CLOSE_TEXT = {
+    4001: "Wrong code.",
+    4002: "No code within 60 s.",
+    4003: "Protocol error",
+    1011: "Server error",
+  };
+
+  function setStatus(text) {
+    statusLine.textContent = text;
+  }
+
+  function fullscreenElement() {
+    return document.fullscreenElement ?? document.webkitFullscreenElement ?? null;
+  }
+
+  function fullscreenAvailable() {
+    const root = document.documentElement;
+    return Boolean(root.requestFullscreen || root.webkitRequestFullscreen);
+  }
+
+  // Panel content follows the session and full-screen state.
+  function updatePanel() {
+    const fullscreen = fullscreenElement() !== null;
+    fullscreenButton.hidden = fullscreen;
+    fullscreenButton.disabled = !fullscreenAvailable();
+    fullscreenButton.title = fullscreenButton.disabled
+      ? "This browser has no Fullscreen API for pages"
+      : "";
+    hideButton.hidden = token === null;
+    // An authenticated full-screen page shows only the pattern.
+    const hide = panelShown === null ? token !== null && fullscreen : !panelShown;
+    panel.hidden = hide;
+    document.body.classList.toggle("hidden-panel", hide);
+  }
+
+  // The widest matching CSS `color-gamut` value.
+  function colorGamut() {
+    if (matchMedia("(color-gamut: rec2020)").matches) return "rec2020";
+    if (matchMedia("(color-gamut: p3)").matches) return "p3";
+    return "srgb";
+  }
+
+  // Field definitions: `hello` in "Interface". The viewport size is the
+  // layout viewport, because the image is laid out in it. A pinch zoom
+  // changes only `visualViewport.scale` and the visual viewport size.
+  function readState() {
+    const root = document.documentElement;
+    return {
+      type: "hello",
+      client: { userAgent: navigator.userAgent, webview },
+      screen: { width: screen.width, height: screen.height },
+      viewport: {
+        width: root.clientWidth,
+        height: root.clientHeight,
+        scale: window.visualViewport?.scale ?? 1,
+      },
+      pixelRatio: window.devicePixelRatio,
+      dynamicRange: matchMedia("(dynamic-range: high)").matches ? "high" : "standard",
+      colorGamut: colorGamut(),
+      fullscreen: fullscreenElement() !== null,
+    };
+  }
+
+  // Sends `hello` only if a value changed since the last one of this
+  // session.
+  function sendHello() {
+    settleTimer = null;
+    if (token === null || socket?.readyState !== WebSocket.OPEN) return;
+    const hello = JSON.stringify(readState());
+    if (hello === lastHello) return;
+    lastHello = hello;
+    socket.send(hello);
+  }
+
+  function stateChanged() {
+    updatePanel();
+    if (token === null) return;
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(sendHello, SETTLE_MS);
+  }
+
+  // A `resolution` query matches one ratio only; register a new one
+  // after each change.
+  function watchPixelRatio() {
+    const query = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    query.addEventListener("change", () => {
+      watchPixelRatio();
+      stateChanged();
+    }, { once: true });
+  }
+
+  function watchState() {
+    for (const q of ["(dynamic-range: high)", "(color-gamut: rec2020)", "(color-gamut: p3)"]) {
+      matchMedia(q).addEventListener("change", stateChanged);
+    }
+    watchPixelRatio();
+    window.addEventListener("resize", stateChanged);
+    window.visualViewport?.addEventListener("resize", stateChanged);
+    for (const name of ["fullscreenchange", "webkitfullscreenchange"]) {
+      document.addEventListener(name, () => {
+        panelShown = null;
+        stateChanged();
+      });
+    }
+  }
+
+  function connect() {
+    connectButton.hidden = true;
+    authForm.hidden = true;
+    setStatus("Connecting…");
+    const url = new URL("/api/v1/ws", location.href);
+    url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(url);
+    socket = ws;
+    let asked = false;
+    ws.addEventListener("message", (event) => {
+      if (ws !== socket) return;
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        ws.close(4003, "malformed message");
+        return;
+      }
+      switch (message.type) {
+        case "auth_required":
+          asked = true;
+          setStatus("Enter the code that the host shows.");
+          authForm.hidden = false;
+          codeInput.disabled = false;
+          $("submit").disabled = false;
+          codeInput.value = "";
+          codeInput.focus();
+          break;
+        case "authenticated":
+          token = message.token;
+          lastHello = null;
+          authForm.hidden = true;
+          setStatus(fullscreenAvailable()
+            ? "Connected. Select Full screen."
+            : "Connected. This browser cannot show the page full screen.");
+          updatePanel();
+          sendHello();
+          break;
+        case "show":
+          // Image display is not in this page yet. A fast `error` lets
+          // the host fail at once instead of after its timeout.
+          ws.send(JSON.stringify({
+            type: "error", id: message.id, message: "this page cannot show images",
+          }));
+          break;
+        case "close":
+          break;
+        default:
+          ws.close(4003, "unknown message");
+      }
+    });
+    ws.addEventListener("close", (event) => {
+      if (ws !== socket) return;
+      socket = null;
+      const wasAuthenticated = token !== null;
+      token = null;
+      lastHello = null;
+      clearTimeout(settleTimer);
+      authForm.hidden = true;
+      connectButton.hidden = false;
+      panelShown = null;
+      let text;
+      if (!asked) {
+        // The browser does not expose the HTTP status of a rejected
+        // upgrade: 409 (busy), 429 (locked) and a stopped server look
+        // the same.
+        text = "The server rejected the connection or cannot be reached. "
+          + "Another client can hold the session, or wrong codes lock it for some seconds.";
+      } else if (event.code in CLOSE_TEXT) {
+        text = CLOSE_TEXT[event.code] + (event.reason ? ` (${event.reason})` : "");
+      } else {
+        text = (wasAuthenticated ? "Disconnected" : "Connection closed")
+          + (event.reason ? `: ${event.reason}.` : ".");
+      }
+      setStatus(text);
+      updatePanel();
+    });
+  }
+
+  authForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    // A string keeps leading zeros.
+    socket.send(JSON.stringify({ type: "auth", code: codeInput.value }));
+    codeInput.disabled = true;
+    $("submit").disabled = true;
+    setStatus("Checking the code…");
+  });
+
+  connectButton.addEventListener("click", connect);
+
+  // The Fullscreen API needs this user activation; a server message
+  // cannot start full screen.
+  fullscreenButton.addEventListener("click", () => {
+    const root = document.documentElement;
+    const request = root.requestFullscreen
+      ? root.requestFullscreen({ navigationUI: "hide" })
+      : root.webkitRequestFullscreen();
+    Promise.resolve(request).catch((e) => setStatus(`Full screen failed: ${e.message}`));
+  });
+
+  hideButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    panelShown = false;
+    updatePanel();
+  });
+
+  // A click outside the panel shows it again, also in full screen.
+  document.addEventListener("click", (event) => {
+    if (panel.contains(event.target)) return;
+    panelShown = true;
+    updatePanel();
+  });
+
+  watchState();
+  updatePanel();
+  connect();
+})();
+</script>
 </body>
 </html>

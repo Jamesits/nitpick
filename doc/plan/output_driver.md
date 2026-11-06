@@ -23,15 +23,6 @@ TODO:
 
 - In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
-### 24. Add browser authentication and viewport controls
-
-Requires: 21, 22.
-
-TODO:
-
-- Add the static page's code entry, in-memory token, user-activated full-screen button and `hello` reporting. Report changes to media queries, viewport, full-screen state and pixel ratio.
-- Test authentication failures and reconnect. Verify state updates at pixel ratios 1 and 2, fractional scale, zoom and full-screen changes. The page must work in a normal browser without Tauri.
-
 ### 25. Add browser image application and acknowledgement
 
 Requires: 23, 24.

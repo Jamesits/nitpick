@@ -169,6 +169,38 @@ The client keeps the bearer token in memory. Every image asset request must incl
 
 A wrong code or any first message other than a valid `auth` is a failed attempt. A timeout or a client close before `auth` is not a failed attempt, because no code was tried. After $n$ consecutive failed attempts, the server rejects WebSocket upgrades for $\min(2^{n-1}, 60)$ s with HTTP `429`. A successful authentication sets $n$ to 0. The random code changes on each connection, so one guess succeeds with probability $10^{-4}$. At the 60 s maximum, a guesser gets at most 1440 guesses a day. With a fixed string, the guess probability depends on that string.
 
+### Client page
+
+The page is one HTML file with inline JavaScript (`client/index.html`). It connects when it loads. A panel shows the status, the code entry and the buttons. The page works in a normal browser; it does not need Tauri.
+
+Session:
+- On `auth_required`, the page shows the code entry. It sends the entered text unchanged as the `auth` code.
+- It keeps the token in a script variable only. It does not write the token to storage, cookies or the URL. When the WebSocket closes, the page discards the token.
+- After each close, the page shows the reason and a "Connect again" button. It does not connect again automatically, because a new session needs a new code. Close codes 4001, 4002, 4003 and 1011 have their own text.
+- The WebSocket API does not give the HTTP status of a rejected upgrade. A `409`, a `429` and a server that cannot be reached therefore show the same text. The page identifies this case as a close before `auth_required`.
+
+`hello` sources:
+
+| Field | Source |
+|---|---|
+| `client.userAgent` | `navigator.userAgent` |
+| `client.webview` | the URL has the query parameter `webview`; `nitpick-webview` adds it |
+| `screen` | `screen.width`, `screen.height` |
+| `viewport.width`, `viewport.height` | `document.documentElement.clientWidth`, `clientHeight`: the layout viewport, in which the image is laid out |
+| `viewport.scale` | `visualViewport.scale`; 1 without `visualViewport` |
+| `pixelRatio` | `devicePixelRatio` |
+| `dynamicRange` | `(dynamic-range: high)` |
+| `colorGamut` | the first match of `rec2020`, `p3`, `srgb` |
+| `fullscreen` | `document.fullscreenElement`, or `webkitFullscreenElement` |
+
+The page sends `hello` after authentication. It watches window and `visualViewport` resize events, full-screen changes, the media queries above and a `(resolution: <r>dppx)` query for the current ratio. It registers a new resolution query after each ratio change. After an event, it waits 100 ms for further events and then sends `hello` only if a value changed. A full-screen change or a window drag gives many events; each `hello` with a new geometry makes the host cancel and render again.
+
+Panel:
+- The "Full screen" button shows while the page is not full screen. It requests full screen on `document.documentElement` with `navigationUI: "hide"`. Without the Fullscreen API, the button is disabled.
+- An authenticated full-screen page hides the panel and the mouse cursor. A click on the page shows the panel. "Hide" hides it until the next click or full-screen change.
+
+**Unverified:** on iPadOS Safari, `clientHeight` equals the visible height in full screen, and the prefixed full-screen API is not necessary.
+
 ### Image requests and presentation
 
 The client uses `fetch` with the authorization header to load the PNG. It checks the response status, reads the body as a `Blob`, and sets the `<img>` source to an object URL for that blob. It releases each object URL when the image is replaced or discarded. The image bytes and colour metadata stay unchanged.
@@ -257,7 +289,17 @@ Settings before a measurement on an iPad:
 
 Tests and pass criteria are in [Output verification](testing.md): [browser unit tests](testing.md#browser-output), [browser integration](testing.md#browser-integration), and [physical output criteria](testing.md#pass-criteria). Use a probe for the remote display; a capture on the server does not test it.
 
-Service unit tests (`nitpick-browser`, `service_tests.rs`) cover start, loopback default, bind failures, the embedded page, event order on a Rust executor and bounded shutdown. They also run WebSocket authentication over real HTTP with a `tokio-tungstenite` client: `409`, `429`, `401`, `no-store`, revocation on close and the message size limit. Session unit tests (`session_tests.rs`) use a mock transport and the paused Tokio clock. They cover leading-zero and fixed codes, wrong and out-of-order messages, the 60 s timeout, the lock steps, the one-session reservation, token checks, revocation and reconnect. They also cover `hello` caching, invalid `hello`, the event order on resize and a new display ID for each session. For presentation, they cover frame storage and release, the latest-command rule, matching `applied` and `error` IDs, a wrong natural size, the 10 s timeout from `show`, late replies, resize, disconnect, cancellation, `close`, invalid `applied` and frame IDs across sessions. Client unit tests (`client_tests.rs`) cover `hello` validation, display-pixel rounding, the user-agent rules, the capability and mode report, the pixel-mapping rules and the surface geometry. Driver unit tests (`driver_tests.rs`) cover `displays`, `query` and `open` from cached state, disconnect, warnings, and stale, closed or mismatched surfaces in `present` on the first poll. With a session task, a mock transport and injected workers, they cover the status line, `pixel_exact` after `applied`, clipping warnings, late replies and late worker results, a resize during the encoding, the timeout on the server runtime without host polls, resize and disconnect while pending, `close` after cancellation, and service events during the mutable driver borrow. A service test presents a frame over real HTTP and WebSocket, and decodes the fetched PNG with `zune-png`. Worker unit tests (`worker_tests.rs`) cover the job thread, the replacement of a queued job and drop. PNG unit tests (`encode_tests.rs`) cover samples, clipping and the cICP chunk; they decode with `zune-png` and check chunk CRCs with `crc32fast`, not with the `png` crate. **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
+Service unit tests (`nitpick-browser`, `service_tests.rs`) cover start, loopback default, bind failures, the embedded page, event order on a Rust executor and bounded shutdown. They also run WebSocket authentication over real HTTP with a `tokio-tungstenite` client: `409`, `429`, `401`, `no-store`, revocation on close and the message size limit. Session unit tests (`session_tests.rs`) use a mock transport and the paused Tokio clock. They cover leading-zero and fixed codes, wrong and out-of-order messages, the 60 s timeout, the lock steps, the one-session reservation, token checks, revocation and reconnect. They also cover `hello` caching, invalid `hello`, the event order on resize and a new display ID for each session. For presentation, they cover frame storage and release, the latest-command rule, matching `applied` and `error` IDs, a wrong natural size, the 10 s timeout from `show`, late replies, resize, disconnect, cancellation, `close`, invalid `applied` and frame IDs across sessions. Client unit tests (`client_tests.rs`) cover `hello` validation, display-pixel rounding, the user-agent rules, the capability and mode report, the pixel-mapping rules and the surface geometry. Driver unit tests (`driver_tests.rs`) cover `displays`, `query` and `open` from cached state, disconnect, warnings, and stale, closed or mismatched surfaces in `present` on the first poll. With a session task, a mock transport and injected workers, they cover the status line, `pixel_exact` after `applied`, clipping warnings, late replies and late worker results, a resize during the encoding, the timeout on the server runtime without host polls, resize and disconnect while pending, `close` after cancellation, and service events during the mutable driver borrow. A service test presents a frame over real HTTP and WebSocket, and decodes the fetched PNG with `zune-png`. Worker unit tests (`worker_tests.rs`) cover the job thread, the replacement of a queued job and drop. PNG unit tests (`encode_tests.rs`) cover samples, clipping and the cICP chunk; they decode with `zune-png` and check chunk CRCs with `crc32fast`, not with the `png` crate.
+
+Page tests (`tests/browser_page`, Python with pytest and Playwright) run the [client page](#client-page) in a real browser against the real service. The example `page_host` of `nitpick-browser` starts the service with a fixed code and prints each service event and the driver view of each `Ready` client as JSON lines. The tests cover the `auth` and `hello` messages, the token storage, pixel ratios 1, 2 and 1.5, the `webview` parameter, an HDR colour profile, a wrong code with the following lock and reconnect, reload as a new session, a rejected second client, the close-code texts, a server stop, browser zoom, pinch zoom, a media-query change, the full-screen button and the panel, and no `hello` without a change. Chromium DevTools calls change the pixel ratio, pinch zoom and media features at run time; a routed WebSocket gives the close codes 4002, 4003 and 1011. Run, from `tests/browser_page`:
+
+```sh
+NITPICK_BROWSER_CHANNEL=msedge uv run pytest
+```
+
+`NITPICK_BROWSER` selects the Playwright engine (`chromium`, `firefox` or `webkit`); `NITPICK_BROWSER_CHANNEL` selects an installed Chromium browser. Without a channel, install the engine with `uv run playwright install <engine>`. The tests that need DevTools skip on other engines. Results: all pass with headless Edge 156 on Windows 11. Firefox, WebKit and iPadOS Safari are not tested.
+
+**Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
 
 ## Future enhancements
 
