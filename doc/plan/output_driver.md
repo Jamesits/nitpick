@@ -23,15 +23,6 @@ TODO:
 
 - In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
-### 21. Implement browser session authentication
-
-Requires: 18.
-
-TODO:
-
-- Implement [Authentication](../design/output_driver/browser.md#authentication): reserve one session before authentication, issue pairing codes and session tokens, restrict failed attempts, and revoke tokens on disconnect. Protect frame requests with bearer tokens and no-store responses.
-- With a mock transport and clock, verify leading zeros, configured fixed strings, wrong or out-of-order messages, authentication timeout, second-client rejection, unauthorized image requests, revocation and reconnect. Tokens must remain absent from URLs.
-
 ### 22. Cache browser state and validate surfaces
 
 Requires: 2, 21.

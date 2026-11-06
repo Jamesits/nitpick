@@ -116,6 +116,22 @@ WebSocket messages:
 | client → server | `error` | `id`, `message` (for example decode failure) |
 | server → client | `close` | – (the client shows a black page) |
 
+Limits and error codes:
+
+| Case | Result |
+|---|---|
+| WebSocket upgrade while a session exists | HTTP `409 Conflict` |
+| WebSocket upgrade during a failed-attempt lock | HTTP `429 Too Many Requests` with `Retry-After` in whole seconds |
+| Frame request with a missing, wrong or revoked token | HTTP `401 Unauthorized` with `WWW-Authenticate: Bearer` |
+| Frame request for an ID that is not the current frame | HTTP `404 Not Found` |
+| Client message larger than 64 KiB | the server ends the connection |
+| Wrong code | close code 4001 |
+| No `auth` within 60 s | close code 4002 |
+| Malformed, unknown, binary or out-of-order message; `auth` after authentication | close code 4003 |
+| No random data from the OS for the code or token | close code 1011 |
+
+All frame responses, including errors, have `Cache-Control: no-store`. The server checks the token before it looks up the frame, so a client without the token cannot test frame IDs. The bearer scheme name is case-insensitive.
+
 ### Authentication
 
 The server permits one WebSocket session, including a connection that waits for authentication. It reserves this slot when it accepts the connection. It rejects another WebSocket upgrade with HTTP `409 Conflict`. A second client cannot replace the current session.
@@ -124,12 +140,16 @@ After the WebSocket opens:
 
 1. The server generates a random 4-digit code, from `0000` to `9999`. It displays the code in the launcher or server console. It sends `auth_required` without the code to the client.
 2. The user enters the code in the client. The client sends `auth` with the code as a string to preserve leading zeros.
-3. The server compares the strings exactly. A wrong code, a message other than `auth`, or no reply within 60 s closes the WebSocket and releases the slot. The server limits failed attempts to restrict code guessing.
+3. The server compares the strings exactly. A wrong code, a message other than `auth`, or no reply within 60 s closes the WebSocket and releases the slot. The 60 s period starts when the session starts. See [Failed-attempt limit](#failed-attempt-limit).
 4. On success, the server generates a new bearer token with a cryptographic random generator and sends `authenticated`. Only then can the client send `hello` and take part in pattern presentation. The server accepts no further `auth` messages on this connection.
 
-For headless use or tests, the server can use an explicitly configured fixed string in place of the random code. The client submits the same string in `auth`. This option changes only the code; the server still issues a new random bearer token for each session.
+For headless use or tests, the server can use an explicitly configured fixed string in place of the random code. The client submits the same string in `auth`. This option changes only the code; the server still issues a new random bearer token for each session. The fixed string must have 1 to 256 bytes.
 
 The client keeps the bearer token in memory. Every image asset request must include `Authorization: Bearer <token>`. Missing, wrong or expired tokens give HTTP `401 Unauthorized`. Tokens do not appear in URLs. When the WebSocket closes, the server revokes the token and releases the slot. A new connection must authenticate again.
+
+#### Failed-attempt limit
+
+A wrong code or any first message other than a valid `auth` is a failed attempt. A timeout or a client close before `auth` is not a failed attempt, because no code was tried. After $n$ consecutive failed attempts, the server rejects WebSocket upgrades for $\min(2^{n-1}, 60)$ s with HTTP `429`. A successful authentication sets $n$ to 0. The random code changes on each connection, so one guess succeeds with probability $10^{-4}$. At the 60 s maximum, a guesser gets at most 1440 guesses a day. With a fixed string, the guess probability depends on that string.
 
 ### Image requests and presentation
 
@@ -161,6 +181,7 @@ The client keeps the latest requested frame ID. After decode, it checks this ID 
 | Monitor selection (Tauri) | monitor index; screen position | screen position | The shell accepts a position and selects the monitor that contains it. The Qt launcher derives the position from its screen list; a command-line caller can supply it. The server does not use Qt screen geometry. |
 | Access | open; token in the URL; WebSocket authentication and bearer token | fixed API paths and [session authentication](#authentication), server bound to localhost by default | The server code controls display access. The bearer token controls image access without a secret in the URL. A LAN address only when the user turns on remote displays. The host gives a specific interface address; the service rejects an unspecified address (`0.0.0.0`, `::`), because the URL shown to the user contains the bound address. |
 | Sessions | multiple clients; one client | one session, including authentication | One client controls the display state. A second connection cannot replace it. |
+| Failed-attempt limit | permanent lock after $N$ failures; fixed delay; exponential lock per failure | exponential lock, 1 s to 60 s, reset on success | A user who mistypes the code waits about 1 s. A permanent lock needs a service restart. A fixed short delay allows too many guesses. |
 | Full screen | Fullscreen API; Home Screen web app | Fullscreen API with a "Full screen" button | The API needs a user gesture. The client shows the button until `fullscreen` is true. |
 
 ## Usage
@@ -189,7 +210,7 @@ Settings before a measurement on an iPad:
 
 Tests and pass criteria are in [Output verification](testing.md): [browser unit tests](testing.md#browser-output), [browser integration](testing.md#browser-integration), and [physical output criteria](testing.md#pass-criteria). Use a probe for the remote display; a capture on the server does not test it.
 
-Service unit tests (`nitpick-browser`, `service_tests.rs`) cover start, loopback default, bind failures, the embedded page, event order on a Rust executor and bounded shutdown. PNG unit tests (`encode_tests.rs`) cover samples, clipping and the cICP chunk; they decode with `zune-png` and check chunk CRCs with `crc32fast`, not with the `png` crate. **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
+Service unit tests (`nitpick-browser`, `service_tests.rs`) cover start, loopback default, bind failures, the embedded page, event order on a Rust executor and bounded shutdown. They also run WebSocket authentication over real HTTP with a `tokio-tungstenite` client: `409`, `429`, `401`, `no-store`, revocation on close and the message size limit. Session unit tests (`session_tests.rs`) use a mock transport and the paused Tokio clock. They cover leading-zero and fixed codes, wrong and out-of-order messages, the 60 s timeout, the lock steps, the one-session reservation, token checks, revocation and reconnect. PNG unit tests (`encode_tests.rs`) cover samples, clipping and the cICP chunk; they decode with `zune-png` and check chunk CRCs with `crc32fast`, not with the `png` crate. **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
 
 ## Future enhancements
 

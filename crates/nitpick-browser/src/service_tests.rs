@@ -39,6 +39,7 @@ fn explicit_address_is_used_in_url() {
     let (service, _events) = BrowserService::start(&ServiceConfig {
         host: BindHost::Address(ip),
         port: 0,
+        ..ServiceConfig::default()
     })
     .unwrap();
     assert_eq!(service.local_addr().ip(), ip);
@@ -49,6 +50,7 @@ fn ipv6_url_has_brackets() {
     let config = ServiceConfig {
         host: BindHost::Address(IpAddr::V6(Ipv6Addr::LOCALHOST)),
         port: 0,
+        ..ServiceConfig::default()
     };
     // Hosts without IPv6 loopback cannot run this check.
     let Ok((service, _events)) = BrowserService::start(&config) else {
@@ -67,6 +69,7 @@ fn unspecified_address_is_rejected() {
         let result = BrowserService::start(&ServiceConfig {
             host: BindHost::Address(ip),
             port: 0,
+            ..ServiceConfig::default()
         });
         assert!(matches!(result, Err(StartError::Address(_))), "{ip}");
     }
@@ -79,6 +82,7 @@ fn bind_failure_is_returned_by_start() {
     let result = BrowserService::start(&ServiceConfig {
         host: BindHost::Loopback,
         port,
+        ..ServiceConfig::default()
     });
     match result {
         Err(StartError::Bind(e)) => assert_eq!(e.kind(), ErrorKind::AddrInUse),
@@ -92,6 +96,7 @@ fn bind_to_foreign_address_fails() {
     let result = BrowserService::start(&ServiceConfig {
         host: BindHost::Address(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
         port: 0,
+        ..ServiceConfig::default()
     });
     assert!(matches!(result, Err(StartError::Bind(_))), "{result:?}");
 }
@@ -218,4 +223,251 @@ fn receiver_can_outlive_service() {
         .event_sender()
         .send(ServiceEvent::PairingCode("1".into()));
     service.shutdown();
+}
+
+/// WebSocket and frame requests over real HTTP. The session logic itself
+/// is tested with a mock transport in `session_tests.rs`.
+mod session {
+    use axum::body::Bytes;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio::net::TcpStream as AsyncTcpStream;
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+
+    use super::*;
+    use crate::protocol::{MAX_CLIENT_MESSAGE, close};
+
+    type Ws = WebSocketStream<MaybeTlsStream<AsyncTcpStream>>;
+
+    const CODE: &str = "0042";
+    const FRAME_PATH: &str = "/api/v1/frame/1.png";
+
+    fn start_fixed() -> (BrowserService, ServiceEvents) {
+        BrowserService::start(&ServiceConfig {
+            fixed_code: Some(CODE.into()),
+            ..ServiceConfig::default()
+        })
+        .unwrap()
+    }
+
+    /// Plain HTTP/1.1 GET with extra header lines.
+    fn request(addr: SocketAddr, path: &str, headers: &[String]) -> String {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut head = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+        for line in headers {
+            head.push_str(line);
+            head.push_str("\r\n");
+        }
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    fn status(response: &str) -> u16 {
+        response[9..12].parse().unwrap()
+    }
+
+    fn has_header(response: &str, line: &str) -> bool {
+        let head = response.split("\r\n\r\n").next().unwrap_or_default();
+        head.lines().any(|l| l.eq_ignore_ascii_case(line))
+    }
+
+    async fn connect(addr: SocketAddr) -> Result<Ws, WsError> {
+        connect_async(format!("ws://{addr}/api/v1/ws"))
+            .await
+            .map(|(ws, _)| ws)
+    }
+
+    fn rejected_status(result: Result<Ws, WsError>) -> u16 {
+        match result {
+            Err(WsError::Http(response)) => response.status().as_u16(),
+            other => panic!("expected an HTTP rejection, got {other:?}"),
+        }
+    }
+
+    async fn next_json(ws: &mut Ws) -> Value {
+        let message = ws.next().await.expect("message").expect("no error");
+        serde_json::from_str(message.to_text().unwrap()).unwrap()
+    }
+
+    async fn send_json(ws: &mut Ws, value: &Value) {
+        ws.send(Message::text(value.to_string())).await.unwrap();
+    }
+
+    async fn close_frame(ws: &mut Ws) -> Option<CloseFrame> {
+        match ws.next().await {
+            Some(Ok(Message::Close(frame))) => frame,
+            other => panic!("expected close, got {other:?}"),
+        }
+    }
+
+    async fn authenticate(addr: SocketAddr) -> (Ws, String) {
+        let mut ws = connect(addr).await.unwrap();
+        assert_eq!(next_json(&mut ws).await, json!({"type": "auth_required"}));
+        send_json(&mut ws, &json!({"type": "auth", "code": CODE})).await;
+        let reply = next_json(&mut ws).await;
+        assert_eq!(reply["type"], "authenticated");
+        (ws, reply["token"].as_str().unwrap().to_owned())
+    }
+
+    /// The server releases the slot after its session task ends, which is
+    /// after the client sees the close.
+    async fn connect_when_free(addr: SocketAddr) -> Ws {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match connect(addr).await {
+                Ok(ws) => return ws,
+                Err(e) => assert!(Instant::now() < deadline, "{e}"),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[test]
+    fn invalid_fixed_code_is_rejected() {
+        for code in [String::new(), "0".repeat(257)] {
+            let result = BrowserService::start(&ServiceConfig {
+                fixed_code: Some(code),
+                ..ServiceConfig::default()
+            });
+            assert!(matches!(result, Err(StartError::PairingCode(_))));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn frame_requests_need_the_session_token() {
+        let (service, _events) = start_fixed();
+        let addr = service.local_addr();
+        service.hub().set_frame(1, Bytes::from_static(b"PNG test"));
+
+        let response = request(addr, FRAME_PATH, &[]);
+        assert_eq!(status(&response), 401, "{response}");
+        assert!(has_header(&response, "cache-control: no-store"));
+        assert!(has_header(&response, "www-authenticate: Bearer"));
+
+        let (ws, token) = authenticate(addr).await;
+        let auth = vec![format!("Authorization: Bearer {token}")];
+        for query in ["token", "access_token"] {
+            let response = request(addr, &format!("{FRAME_PATH}?{query}={token}"), &[]);
+            assert_eq!(status(&response), 401, "URL token: {response}");
+        }
+        let response = request(addr, FRAME_PATH, &["Authorization: Bearer 00".into()]);
+        assert_eq!(status(&response), 401, "{response}");
+
+        let response = request(addr, FRAME_PATH, &auth);
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(has_header(&response, "cache-control: no-store"));
+        assert!(has_header(&response, "content-type: image/png"));
+        assert!(response.ends_with("\r\n\r\nPNG test"), "{response}");
+
+        for missing in [
+            "/api/v1/frame/2.png",
+            "/api/v1/frame/1",
+            "/api/v1/frame/x.png",
+        ] {
+            let response = request(addr, missing, &auth);
+            assert_eq!(status(&response), 404, "{missing}: {response}");
+            assert!(has_header(&response, "cache-control: no-store"));
+        }
+
+        // Closing the WebSocket revokes the token; a new session gets a
+        // new one.
+        drop(ws);
+        let (_ws, new_token) = {
+            let mut ws = connect_when_free(addr).await;
+            assert_eq!(status(&request(addr, FRAME_PATH, &auth)), 401);
+            next_json(&mut ws).await;
+            send_json(&mut ws, &json!({"type": "auth", "code": CODE})).await;
+            let reply = next_json(&mut ws).await;
+            (ws, reply["token"].as_str().unwrap().to_owned())
+        };
+        assert_ne!(new_token, token);
+        assert_eq!(status(&request(addr, FRAME_PATH, &auth)), 401);
+        let new_auth = [format!("Authorization: Bearer {new_token}")];
+        assert_eq!(status(&request(addr, FRAME_PATH, &new_auth)), 200);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn second_websocket_gets_conflict() {
+        let (service, mut events) = start_fixed();
+        let addr = service.local_addr();
+        let mut first = connect(addr).await.unwrap();
+        next_json(&mut first).await;
+        assert_eq!(rejected_status(connect(addr).await), 409);
+
+        send_json(&mut first, &json!({"type": "auth", "code": CODE})).await;
+        assert_eq!(next_json(&mut first).await["type"], "authenticated");
+        assert_eq!(rejected_status(connect(addr).await), 409);
+
+        first.close(None).await.unwrap();
+        let mut seen = Vec::new();
+        while !matches!(
+            seen.last(),
+            Some(ServiceEvent::Client(ClientState::Disconnected(_)))
+        ) {
+            seen.push(events.next().await.unwrap());
+        }
+        assert_eq!(
+            seen,
+            [
+                ServiceEvent::Listening {
+                    url: service.url().into()
+                },
+                ServiceEvent::Client(ClientState::Connected),
+                ServiceEvent::PairingCode(CODE.into()),
+                ServiceEvent::Client(ClientState::Authenticated),
+                ServiceEvent::Client(ClientState::Disconnected("client closed".into())),
+            ]
+        );
+        connect(addr).await.expect("slot free after the event");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrong_code_closes_and_locks_upgrades() {
+        let (service, _events) = start_fixed();
+        let addr = service.local_addr();
+        let mut ws = connect(addr).await.unwrap();
+        next_json(&mut ws).await;
+        send_json(&mut ws, &json!({"type": "auth", "code": "42"})).await;
+        let frame = close_frame(&mut ws).await.expect("close frame");
+        assert_eq!(u16::from(frame.code), close::WRONG_CODE);
+        assert_eq!(frame.reason.as_str(), "wrong code");
+
+        // The lock is set before the close frame is sent.
+        let Err(WsError::Http(response)) = connect(addr).await else {
+            panic!("upgrade accepted during the lock");
+        };
+        assert_eq!(response.status().as_u16(), 429);
+        assert_eq!(response.headers()["retry-after"], "1");
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        authenticate(addr).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn oversized_message_ends_the_session() {
+        let (service, _events) = start_fixed();
+        let addr = service.local_addr();
+        let mut ws = connect(addr).await.unwrap();
+        next_json(&mut ws).await;
+        let code = "0".repeat(MAX_CLIENT_MESSAGE);
+        let _ = ws
+            .send(Message::text(
+                json!({"type": "auth", "code": code}).to_string(),
+            ))
+            .await;
+        // The server ends the connection, with or without a close frame.
+        while let Some(Ok(message)) = ws.next().await {
+            if message.is_close() {
+                break;
+            }
+        }
+        connect_when_free(addr).await;
+    }
 }

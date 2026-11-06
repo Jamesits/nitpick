@@ -6,7 +6,9 @@
 //! command-line host builds it without a window system.
 
 pub mod encode;
+mod protocol;
 pub mod service;
+mod session;
 
 pub use encode::{Clipping, EncodeError, EncodedFrame, PngSamples, encode_frame};
 pub use service::{
