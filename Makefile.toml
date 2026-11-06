@@ -9,43 +9,30 @@ description = "Release build of the nitpick launcher"
 command = "cargo"
 args = ["build", "-p", "nitpick-app", "--release"]
 
-# Windows only: windeployqt has no counterpart on Linux, and macdeployqt is
-# not tested. Output: target/dist/nitpick/ and target/dist/nitpick-<version>-windows-x64.zip.
+# windeployqt and macdeployqt have no counterpart on Linux.
 [tasks.package]
+clear = true
+description = "Self-contained package of the nitpick launcher for the host OS"
+windows_alias = "package-windows"
+mac_alias = "package-macos"
+script = '''
+echo "package: not supported on this OS" >&2
+exit 1
+'''
+
+# Package scripts and files are in crates/nitpick-app/packaging/.
+[tasks.package-windows]
 clear = true
 description = "Self-contained Windows folder and zip archive (windeployqt)"
 condition = { platforms = ["windows"] }
 dependencies = ["release"]
-script_runner = "powershell"
-script_extension = "ps1"
-script = '''
-$ErrorActionPreference = "Stop"
-$qmake = if ($env:QMAKE) { $env:QMAKE } else { "qmake" }
-$qtBin = & $qmake -query QT_INSTALL_BINS
-$target = $env:CARGO_MAKE_CRATE_TARGET_DIRECTORY
-$dist = Join-Path $target "dist"
-$out = Join-Path $dist "nitpick"
-if (Test-Path $out) { Remove-Item -Recurse -Force $out }
-New-Item -ItemType Directory $out | Out-Null
-Copy-Item (Join-Path $target "release/nitpick.exe") $out
+command = "powershell"
+args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "crates/nitpick-app/packaging/windows/package.ps1"]
 
-# The QML is compiled into the executable; --qmldir only lets windeployqt find
-# the imported modules. The launcher has no translations and QRhi uses
-# Direct3D 11, so the Qt translations and the software OpenGL are not needed.
-# windeployqt deploys the compiler runtime only as the vc_redist installer, so
-# the runtime DLLs are copied below instead (app-local deployment).
-& (Join-Path $qtBin "windeployqt.exe") --release --no-translations --no-opengl-sw `
-    --no-compiler-runtime --qmldir crates/nitpick-app/qml (Join-Path $out "nitpick.exe")
-if ($LASTEXITCODE) { exit $LASTEXITCODE }
-
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$crt = & $vswhere -latest -products * -find "VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" |
-    Sort-Object | Select-Object -Last 1
-if (-not $crt) { throw "MSVC runtime (Microsoft.VC*.CRT) not found" }
-Copy-Item (Join-Path $crt "*.dll") $out
-
-$version = (cargo pkgid -p nitpick-app) -replace '.*[#@]', ''
-$zip = Join-Path $dist "nitpick-$version-windows-x64.zip"
-Compress-Archive -Path $out -DestinationPath $zip -Force
-Write-Output "package: $out" "archive: $zip"
-'''
+[tasks.package-macos]
+clear = true
+description = "Self-contained macOS app bundle and zip archive (macdeployqt)"
+condition = { platforms = ["mac"] }
+dependencies = ["release"]
+command = "bash"
+args = ["crates/nitpick-app/packaging/macos/package.sh"]
