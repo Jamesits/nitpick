@@ -49,8 +49,9 @@ pub mod qobject {
 use core::pin::Pin;
 
 use cxx_qt_lib::QString;
+use nitpick_core::driver::{ContentLightLevel, Hdr10Request};
 use nitpick_core::image::Image;
-use nitpick_core::metadata::{Hdr10Metadata, MasteringPrimaries, light_level};
+use nitpick_core::metadata::{self, Hdr10Metadata, MasteringPrimaries};
 use nitpick_core::output::{SwapChainFormat, hdr10_bytes, scrgb_bytes};
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, D65, Encoding, Format};
@@ -110,20 +111,31 @@ fn metadata_from_json(
         });
     }
     let primaries: MasteringPrimaries = v["primaries"].as_str().unwrap_or_default().parse()?;
-    let (max_cll, max_fall) = if v["fromPattern"].as_bool().unwrap_or(true) {
-        let l = light_level(image, depth);
-        (l.max_cll, l.max_fall)
+    let light_level = if v["fromPattern"].as_bool().unwrap_or(true) {
+        ContentLightLevel::FromFrame
     } else {
-        (number("maxCll")?, number("maxFall")?)
+        ContentLightLevel::Explicit {
+            max_cll: number("maxCll")?,
+            max_fall: number("maxFall")?,
+        }
     };
-    let md = Hdr10Metadata {
+    let request = Hdr10Request {
         primaries: primaries.primaries(),
         white: D65,
         max_mastering_nits: number("maxMastering")?,
         min_mastering_nits: number("minMastering")?,
-        max_cll,
-        max_fall,
+        light_level,
     };
+    // QRhi sends every encoding as full-range PQ (see the QRhi design).
+    let max = f64::from(depth.max_code());
+    let md = request.resolve(|| {
+        metadata::light_level(
+            image
+                .pixels()
+                .iter()
+                .map(|p| [p.r, p.g, p.b].map(|c| f64::from(c) / max)),
+        )
+    });
     let [r, g, b] = md.primaries;
     let xy = [r, g, b, md.white].map(|[x, y]| {
         [

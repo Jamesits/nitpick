@@ -9,6 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::image::Image;
+use crate::metadata::{Hdr10Metadata, LightLevel};
 use crate::signal::{BitDepth, Encoding, Format};
 
 /// Tri-state feature report.
@@ -136,7 +137,7 @@ pub enum ContentLightLevel {
 }
 
 /// HDR10 static metadata settings from the host. The driver resolves it to
-/// [`crate::metadata::Hdr10Metadata`].
+/// [`Hdr10Metadata`] with [`Hdr10Request::resolve`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hdr10Request {
     /// CIE xy of red, green and blue.
@@ -146,6 +147,30 @@ pub struct Hdr10Request {
     pub max_mastering_nits: f64,
     pub min_mastering_nits: f64,
     pub light_level: ContentLightLevel,
+}
+
+impl Hdr10Request {
+    /// Calls `from_frame` only for [`ContentLightLevel::FromFrame`]; explicit
+    /// values bypass the calculation. `from_frame` gives the result of
+    /// [`crate::metadata::light_level`] for the driver's effective PQ samples.
+    #[must_use]
+    pub fn resolve(&self, from_frame: impl FnOnce() -> LightLevel) -> Hdr10Metadata {
+        let (max_cll, max_fall) = match self.light_level {
+            ContentLightLevel::FromFrame => {
+                let l = from_frame();
+                (l.max_cll, l.max_fall)
+            }
+            ContentLightLevel::Explicit { max_cll, max_fall } => (max_cll, max_fall),
+        };
+        Hdr10Metadata {
+            primaries: self.primaries,
+            white: self.white,
+            max_mastering_nits: self.max_mastering_nits,
+            min_mastering_nits: self.min_mastering_nits,
+            max_cll,
+            max_fall,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

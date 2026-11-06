@@ -19,15 +19,6 @@ TODO:
 - Add the native output queries in [Platform implementations](../design/display_device.md#platform-implementations). Keep capability discovery usable when the profile service is absent. Use compositor or DRM colour state only where available.
 - Verify missing protocols, unknown HDR or depth, output replacement and ambiguous identity with injected calls. Check reported fields on the selected desktop. Missing metadata must not be replaced with guessed display values.
 
-### 8. Calculate light levels from effective PQ samples
-
-Requires: 2.
-
-TODO:
-
-- Change `metadata::light_level` to consume normalized PQ samples supplied by a driver. Keep the shared maximum and frame-average calculation. Resolve `Hdr10Request` only when metadata is enabled; explicit values bypass the calculation.
-- Verify a uniform 10-bit code-940 frame: QRhi full-range PQ gives about 4654.397 cd/m²; browser narrow-range PQ mapped to PNG peak gives 10000 cd/m². Check unequal channels and mixed pixels against independent expected values.
-
 ### 9. Extend QRhi integer packing checks
 
 TODO:
@@ -55,7 +46,7 @@ TODO:
 
 ### 12. Resolve and inspect QRhi metadata
 
-Requires: 8, 11.
+Requires: 11.
 
 TODO:
 
@@ -135,12 +126,12 @@ TODO:
 
 ### 20. Encode browser metadata from stored samples
 
-Requires: 8, 19.
+Requires: 19.
 
 TODO:
 
 - Resolve automatic PQ light levels after PNG clipping and rounding. Reject automatic HLG light levels and accept explicit values. Write PNG `mDCV` and `cLLI` separately from the existing SEI helpers.
-- Run [browser metadata and light-level checks](../design/output_driver/testing.md#browser-output). Verify chunk widths, order and units, disabled omission, the code-940 case in item 8, and values affected by sample rounding. Browser use of these chunks remains unverified.
+- Run [browser metadata and light-level checks](../design/output_driver/testing.md#browser-output). Verify chunk widths, order and units, disabled omission, the uniform 10-bit code-940 case, and values affected by sample rounding. Browser use of these chunks remains unverified.
 
 ### 21. Implement browser session authentication
 

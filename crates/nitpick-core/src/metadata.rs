@@ -4,8 +4,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::image::Image;
-use crate::signal::{BT2020_PRIMARIES, BitDepth, pq_eotf};
+use crate::signal::{BT2020_PRIMARIES, pq_eotf};
 
 /// Mastering display primaries preset. Both use the D65 white point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -143,30 +142,40 @@ pub struct LightLevel {
     pub max_fall: f64,
 }
 
-/// `MaxCLL` and `MaxFALL` of `img` (CTA-861.3): the maximum and the frame
-/// average of the per-pixel maximum of R, G and B in cd/m².
+/// `MaxCLL` and `MaxFALL` (CTA-861.3): the maximum and the frame average of
+/// the per-pixel maximum of R, G and B in cd/m².
 ///
-/// Codes are read as full-range PQ codes at `depth`, because the display
-/// interprets them so (see [`crate::output`]). For narrow-range encodings,
-/// the result is therefore the light level the display receives, not the
-/// one of the nominal signal.
+/// `samples` holds the normalized PQ signal E' of R, G and B for each output
+/// pixel. The driver supplies the transfer and range interpretation of its
+/// output signal. [`pq_eotf`] clamps values outside 0..=1. An empty frame
+/// gives 0 for both values.
 #[must_use]
-pub fn light_level(img: &Image, depth: BitDepth) -> LightLevel {
-    let max = f64::from(depth.max_code());
-    let nits: Vec<f64> = (0..=depth.max_code())
-        .map(|c| pq_eotf(f64::from(c) / max))
-        .collect();
+pub fn light_level(samples: impl IntoIterator<Item = [f64; 3]>) -> LightLevel {
     let mut max_cll = 0.0f64;
     let mut sum = 0.0;
-    for p in img.pixels() {
-        let l = nits[usize::from(p.max_component().min(depth.max_code()))];
+    let mut n = 0usize;
+    // Patterns have large flat regions, so the previous EOTF result usually
+    // applies. Keyed by bits: exact matches only.
+    let mut last: Option<(u64, f64)> = None;
+    for [r, g, b] in samples {
+        // The PQ EOTF is monotonic, so the EOTF of the maximum signal is the
+        // maximum of the per-channel luminances.
+        let e = r.max(g).max(b);
+        let l = match last {
+            Some((bits, l)) if bits == e.to_bits() => l,
+            _ => {
+                let l = pq_eotf(e);
+                last = Some((e.to_bits(), l));
+                l
+            }
+        };
         max_cll = max_cll.max(l);
         sum += l;
+        n += 1;
     }
-    let n = img.pixels().len().max(1);
     // Pixel counts are far below 2^52, so the conversion is exact.
     #[allow(clippy::cast_precision_loss)]
-    let max_fall = sum / n as f64;
+    let max_fall = sum / n.max(1) as f64;
     LightLevel { max_cll, max_fall }
 }
 

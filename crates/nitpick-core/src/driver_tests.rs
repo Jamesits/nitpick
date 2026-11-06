@@ -558,3 +558,30 @@ fn dropped_future_does_not_complete() {
     mock.close(&mock_id());
     assert_eq!(mock.open, None);
 }
+
+#[test]
+fn resolve_from_frame_calls_the_calculation_once() {
+    let calls = Cell::new(0);
+    let md = request(ContentLightLevel::FromFrame).resolve(|| {
+        calls.set(calls.get() + 1);
+        LightLevel {
+            max_cll: 4654.4,
+            max_fall: 1200.5,
+        }
+    });
+    assert_eq!(calls.get(), 1);
+    assert_eq!((md.max_cll, md.max_fall), (4654.4, 1200.5));
+}
+
+#[test]
+fn resolve_explicit_bypasses_the_calculation() {
+    let md = request(EXPLICIT).resolve(|| panic!("light level calculated"));
+    let r = request(EXPLICIT);
+    assert_eq!(md.primaries, r.primaries);
+    assert_eq!(md.white, r.white);
+    assert_eq!(
+        (md.max_mastering_nits, md.min_mastering_nits),
+        (1000.0, 0.0001)
+    );
+    assert_eq!((md.max_cll, md.max_fall), (1000.0, 400.0));
+}
