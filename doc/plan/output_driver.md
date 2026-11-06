@@ -51,13 +51,10 @@ TODO:
 
 Requires: 14, 15.
 
-Open questions:
-
-- How does the host map a Qt screen to a Linux device? Qt on Wayland gives the compositor's output name, which can differ from the kernel connector name in the device key; see [Linux reports](../design/display_device.md#linux-reports).
-
 TODO:
 
 - Change `launcher.rs` and `qml/main.qml` to refresh native device state before the synchronous output query and open. Map Qt screens by native identity. Render at the returned size, pass metadata requests and retain frame data until completion or cancellation. Remove eager metadata calculation from `metadata_from_json`.
+- Add the Linux screen mapping in [Linux reports](../design/display_device.md#linux-reports) as a portable function in `nitpick-display`, next to the evidence format it reads. With injected device lists, verify kernel names, the GNOME `HDMI` form, an unknown name, one name on two cards, and the X11 EDID MD5 rule. On GNOME 50, map both screens with the Wayland and xcb Qt platforms.
 - Verify depth selection, mode reporting and warnings. Keep QRhi narrow PQ and HLG selectable. Replacement, display change and closure must drop the future before reusing or closing the driver. Controls must remain active, and late results must not change the current status.
 
 ### 17. Add the Qt measurement delay
