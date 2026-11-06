@@ -67,9 +67,16 @@ pub mod ffi {
     /// Native identity of a Qt screen. Fields of other platforms are empty
     /// or 0.
     #[namespace = "nitpick"]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct ScreenIdentity {
         /// `QScreen::name()`.
         name: String,
+        /// `QScreen::manufacturer()` and `QScreen::model()`, for the
+        /// display list only.
+        manufacturer: String,
+        model: String,
+        /// `QGuiApplication::platformName()`, for example `xcb`.
+        platform: String,
         /// Windows: `MONITORINFOEXW::szDevice`, for example `\\.\DISPLAY1`.
         gdi_name: String,
         /// macOS: `CGDirectDisplayID` (`NSScreenNumber`).
@@ -188,6 +195,11 @@ fn frame_window_closed() {
     submission::closed();
 }
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use futures_channel::oneshot;
 use nitpick_core::device::{DeviceQuery, Report};
 use nitpick_core::driver::{
     Capabilities, Conversion, DepthSupport, DisplayId, EncodingSupport, ModeSettings, OutputError,
@@ -227,11 +239,77 @@ pub type DeviceReport = Result<DeviceQuery, String>;
 /// has 1.0 = the current SDR white, whose luminance is not reported.
 pub const NO_FP16_SCALE: &str = "absolute FP16 luminance scale unavailable";
 
-/// Device state of `screen` through `DisplayDeviceControl`. Does native
-/// I/O on the calling thread.
-pub fn device_report(screen: i32) -> DeviceReport {
-    let identity = ffi::screen_identity(screen).map_err(|e| e.to_string())?;
-    native_report(&identity)
+/// Device reports by [`screen_key`].
+pub type DeviceReports = Vec<(String, DeviceReport)>;
+
+/// Device state of each screen through `DisplayDeviceControl`. Does native
+/// I/O on the calling thread: call it on a worker.
+#[must_use]
+pub fn device_reports(screens: &[ffi::ScreenIdentity]) -> DeviceReports {
+    screens
+        .iter()
+        .map(|s| (screen_key(s), native_report(s)))
+        .collect()
+}
+
+/// Reads [`device_reports`] on a new thread. A failed spawn drops the
+/// sender, so the receiver fails instead of waiting.
+pub fn read_device_reports(screens: Vec<ffi::ScreenIdentity>) -> oneshot::Receiver<DeviceReports> {
+    let (tx, rx) = oneshot::channel();
+    let _ = std::thread::Builder::new()
+        .name("nitpick-devices".into())
+        .spawn(move || {
+            if !tx.is_canceled() {
+                let _ = tx.send(device_reports(&screens));
+            }
+        });
+    rx
+}
+
+/// Device reports of the last refresh. The launcher and the driver share
+/// it on the GUI thread; a worker reads the reports.
+#[derive(Clone, Default)]
+pub struct DeviceStates(Rc<RefCell<States>>);
+
+#[derive(Default)]
+struct States {
+    /// Number of the last [`DeviceStates::begin`].
+    started: u64,
+    /// Number of the refresh that `reports` come from.
+    applied: u64,
+    reports: HashMap<String, DeviceReport>,
+}
+
+impl DeviceStates {
+    /// Starts a refresh and gives its number for [`Self::apply`].
+    pub fn begin(&self) -> u64 {
+        let mut s = self.0.borrow_mut();
+        s.started += 1;
+        s.started
+    }
+
+    /// Replaces all reports with those of refresh `refresh`, so a removed
+    /// or changed screen loses its old report. A refresh older than the
+    /// applied one does nothing. Returns whether the reports changed.
+    pub fn apply(&self, refresh: u64, reports: DeviceReports) -> bool {
+        let mut s = self.0.borrow_mut();
+        if refresh <= s.applied {
+            return false;
+        }
+        s.applied = refresh;
+        s.reports = reports.into_iter().collect();
+        true
+    }
+
+    /// The report of the screen with key `key`.
+    pub fn report(&self, key: &str) -> DeviceReport {
+        self.0
+            .borrow()
+            .reports
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| Err("display state not read yet".into()))
+    }
 }
 
 #[cfg(windows)]
@@ -254,7 +332,28 @@ fn native_report(identity: &ffi::ScreenIdentity) -> DeviceReport {
         .map_err(|e| e.to_string())
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+fn native_report(identity: &ffi::ScreenIdentity) -> DeviceReport {
+    use nitpick_core::device::DisplayDeviceControl;
+    use nitpick_display::linux::{LinuxDisplay, LinuxScreen, ScreenSource, x11};
+    let source = match identity.platform.as_str() {
+        // Qt names its Wayland platforms `wayland`, `wayland-egl` and so on.
+        p if p.starts_with("wayland") => ScreenSource::Wayland,
+        "xcb" => x11::screen_source(&identity.name)?,
+        p => return Err(format!("no device mapping for the Qt platform {p}")),
+    };
+    let screen = LinuxScreen {
+        name: identity.name.clone(),
+        source,
+    };
+    let mut backend = LinuxDisplay::new();
+    backend
+        .device_for_screen(&screen)
+        .and_then(|id| backend.query_device(&id))
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn native_report(identity: &ffi::ScreenIdentity) -> DeviceReport {
     Err(format!(
         "no device mapping for screen {} on this platform",
@@ -469,13 +568,43 @@ fn describe(device: &DeviceReport) -> String {
     format!("{}: {}", q.device.name, parts.join(", "))
 }
 
-/// The key is the Qt screen index; it changes when screens are added or
+/// The native name of a screen: the GDI name on Windows, the
+/// `CGDirectDisplayID` on macOS, otherwise `QScreen::name()`. Unlike the
+/// Qt screen index, it does not change when another screen is added or
 /// removed.
 #[must_use]
-pub fn display_id(screen: i32) -> DisplayId {
+pub fn screen_key(identity: &ffi::ScreenIdentity) -> String {
+    if cfg!(windows) {
+        identity.gdi_name.clone()
+    } else if cfg!(target_os = "macos") {
+        identity.display_id.to_string()
+    } else {
+        identity.name.clone()
+    }
+}
+
+#[must_use]
+pub fn display_id(identity: &ffi::ScreenIdentity) -> DisplayId {
+    display_for_key(screen_key(identity))
+}
+
+#[must_use]
+pub fn display_for_key(key: impl Into<String>) -> DisplayId {
     DisplayId {
         driver: DRIVER,
-        key: screen.to_string(),
+        key: key.into(),
+    }
+}
+
+/// Name for the display list, for example `DP-6 - DEL DELL U2417H`.
+#[must_use]
+pub fn screen_label(identity: &ffi::ScreenIdentity) -> String {
+    let product = format!("{} {}", identity.manufacturer, identity.model);
+    let product = product.trim();
+    if product.is_empty() {
+        identity.name.clone()
+    } else {
+        format!("{} - {product}", identity.name)
     }
 }
 
@@ -509,4 +638,4 @@ pub fn surface_warning(depth: BitDepth, s: &ffi::PatternSurface) -> Option<Strin
 
 #[cfg(test)]
 #[path = "display_tests.rs"]
-mod tests;
+pub(crate) mod tests;

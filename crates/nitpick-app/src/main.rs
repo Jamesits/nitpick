@@ -8,6 +8,7 @@ mod hdr_metadata;
 #[allow(clippy::unnecessary_box_returns)]
 mod launcher;
 mod qrhi_driver;
+mod session;
 mod submission;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};

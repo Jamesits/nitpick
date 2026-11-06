@@ -163,7 +163,7 @@ The Qt host maps a `QScreen` to a device as follows:
 - X11 through Xwayland: the RandR output name is the compositor's output name, with the same rule. Xwayland outputs have the RandR property `RANDR Emulation` and no `EDID` property.
 - Other X servers: the output names come from the X driver and can differ from the kernel names. The screen maps to the one device whose EDID MD5 is the MD5 of the RandR `EDID` output property. An output without that property maps to no device.
 
-A screen without exactly one match maps to no device. Its device fields are then unknown with the reason, and output continues with warnings. The Qt manufacturer and model strings are not compared: GNOME gives the PNP ID and the EDID product name, while KWin and wlroots give the vendor name from the PNP database where they find it.
+`nitpick_display::linux::screen_device` implements these rules on a device list. A screen without exactly one match maps to no device. Its device fields are then unknown with the reason, and output continues with warnings. The Qt manufacturer and model strings are not compared: GNOME gives the PNP ID and the EDID product name, while KWin and wlroots give the vendor name from the PNP database where they find it.
 
 | Field | Source | Rule |
 |---|---|---|

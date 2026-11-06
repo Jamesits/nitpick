@@ -12,6 +12,28 @@ ApplicationWindow {
     readonly property var pattern: patterns[patternList.currentIndex]
     readonly property var encoding: pattern.encodings[Math.max(0, encodingBox.currentIndex)]
     readonly property var depth: catalogue.depths[Math.max(0, depthBox.currentIndex)]
+    // `[{key, name, width, height}]` from the driver, see launcher.rs.
+    readonly property var displays: JSON.parse(launcher.displays || "[]")
+    // Native screen key of the selected display. It survives a change of
+    // the screen list, unlike the list index.
+    property string selectedKey: ""
+
+    // Keeps the selected display when the list changes. Called later, so
+    // that the combo box has the new model first.
+    onDisplaysChanged: Qt.callLater(() => {
+        const i = displays.findIndex(d => d.key === selectedKey);
+        screenBox.currentIndex = displays.length > 0 ? Math.max(0, i) : -1;
+        selectedKey = displays.length > 0 ? displays[screenBox.currentIndex].key : "";
+    })
+    Component.onCompleted: launcher.refreshDisplays()
+
+    // Screens added or removed: a display change.
+    Connections {
+        target: Qt.application
+        function onScreensChanged() {
+            launcher.refreshDisplays();
+        }
+    }
 
     // Launcher JSON for the HDR10 static metadata, see launcher.rs.
     function metadataJson() {
@@ -118,17 +140,14 @@ ApplicationWindow {
                 id: screenBox
 
                 Layout.fillWidth: true
-                model: Qt.application.screens
-                displayText: currentIndex >= 0 ? textAt(currentIndex) : ""
-                delegate: ItemDelegate {
-                    required property var modelData
-                    width: ListView.view.width
-                    text: modelData.name + " - " + modelData.manufacturer + " " + modelData.model
-                }
-
-                function textAt(i) {
-                    const s = Qt.application.screens[i];
-                    return s.name + " - " + s.manufacturer + " " + s.model;
+                model: root.displays
+                textRole: "name"
+                // A display change cancels the pending presentation.
+                onActivated: index => {
+                    if (root.displays[index].key !== root.selectedKey) {
+                        root.selectedKey = root.displays[index].key;
+                        launcher.refreshDisplays();
+                    }
                 }
             }
 
@@ -220,7 +239,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 text: qsTr("Show pattern (Esc closes)")
                 onClicked: launcher.showPattern(root.pattern.id, root.encoding.id, root.depth.id,
-                                                screenBox.currentIndex, root.metadataJson())
+                                                root.selectedKey, root.metadataJson())
             }
 
             Label {
@@ -263,8 +282,12 @@ ApplicationWindow {
                     selectByMouse: true
                     font.family: "Consolas"
                     font.pixelSize: 13
-                    text: launcher.referenceTable(root.pattern.id, root.encoding.id, root.depth.id,
-                                                  Math.max(0, screenBox.currentIndex))
+                    // New device reports change the path limits.
+                    text: {
+                        launcher.deviceRevision;
+                        return launcher.referenceTable(root.pattern.id, root.encoding.id,
+                                                       root.depth.id, root.selectedKey);
+                    }
                 }
             }
         }

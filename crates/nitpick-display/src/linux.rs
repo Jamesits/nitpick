@@ -21,6 +21,8 @@ use crate::edid::{self, Edid, HdrBlock, HdrStaticMetadata};
 
 #[cfg(target_os = "linux")]
 mod system;
+#[cfg(all(target_os = "linux", feature = "x11"))]
+pub mod x11;
 
 pub const BACKEND: &str = "linux";
 
@@ -39,6 +41,10 @@ const NO_SDR_WHITE: &str = "KMS has no SDR white level; compositor settings are 
 
 /// colord metadata key of the EDID MD5.
 pub const COLORD_EDID_MD5: &str = "OutputEdidMd5";
+
+/// Names in [`DeviceInfo::evidence`] that [`screen_device`] reads.
+const EVIDENCE_CONNECTOR: &str = "connector";
+const EVIDENCE_EDID_MD5: &str = "edid_md5";
 
 /// One connector in `/sys/class/drm`.
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +125,99 @@ pub trait LinuxNative {
     fn colord(&mut self) -> Result<ColordReport, String>;
 }
 
+/// How the window system names a screen. See "Linux reports" in
+/// `doc/design/display_device.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenSource {
+    /// A Wayland output.
+    Wayland,
+    /// An Xwayland RandR output: it has the property `RANDR Emulation`.
+    Xwayland,
+    /// A RandR output of another X server.
+    X11 {
+        /// The RandR `EDID` output property; `None` without it.
+        edid: Option<Vec<u8>>,
+    },
+}
+
+/// A window-system screen, for example a Qt `QScreen`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxScreen {
+    /// Output name: `QScreen::name()` or the RandR output name.
+    pub name: String,
+    pub source: ScreenSource,
+}
+
+/// The one device in `devices` that shows `screen`.
+///
+/// Wayland compositors and Xwayland name an output after its kernel
+/// connector, but GNOME writes the type `HDMI-A` as `HDMI`. The names do
+/// not include the card, so one name on two cards is ambiguous. Other X
+/// servers can use other names, so their outputs match by EDID MD5.
+///
+/// # Errors
+/// [`DeviceError::Unsupported`] if no device matches;
+/// [`DeviceError::AmbiguousIdentity`] if more than one matches.
+pub fn screen_device(
+    screen: &LinuxScreen,
+    devices: &[DeviceInfo],
+) -> Result<DeviceId, DeviceError> {
+    let evidence = |d: &DeviceInfo, name: &str| {
+        d.evidence
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let (rule, matches): (String, Vec<&DeviceInfo>) = match &screen.source {
+        ScreenSource::Wayland | ScreenSource::Xwayland => (
+            format!("output name {}", screen.name),
+            devices
+                .iter()
+                .filter(|d| {
+                    evidence(d, EVIDENCE_CONNECTOR)
+                        .is_some_and(|c| connector_has_name(&c, &screen.name))
+                })
+                .collect(),
+        ),
+        ScreenSource::X11 { edid: None } => {
+            return Err(unsupported(
+                "screen lookup",
+                format!("RandR output {} has no EDID property", screen.name),
+            ));
+        }
+        ScreenSource::X11 { edid: Some(edid) } => {
+            let md5 = edid::md5_hex(edid);
+            (
+                format!("EDID MD5 {md5} of RandR output {}", screen.name),
+                devices
+                    .iter()
+                    .filter(|d| evidence(d, EVIDENCE_EDID_MD5).as_ref() == Some(&md5))
+                    .collect(),
+            )
+        }
+    };
+    match matches.as_slice() {
+        [d] => Ok(d.id.clone()),
+        [] => Err(unsupported(
+            "screen lookup",
+            format!("no connected DRM connector matches the {rule}"),
+        )),
+        many => Err(DeviceError::AmbiguousIdentity(format!(
+            "{} DRM connectors match the {rule}",
+            many.len()
+        ))),
+    }
+}
+
+/// The kernel has no connector type `HDMI`, so the GNOME form `HDMI-n`
+/// names only `HDMI-A-n`.
+fn connector_has_name(connector: &str, name: &str) -> bool {
+    connector == name
+        || name
+            .strip_prefix("HDMI-")
+            .is_some_and(|n| connector.strip_prefix("HDMI-A-") == Some(n))
+}
+
 pub struct LinuxDisplay<N> {
     native: N,
 }
@@ -154,6 +253,15 @@ struct Snapshot {
 impl<N: LinuxNative> LinuxDisplay<N> {
     pub fn with_native(native: N) -> Self {
         Self { native }
+    }
+
+    /// The device of a window-system screen; see [`screen_device`]. Reads
+    /// sysfs only.
+    ///
+    /// # Errors
+    /// As [`screen_device`]; an unreadable `/sys/class/drm`.
+    pub fn device_for_screen(&mut self, screen: &LinuxScreen) -> Result<DeviceId, DeviceError> {
+        screen_device(screen, &self.devices()?)
     }
 
     /// Sysfs only: listing devices opens no device node and calls no
@@ -212,7 +320,7 @@ fn device_info(c: &ConnectorReport, edid: Option<&Edid>, md5: Option<&str>) -> D
         .and_then(|e| e.name.clone())
         .unwrap_or_else(|| c.connector.clone());
     // The card number is left out: it can change after a restart.
-    let mut evidence = vec![("connector".into(), c.connector.clone())];
+    let mut evidence = vec![(EVIDENCE_CONNECTOR.into(), c.connector.clone())];
     if let Some(e) = edid {
         evidence.push((
             "edid_ids".into(),
@@ -224,7 +332,7 @@ fn device_info(c: &ConnectorReport, edid: Option<&Edid>, md5: Option<&str>) -> D
         }
     }
     if let Some(md5) = md5 {
-        evidence.push(("edid_md5".into(), md5.to_owned()));
+        evidence.push((EVIDENCE_EDID_MD5.into(), md5.to_owned()));
     }
     DeviceInfo {
         id: DeviceId {

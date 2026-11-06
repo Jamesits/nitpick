@@ -16,7 +16,7 @@ use nitpick_core::metadata::Hdr10Metadata;
 use nitpick_core::output::{SwapChainFormat, swap_chain_bytes};
 use nitpick_core::signal::{BitDepth, Format};
 
-use crate::display::{self, Backend, DeviceReport, ffi};
+use crate::display::{self, Backend, DeviceStates, ffi};
 use crate::hdr_metadata::{self, BridgeSink, MetadataSink, NativeMetadata, SwapChainMetadata};
 use crate::submission::{self, ACK_TIMEOUT_MS, FrameId};
 
@@ -26,14 +26,12 @@ pub trait PatternWindow: MetadataSink {
     fn screen_count(&self) -> i32;
     /// # Errors
     /// No screen with this index, or a platform failure.
-    fn screen_name(&self, screen: i32) -> Result<String, String>;
+    fn screen_identity(&self, screen: i32) -> Result<ffi::ScreenIdentity, String>;
     /// Pattern area size before the window opens.
     ///
     /// # Errors
     /// No screen with this index, or a platform failure.
     fn screen_size(&self, screen: i32) -> Result<(usize, usize), String>;
-    /// Native device state. Does native I/O on the calling thread.
-    fn device_report(&self, screen: i32) -> DeviceReport;
     /// Replaces any open window.
     ///
     /// # Errors
@@ -67,10 +65,8 @@ impl PatternWindow for BridgeWindow {
         ffi::screen_count()
     }
 
-    fn screen_name(&self, screen: i32) -> Result<String, String> {
-        ffi::screen_identity(screen)
-            .map(|i| i.name)
-            .map_err(|e| e.to_string())
+    fn screen_identity(&self, screen: i32) -> Result<ffi::ScreenIdentity, String> {
+        ffi::screen_identity(screen).map_err(|e| e.to_string())
     }
 
     fn screen_size(&self, screen: i32) -> Result<(usize, usize), String> {
@@ -78,10 +74,6 @@ impl PatternWindow for BridgeWindow {
         let width = ffi::screen_pixel_width(screen).map_err(|e| e.to_string())?;
         let height = ffi::screen_pixel_height(screen).map_err(|e| e.to_string())?;
         Ok((size(width)?, size(height)?))
-    }
-
-    fn device_report(&self, screen: i32) -> DeviceReport {
-        display::device_report(screen)
     }
 
     fn open(&mut self, screen: i32, fp16: bool) -> Result<ffi::PatternSurface, String> {
@@ -165,30 +157,42 @@ pub struct QrhiDriver<W = BridgeWindow, J = Threads> {
     backend: Backend,
     window: W,
     workers: J,
+    /// Native device reports. The host refreshes them on a worker before
+    /// it calls `query` and `open`, which do no native I/O.
+    states: DeviceStates,
     /// Result of the last `query`. `open` uses it for the same display, so
     /// that it applies the capabilities the host checked.
     queried: Option<(DisplayId, Query)>,
     opened: Option<Opened>,
 }
 
-impl Default for QrhiDriver {
-    fn default() -> Self {
-        Self::new(Backend::current(), BridgeWindow, Threads)
-    }
-}
-
 impl<W: PatternWindow, J: Workers> QrhiDriver<W, J> {
-    pub fn new(backend: Backend, window: W, workers: J) -> Self {
+    pub fn new(backend: Backend, window: W, workers: J, states: DeviceStates) -> Self {
         Self {
             backend,
             window,
             workers,
+            states,
             queried: None,
             opened: None,
         }
     }
 
-    /// The screen index of `display`, if it exists.
+    /// Identity of every screen that has one now, in Qt order. The host
+    /// reads their device reports with it.
+    pub fn screens(&self) -> Vec<ffi::ScreenIdentity> {
+        // A screen that fails here disappeared during enumeration.
+        (0..self.window.screen_count())
+            .filter_map(|screen| self.window.screen_identity(screen).ok())
+            .collect()
+    }
+
+    /// The display of the open window.
+    pub fn opened(&self) -> Option<&DisplayId> {
+        self.opened.as_ref().map(|o| &o.display)
+    }
+
+    /// The current screen index of `display`, if the screen exists.
     fn screen(&self, display: &DisplayId) -> Result<i32, OutputError> {
         if display.driver != display::DRIVER {
             return Err(OutputError::Platform(format!(
@@ -196,12 +200,17 @@ impl<W: PatternWindow, J: Workers> QrhiDriver<W, J> {
                 display.key, display.driver
             )));
         }
-        display
-            .key
-            .parse::<i32>()
-            .ok()
-            .filter(|s| (0..self.window.screen_count()).contains(s))
+        (0..self.window.screen_count())
+            .find(|&s| {
+                self.window
+                    .screen_identity(s)
+                    .is_ok_and(|i| display::screen_key(&i) == display.key)
+            })
             .ok_or(OutputError::Disconnected)
+    }
+
+    fn device_query(&self, display: &DisplayId) -> Query {
+        display::query(self.backend, &self.states.report(&display.key))
     }
 }
 
@@ -214,9 +223,10 @@ impl<W: PatternWindow, J: Workers> OutputDriver for QrhiDriver<W, J> {
         // A screen that fails here disappeared during enumeration.
         (0..self.window.screen_count())
             .filter_map(|screen| {
+                let identity = self.window.screen_identity(screen).ok()?;
                 Some(DisplayInfo {
-                    id: display::display_id(screen),
-                    name: self.window.screen_name(screen).ok()?,
+                    id: display::display_id(&identity),
+                    name: display::screen_label(&identity),
                     size: self.window.screen_size(screen).ok()?,
                 })
             })
@@ -224,8 +234,8 @@ impl<W: PatternWindow, J: Workers> OutputDriver for QrhiDriver<W, J> {
     }
 
     fn query(&mut self, id: &DisplayId) -> Result<Query, OutputError> {
-        let screen = self.screen(id)?;
-        let query = display::query(self.backend, &self.window.device_report(screen));
+        self.screen(id)?;
+        let query = self.device_query(id);
         self.queried = Some((id.clone(), query.clone()));
         Ok(query)
     }
@@ -234,7 +244,7 @@ impl<W: PatternWindow, J: Workers> OutputDriver for QrhiDriver<W, J> {
         let screen = self.screen(id)?;
         let query = match self.queried.take() {
             Some((d, q)) if d == *id => q,
-            _ => display::query(self.backend, &self.window.device_report(screen)),
+            _ => self.device_query(id),
         };
         let mut warnings = check_open(&query.capabilities, depth)?;
         let fp16 = SwapChainFormat::for_depth(depth) == SwapChainFormat::ScRgb;
@@ -345,4 +355,4 @@ impl<W: PatternWindow, J: Workers> OutputDriver for QrhiDriver<W, J> {
 
 #[cfg(test)]
 #[path = "qrhi_driver_tests.rs"]
-mod tests;
+pub(crate) mod tests;

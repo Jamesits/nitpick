@@ -5,8 +5,8 @@ use nitpick_core::driver::{Capabilities, Gamut, OutputLimits, Support, check_fra
 use nitpick_core::signal::{BitDepth, Encoding, Format};
 
 use super::{
-    Backend, DeviceReport, NO_FP16_SCALE, capabilities, display_id, ffi, mode, surface,
-    surface_warning,
+    Backend, DeviceReport, DeviceStates, NO_FP16_SCALE, capabilities, display_for_key, ffi, mode,
+    screen_key, screen_label, surface, surface_warning,
 };
 
 const INFO_2: &str = "DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2";
@@ -20,7 +20,7 @@ fn unknown<T>() -> Report<T> {
 }
 
 /// A Windows HDR display with HDR on, 10 bits on the wire.
-fn hdr_on() -> DeviceQuery {
+pub(crate) fn hdr_on() -> DeviceQuery {
     DeviceQuery {
         device: DeviceInfo {
             id: DeviceId {
@@ -282,7 +282,7 @@ fn swap_chain_fallback_is_a_warning() {
         height: 2160,
         description: "HDR10 swap chain (D3D11)".into(),
     };
-    let s = surface(display_id(0), &fallback).unwrap();
+    let s = surface(display_for_key("a"), &fallback).unwrap();
     assert_eq!(s.size, (3840, 2160));
     let warning = surface_warning(BitDepth::Ten, &fallback).unwrap();
     assert!(warning.starts_with(BitDepth::Ten.label()));
@@ -291,8 +291,8 @@ fn swap_chain_fallback_is_a_warning() {
         fallback: String::new(),
         ..fallback
     };
-    let s = surface(display_id(1), &opened).unwrap();
-    assert_eq!(s.display, display_id(1));
+    let s = surface(display_for_key("b"), &opened).unwrap();
+    assert_eq!(s.display, display_for_key("b"));
     assert_eq!(surface_warning(BitDepth::Ten, &opened), None);
 }
 
@@ -302,15 +302,66 @@ fn swap_chain_fallback_is_a_warning() {
 #[ignore = "needs Qt and the local displays"]
 fn local_screen_report() {
     let _app = cxx_qt_lib::QGuiApplication::new();
-    for screen in 0.. {
-        let Ok(identity) = ffi::screen_identity(screen) else {
-            break;
-        };
-        println!("screen {screen}: {} {}", identity.name, identity.gdi_name);
-        let query = super::query(Backend::current(), &super::device_report(screen));
+    let screens: Vec<ffi::ScreenIdentity> = (0..)
+        .map_while(|screen| ffi::screen_identity(screen).ok())
+        .collect();
+    for (key, report) in super::device_reports(&screens) {
+        println!("screen {key}");
+        let query = super::query(Backend::current(), &report);
         println!("  {}", query.mode.description);
         for depth in BitDepth::ALL {
             println!("  {depth}: {:?}", check_open(&query.capabilities, depth));
         }
     }
+}
+
+fn identity() -> ffi::ScreenIdentity {
+    ffi::ScreenIdentity {
+        name: "HDMI-2".into(),
+        manufacturer: "DEL".into(),
+        model: "DELL U2417H".into(),
+        platform: "wayland".into(),
+        gdi_name: r"\.\DISPLAY2".into(),
+        display_id: 7,
+    }
+}
+
+#[test]
+fn screen_key_is_the_native_name() {
+    let expected = if cfg!(windows) {
+        r"\.\DISPLAY2"
+    } else if cfg!(target_os = "macos") {
+        "7"
+    } else {
+        "HDMI-2"
+    };
+    assert_eq!(screen_key(&identity()), expected);
+    assert_eq!(screen_label(&identity()), "HDMI-2 - DEL DELL U2417H");
+    let bare = ffi::ScreenIdentity {
+        manufacturer: String::new(),
+        model: String::new(),
+        ..identity()
+    };
+    assert_eq!(screen_label(&bare), "HDMI-2");
+}
+
+#[test]
+fn device_states_keep_the_newest_refresh() {
+    let states = DeviceStates::default();
+    assert_eq!(states.report("a"), Err("display state not read yet".into()));
+    let first = states.begin();
+    let second = states.begin();
+    assert!(states.apply(second, vec![("a".into(), Ok(hdr_on()))]));
+    // A late result of an older refresh does not replace newer reports.
+    assert!(!states.apply(first, vec![("a".into(), Err("old".into()))]));
+    assert_eq!(states.report("a"), Ok(hdr_on()));
+    assert!(!states.apply(second, Vec::new()));
+    // A new refresh replaces all reports: a removed screen loses its
+    // report.
+    let third = states.begin();
+    assert!(states.apply(third, vec![("b".into(), Err("unmapped".into()))]));
+    assert_eq!(states.report("a"), Err("display state not read yet".into()));
+    assert_eq!(states.report("b"), Err("unmapped".into()));
+    // Clones share the reports.
+    assert_eq!(states.clone().report("b"), Err("unmapped".into()));
 }

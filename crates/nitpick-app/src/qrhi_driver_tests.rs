@@ -7,29 +7,50 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
+use nitpick_core::device::Report;
 use nitpick_core::driver::{
     ContentLightLevel, DisplayId, Frame, Hdr10Request, OutputDriver, OutputError, PresentFuture,
-    Surface,
+    Surface, check_frame, check_open,
 };
 use nitpick_core::image::Image;
 use nitpick_core::output::hdr10_bytes;
 use nitpick_core::signal::{BT2020_PRIMARIES, BitDepth, D65, Encoding, Format, Rgb};
 
 use super::{Job, PatternWindow, QrhiDriver, Workers};
-use crate::display::{Backend, DeviceReport, display_id, ffi};
+use crate::display::{Backend, DeviceStates, display_for_key, display_id, ffi};
 use crate::gui_executor::{self, Post};
 use crate::hdr_metadata::{MetadataSink, NativeMetadata};
 use crate::submission::{self, FrameId};
 
 const SIZE: (usize, usize) = (4, 2);
 
+/// Screen `n`, with a different key on each OS.
+pub(crate) fn identity(n: i32) -> ffi::ScreenIdentity {
+    ffi::ScreenIdentity {
+        name: format!("screen {n}"),
+        manufacturer: "Maker".into(),
+        model: format!("Model {n}"),
+        platform: "test".into(),
+        gdi_name: format!(r"\.\DISPLAY{}", n + 1),
+        display_id: u32::try_from(n).unwrap() + 100,
+    }
+}
+
+pub(crate) fn id(n: i32) -> DisplayId {
+    display_id(&identity(n))
+}
+
 /// Calls of the driver into the window, shared with the test.
 #[derive(Default)]
-struct WindowLog {
+pub(crate) struct WindowLog {
+    /// Screen numbers of `identity`, by Qt index; `None`: 0 and 1.
+    pub(crate) screens: Option<Vec<i32>>,
+    /// Screen and pattern area size; `None`: `SIZE`.
+    pub(crate) size: Option<(usize, usize)>,
     fallback: String,
-    opens: Vec<(i32, bool)>,
-    closes: usize,
-    queued: Vec<(FrameId, Vec<u8>)>,
+    pub(crate) opens: Vec<(i32, bool)>,
+    pub(crate) closes: usize,
+    pub(crate) queued: Vec<(FrameId, Vec<u8>)>,
     /// `set` or `clear`, in call order, with the number of frames queued
     /// before the call.
     metadata: Vec<(&'static str, usize)>,
@@ -37,7 +58,7 @@ struct WindowLog {
 }
 
 #[derive(Clone, Default)]
-struct FakeWindow(Rc<RefCell<WindowLog>>);
+pub(crate) struct FakeWindow(pub(crate) Rc<RefCell<WindowLog>>);
 
 impl MetadataSink for FakeWindow {
     fn set(&mut self, _: &NativeMetadata) -> Result<(), String> {
@@ -57,28 +78,36 @@ impl MetadataSink for FakeWindow {
 
 impl PatternWindow for FakeWindow {
     fn screen_count(&self) -> i32 {
-        2
+        self.0
+            .borrow()
+            .screens
+            .as_ref()
+            .map_or(2, |s| i32::try_from(s.len()).unwrap())
     }
 
-    fn screen_name(&self, screen: i32) -> Result<String, String> {
-        Ok(format!("screen {screen}"))
+    fn screen_identity(&self, screen: i32) -> Result<ffi::ScreenIdentity, String> {
+        let log = self.0.borrow();
+        let n = match &log.screens {
+            None => Some(screen).filter(|s| (0..2).contains(s)),
+            Some(list) => usize::try_from(screen)
+                .ok()
+                .and_then(|i| list.get(i).copied()),
+        };
+        n.map(identity).ok_or_else(|| format!("no screen {screen}"))
     }
 
     fn screen_size(&self, _: i32) -> Result<(usize, usize), String> {
-        Ok(SIZE)
-    }
-
-    fn device_report(&self, _: i32) -> DeviceReport {
-        Err("no device in this test".into())
+        Ok(self.0.borrow().size.unwrap_or(SIZE))
     }
 
     fn open(&mut self, screen: i32, fp16: bool) -> Result<ffi::PatternSurface, String> {
         let mut log = self.0.borrow_mut();
         log.opens.push((screen, fp16));
+        let size = log.size.unwrap_or(SIZE);
         Ok(ffi::PatternSurface {
             fallback: log.fallback.clone(),
-            width: 4,
-            height: 2,
+            width: i32::try_from(size.0).unwrap(),
+            height: i32::try_from(size.1).unwrap(),
             description: "HDR10 swap chain (test)".into(),
         })
     }
@@ -90,8 +119,15 @@ impl PatternWindow for FakeWindow {
     }
 
     fn queue(&mut self, pixels: &[u8], size: (i32, i32), frame: FrameId) -> Result<(), String> {
-        assert_eq!(size, (4, 2));
         let mut log = self.0.borrow_mut();
+        let expected = log.size.unwrap_or(SIZE);
+        assert_eq!(
+            size,
+            (
+                i32::try_from(expected.0).unwrap(),
+                i32::try_from(expected.1).unwrap()
+            )
+        );
         if let Some(e) = &log.reject_queue {
             return Err(e.clone());
         }
@@ -102,7 +138,7 @@ impl PatternWindow for FakeWindow {
 
 /// Workers that run a job only when the test releases it.
 #[derive(Clone, Default)]
-struct HeldWorkers(Rc<RefCell<Vec<Job>>>);
+pub(crate) struct HeldWorkers(Rc<RefCell<Vec<Job>>>);
 
 impl Workers for HeldWorkers {
     fn spawn(&self, job: Job) {
@@ -111,11 +147,11 @@ impl Workers for HeldWorkers {
 }
 
 impl HeldWorkers {
-    fn take(&self) -> Job {
+    pub(crate) fn take(&self) -> Job {
         self.0.borrow_mut().remove(0)
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.0.borrow().len()
     }
 }
@@ -152,10 +188,15 @@ fn setup() -> Setup {
     let window = FakeWindow::default();
     let workers = HeldWorkers::default();
     Setup {
-        driver: QrhiDriver::new(Backend::D3d11, window.clone(), workers.clone()),
+        driver: QrhiDriver::new(
+            Backend::D3d11,
+            window.clone(),
+            workers.clone(),
+            DeviceStates::default(),
+        ),
         window,
         workers,
-        display: display_id(1),
+        display: id(1),
     }
 }
 
@@ -181,27 +222,36 @@ fn request() -> Hdr10Request {
 }
 
 #[test]
-fn displays_and_open_use_the_screen_index() {
+fn displays_use_the_native_screen_key() {
     let mut s = setup();
     let displays = s.driver.displays();
     assert_eq!(displays.len(), 2);
     assert_eq!(displays[1].id, s.display);
-    assert_eq!(displays[1].name, "screen 1");
+    assert_eq!(displays[1].name, "screen 1 - Maker Model 1");
     assert_eq!(displays[1].size, SIZE);
+    assert_eq!(s.driver.screens(), vec![identity(0), identity(1)]);
     let surface = open(&mut s);
     assert_eq!(surface.size, SIZE);
     assert_eq!(s.window.0.borrow().opens, vec![(1, false)]);
     s.driver.open(&s.display, BitDepth::Twelve).unwrap();
     assert_eq!(s.window.0.borrow().opens[1], (1, true));
+    assert_eq!(s.driver.opened(), Some(&s.display));
+
+    // Screen 0 is removed: screen 1 now has Qt index 0 and the same key.
+    s.window.0.borrow_mut().screens = Some(vec![1]);
+    assert_eq!(s.driver.displays()[0].id, s.display);
+    s.driver.open(&s.display, BitDepth::Ten).unwrap();
+    assert_eq!(s.window.0.borrow().opens[2], (0, false));
+    assert_eq!(s.driver.query(&id(0)), Err(OutputError::Disconnected));
 }
 
 #[test]
 fn unknown_displays_are_disconnected() {
     let mut s = setup();
-    for id in [display_id(2), display_id(-1)] {
-        assert_eq!(s.driver.query(&id), Err(OutputError::Disconnected));
+    for d in [id(2), display_for_key("missing")] {
+        assert_eq!(s.driver.query(&d), Err(OutputError::Disconnected));
         assert_eq!(
-            s.driver.open(&id, BitDepth::Ten),
+            s.driver.open(&d, BitDepth::Ten),
             Err(OutputError::Disconnected)
         );
     }
@@ -399,7 +449,7 @@ fn invalid_frames_fail_before_conversion() {
     let small = Image::new(2, 2, Rgb::new(0, 0, 0));
     let img = image(100);
     let other = Surface {
-        display: display_id(0),
+        display: id(0),
         ..surface.clone()
     };
     let cases = [
@@ -439,7 +489,7 @@ fn invalid_frames_fail_before_conversion() {
 fn close_ends_the_surface() {
     let mut s = setup();
     let surface = open(&mut s);
-    s.driver.close(&display_id(0));
+    s.driver.close(&id(0));
     assert_eq!(s.window.0.borrow().closes, 0);
     s.driver.close(&s.display);
     assert_eq!(s.window.0.borrow().closes, 1);
@@ -497,7 +547,7 @@ fn metadata_state_follows_the_window_and_open_warnings_reach_the_status() {
 
 /// Posts to a channel that the test thread runs, in place of the Qt
 /// event loop.
-struct ChannelPost(Mutex<mpsc::Sender<Job>>);
+pub(crate) struct ChannelPost(pub(crate) Mutex<mpsc::Sender<Job>>);
 
 impl Post for ChannelPost {
     fn post(&self, job: Job) {
@@ -529,11 +579,12 @@ fn the_event_loop_runs_during_conversion_and_submission() {
         Backend::D3d11,
         window.clone(),
         GatedThreads(Arc::new(Mutex::new(gate_rx))),
+        DeviceStates::default(),
     )));
     let surface = {
         let mut d = driver.borrow_mut();
-        d.query(&display_id(0)).unwrap();
-        d.open(&display_id(0), BitDepth::Ten).unwrap()
+        d.query(&id(0)).unwrap();
+        d.open(&id(0), BitDepth::Ten).unwrap()
     };
     let result = Rc::new(RefCell::new(None));
     let r = Rc::clone(&result);
@@ -573,12 +624,72 @@ fn the_event_loop_runs_during_conversion_and_submission() {
         pass();
     }
     assert!(result.borrow().is_none());
-    let id = submission::take_upload();
-    submission::ended(id, "");
+    let frame = submission::take_upload();
+    submission::ended(frame, "");
     pass();
     assert!(matches!(*result.borrow(), Some(Ok(_))));
     assert_eq!(ticks, 7);
     assert!(task.is_finished());
     // The task released its driver borrow.
-    driver.borrow_mut().close(&display_id(0));
+    driver.borrow_mut().close(&id(0));
+}
+
+#[test]
+fn query_and_open_use_the_refreshed_device_report() {
+    let states = DeviceStates::default();
+    let workers = HeldWorkers::default();
+    let window = FakeWindow::default();
+    let mut driver = QrhiDriver::new(
+        Backend::D3d11,
+        window.clone(),
+        workers.clone(),
+        states.clone(),
+    );
+    let d = id(1);
+    let q = driver.query(&d).unwrap();
+    assert!(q.mode.description.contains("display state not read yet"));
+    assert_eq!(q.mode.hdr_on, None);
+
+    // Windows with HDR off: both depths open with a warning.
+    let mut off = crate::display::tests::hdr_on();
+    off.mode.hdr_on = Report::known(false, "test");
+    let refresh = states.begin();
+    states.apply(refresh, vec![(d.key.clone(), Ok(off))]);
+    let q = driver.query(&d).unwrap();
+    assert_eq!(q.mode.hdr_on, Some(false));
+    assert_eq!(q.mode.wire_depth, Some(10));
+    assert!(q.mode.description.starts_with("Monitor: HDR off, 10 bpc"));
+    for depth in BitDepth::ALL {
+        let warnings = check_open(&q.capabilities, depth).unwrap();
+        assert!(warnings.iter().any(|w| w.contains("Windows HDR is off")));
+    }
+    // Narrow PQ and HLG stay selectable, with a warning.
+    for encoding in [Encoding::PqNarrow, Encoding::HlgNarrow] {
+        let format = Format::new(encoding, BitDepth::Ten);
+        let warnings = check_frame(&q.capabilities, format, None).unwrap();
+        assert!(warnings.iter().any(|w| w.contains("full-range PQ")));
+    }
+
+    // `open` uses the report of the last `query`, and the window shows
+    // the mode and the warnings after the frame.
+    let surface = driver.open(&d, BitDepth::Ten).unwrap();
+    assert_eq!(window.0.borrow().opens, vec![(1, false)]);
+    let img = image(100);
+    let frame = Frame {
+        image: &img,
+        format: Format::new(Encoding::HlgNarrow, BitDepth::Ten),
+        metadata: None,
+    };
+    let flag = Arc::new(WakeFlag::default());
+    let mut future = driver.present(&surface, &frame);
+    assert!(poll(&mut future, &flag).is_pending());
+    workers.take()();
+    assert!(poll(&mut future, &flag).is_pending());
+    submission::ended(submission::take_upload(), "");
+    let Poll::Ready(Ok(text)) = poll(&mut future, &flag) else {
+        panic!("presentation did not complete");
+    };
+    assert!(text.contains("Monitor: HDR off, 10 bpc"), "{text}");
+    assert!(text.contains("Windows HDR is off"), "{text}");
+    assert!(text.contains("codes are sent as full-range PQ"), "{text}");
 }

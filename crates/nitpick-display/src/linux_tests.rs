@@ -10,7 +10,7 @@ use nitpick_core::driver::{Gamut, Support};
 
 use super::{
     COLORD_EDID_MD5, ColordDevice, ColordReport, ConnectorReport, KmsConnector, LinuxDisplay,
-    LinuxNative, Property,
+    LinuxNative, LinuxScreen, Property, ScreenSource, screen_device,
 };
 use crate::common::{Field, NativeFailure};
 use crate::edid::md5_hex;
@@ -566,4 +566,187 @@ fn profile_operations_are_unsupported() {
         b.profile_state(&target),
         Err(DeviceError::Unsupported { reason, .. }) if reason.contains("not implemented")
     ));
+}
+
+fn named(card: &str, bus: &str, name: &str, edid: Vec<u8>) -> ConnectorReport {
+    ConnectorReport {
+        card: card.into(),
+        connector: name.into(),
+        bus: Ok(bus.into()),
+        ..connector(1, edid)
+    }
+}
+
+fn screen(name: &str, source: ScreenSource) -> LinuxScreen {
+    LinuxScreen {
+        name: name.into(),
+        source,
+    }
+}
+
+/// An SDR monitor on `DP-6` and an HDR display on `HDMI-A-2`.
+fn two_outputs() -> Fake {
+    let fake = Fake::default();
+    fake.set(
+        vec![
+            named("card1", "0000:01:00.0", "DP-6", sdr_edid()),
+            named("card1", "0000:01:00.0", "HDMI-A-2", hdr_edid("SN0002")),
+        ],
+        Vec::new(),
+    );
+    fake
+}
+
+#[test]
+fn wayland_and_xwayland_names_match_kernel_connectors() {
+    let mut b = two_outputs().backend();
+    for source in [ScreenSource::Wayland, ScreenSource::Xwayland] {
+        // Kernel names, as KWin and wlroots write them.
+        let dp = b
+            .device_for_screen(&screen("DP-6", source.clone()))
+            .unwrap();
+        assert_eq!(dp.key, "0000:01:00.0/DP-6/DEL40E7-SN0001");
+        let hdmi = b
+            .device_for_screen(&screen("HDMI-A-2", source.clone()))
+            .unwrap();
+        assert_eq!(hdmi.key, "0000:01:00.0/HDMI-A-2/DEL40E7-SN0002");
+        // GNOME writes HDMI-A-2 as HDMI-2.
+        assert_eq!(
+            b.device_for_screen(&screen("HDMI-2", source.clone()))
+                .unwrap(),
+            hdmi
+        );
+    }
+    // The connector name is the match; X11 RandR names are not.
+    assert!(
+        b.device_for_screen(&screen("DP-6", ScreenSource::X11 { edid: None }))
+            .is_err()
+    );
+}
+
+#[test]
+fn unknown_names_match_no_device() {
+    let mut b = two_outputs().backend();
+    for name in [
+        "DP-1", "HDMI-A-6", "HDMI-6", "eDP-1", "HDMI-B-2", "DP-6-1", "",
+    ] {
+        let err = b
+            .device_for_screen(&screen(name, ScreenSource::Wayland))
+            .unwrap_err();
+        assert!(
+            matches!(&err, DeviceError::Unsupported { reason, .. }
+                if reason == &format!("no connected DRM connector matches the output name {name}")),
+            "{name}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn one_name_on_two_cards_is_ambiguous() {
+    let fake = Fake::default();
+    fake.set(
+        vec![
+            named("card0", "0000:00:02.0", "HDMI-A-1", hdr_edid("SN0001")),
+            named("card1", "0000:01:00.0", "HDMI-A-1", hdr_edid("SN0002")),
+            named("card1", "0000:01:00.0", "DP-1", sdr_edid()),
+        ],
+        Vec::new(),
+    );
+    let mut b = fake.backend();
+    for name in ["HDMI-A-1", "HDMI-1"] {
+        let err = b
+            .device_for_screen(&screen(name, ScreenSource::Wayland))
+            .unwrap_err();
+        assert!(
+            matches!(&err, DeviceError::AmbiguousIdentity(m)
+                if m == &format!("2 DRM connectors match the output name {name}")),
+            "{err:?}"
+        );
+    }
+    assert!(
+        b.device_for_screen(&screen("DP-1", ScreenSource::Wayland))
+            .is_ok()
+    );
+}
+
+#[test]
+fn disconnected_connectors_do_not_match() {
+    let fake = Fake::default();
+    let mut off = named("card1", "0000:01:00.0", "DP-6", sdr_edid());
+    off.status = "disconnected".into();
+    fake.set(vec![off], Vec::new());
+    assert!(
+        fake.backend()
+            .device_for_screen(&screen("DP-6", ScreenSource::Wayland))
+            .is_err()
+    );
+}
+
+#[test]
+fn x11_outputs_match_by_edid_md5() {
+    let hdr = hdr_edid("SN0002");
+    let mut b = two_outputs().backend();
+    // X driver names can differ from the kernel names.
+    let id = b
+        .device_for_screen(&screen(
+            "HDMI-0",
+            ScreenSource::X11 {
+                edid: Some(hdr.clone()),
+            },
+        ))
+        .unwrap();
+    assert_eq!(id.key, "0000:01:00.0/HDMI-A-2/DEL40E7-SN0002");
+
+    let unknown = hdr_edid("SN0009");
+    let err = b
+        .device_for_screen(&screen(
+            "HDMI-0",
+            ScreenSource::X11 {
+                edid: Some(unknown.clone()),
+            },
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(&err, DeviceError::Unsupported { reason, .. }
+        if reason == &format!(
+            "no connected DRM connector matches the EDID MD5 {} of RandR output HDMI-0",
+            md5_hex(&unknown)
+        )),
+        "{err:?}"
+    );
+
+    let err = b
+        .device_for_screen(&screen("HDMI-A-2", ScreenSource::X11 { edid: None }))
+        .unwrap_err();
+    assert!(
+        matches!(&err, DeviceError::Unsupported { reason, .. }
+            if reason == "RandR output HDMI-A-2 has no EDID property"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn identical_edids_are_ambiguous_on_x11() {
+    let edid = sdr_edid();
+    let fake = Fake::default();
+    fake.set(
+        vec![
+            named("card1", "0000:01:00.0", "DP-1", edid.clone()),
+            named("card1", "0000:01:00.0", "DP-2", edid.clone()),
+        ],
+        Vec::new(),
+    );
+    let err = fake
+        .backend()
+        .device_for_screen(&screen("DP-1", ScreenSource::X11 { edid: Some(edid) }))
+        .unwrap_err();
+    assert!(matches!(err, DeviceError::AmbiguousIdentity(_)), "{err:?}");
+}
+
+#[test]
+fn screen_device_reads_only_the_device_list() {
+    let devices = two_outputs().backend().devices().unwrap();
+    let id = screen_device(&screen("HDMI-2", ScreenSource::Wayland), &devices).unwrap();
+    assert_eq!(id, devices[1].id);
+    assert!(screen_device(&screen("HDMI-2", ScreenSource::Wayland), &[]).is_err());
 }

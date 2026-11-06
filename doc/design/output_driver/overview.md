@@ -217,7 +217,7 @@ Before a measurement, set the delay for the display and probe, show the pattern,
 | `sdr_white_nits` | device report where readable; otherwise `None` | `None` |
 | `pixel_exact` | `Yes` (swap chain size = pattern size) | `Yes` only for an integer `pixel_ratio` and a layout that fills the viewport |
 
-All native fields come through `DisplayDeviceControl`. Fields remain `None` where the selected backend cannot read them, or where a screen has no device mapping (QRhi on Linux). Native capability reports do not establish code preservation or enable an FP16 path with an unknown luminance scale.
+All native fields come through `DisplayDeviceControl`. Fields remain `None` where the selected backend cannot read them, or where a screen has no device mapping. Native capability reports do not establish code preservation or enable an FP16 path with an unknown luminance scale.
 
 ## Technical decisions
 

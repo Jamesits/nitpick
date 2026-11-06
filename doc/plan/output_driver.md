@@ -12,9 +12,8 @@ Requires: 15.
 
 TODO:
 
-- Change `launcher.rs` and `qml/main.qml` to refresh native device state on a worker before the synchronous output query and open; the launcher and `QrhiDriver::query` now query on the GUI thread. Replace the screen-index `DisplayId` with the native screen mapping in `display.rs`. Use `displays` for the screen list.
-- Add the Linux screen mapping in [Linux reports](../design/display_device.md#linux-reports) as a portable function in `nitpick-display`, next to the evidence format it reads. Use it in the Linux branch of `display.rs`; Windows and macOS map by GDI name and display ID. Run the macOS mapping on a Mac. With injected device lists, verify kernel names, the GNOME `HDMI` form, an unknown name, one name on two cards, and the X11 EDID MD5 rule. On GNOME 50, map both screens with the Wayland and xcb Qt platforms.
-- Verify depth selection, mode reporting and warnings. Keep QRhi narrow PQ and HLG selectable. Replacement, display change and closure must drop the future before reusing or closing the driver. In the running launcher, Qt timers and controls must remain active during conversion and submission, and late results must not change the current status.
+- Build and run the macOS screen mapping on a Mac. On GNOME 50, map both screens with the Wayland and xcb Qt platforms; on xcb, check that the RandR read gives the Xwayland source. These run outside unit tests, which use injected device lists.
+- In the running launcher on each OS, verify that Qt timers and controls remain active during the device read, conversion and submission. Change the selected display and add or remove a screen while a presentation is pending: the status must show the cancellation, and a late result must not change it.
 
 ### 17. Add the Qt measurement delay
 

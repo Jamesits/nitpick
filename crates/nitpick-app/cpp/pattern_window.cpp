@@ -622,6 +622,9 @@ ScreenIdentity screenIdentity(std::int32_t screen) {
     QScreen *s = screenAt(screen);
     ScreenIdentity id{};
     id.name = rust::String(s->name().toStdString());
+    id.manufacturer = rust::String(s->manufacturer().toStdString());
+    id.model = rust::String(s->model().toStdString());
+    id.platform = rust::String(QGuiApplication::platformName().toStdString());
 #if defined(Q_OS_WIN)
     id.gdi_name = rust::String(gdiName(s));
 #elif defined(Q_OS_MACOS)

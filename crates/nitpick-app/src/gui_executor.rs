@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::future::{self, Future};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::task::Poll;
 use std::thread::{self, ThreadId};
 
@@ -28,6 +29,12 @@ impl<T: Threading + 'static> Post for CxxQtThread<T> {
         // Fails only after the `QObject` is destroyed, at exit. The task
         // then never runs again.
         let _ = self.queue(move |_| job());
+    }
+}
+
+impl Post for Arc<dyn Post> {
+    fn post(&self, job: Box<dyn FnOnce() + Send>) {
+        (**self).post(job);
     }
 }
 
@@ -67,12 +74,11 @@ type Slot = Rc<RefCell<Option<Pin<Box<dyn Future<Output = ()>>>>>>;
 pub struct LocalTask {
     slot: Slot,
     /// Kept for its drop, which cancels the task.
-    #[cfg_attr(not(test), allow(dead_code))]
     task: Task<()>,
 }
 
 impl LocalTask {
-    #[cfg(test)]
+    #[must_use]
     pub fn is_finished(&self) -> bool {
         self.task.is_finished()
     }

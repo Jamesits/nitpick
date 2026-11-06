@@ -6,14 +6,16 @@ The QRhi driver shows test patterns in a borderless full-screen Qt window on a l
 
 ```mermaid
 graph LR
-    L[launcher.rs] -->|OutputDriver| Q[QrhiDriver<br/>qrhi_driver.rs]
-    L -->|spawn_local| E[gui_executor.rs] -->|poll present| Q
+    L[launcher.rs] --> S[session.rs]
+    S -->|OutputDriver| Q[QrhiDriver<br/>qrhi_driver.rs]
+    S -->|spawn_local| E[gui_executor.rs] -->|poll present| Q
+    S -->|screen identities| R[device worker] -->|DeviceStates cache| Q
     Q -->|owned frame copy| J[worker thread]
     J -->|hdr10_bytes, scrgb_bytes| O
     O[nitpick-core<br/>output]
     Q -->|screen size, window, pixels| D[display.rs<br/>cxx bridge]
     Q -->|native metadata| M[hdr_metadata.rs<br/>MetadataSink] --> D
-    Q -->|device identity, capabilities, mode| N[nitpick-display<br/>DisplayDeviceControl]
+    R -->|device identity, capabilities, mode| N[nitpick-display<br/>DisplayDeviceControl]
     D --> W[pattern_window.cpp<br/>QWindow + QRhi swap chain]
     W -->|HDR10 or FP16 scRGB| GPU[GPU output] --> Scope[vectorscope]
 ```
@@ -22,8 +24,8 @@ Mapping to `OutputDriver`:
 
 | Trait call | Adapter (`qrhi_driver.rs`) |
 |---|---|
-| `displays` | Map Qt screens to native devices from `DisplayDeviceControl`; get window pixel geometry from Qt |
-| `query` | Combine the refreshed native device report with QRhi path support and conversion limits; report a remapped path, such as an FP16 path without a known luminance scale, as `Unknown` |
+| `displays` | List the Qt screens by native screen key (see [Screen to device mapping](#screen-to-device-mapping)); get the pattern area size from Qt |
+| `query` | Combine the cached native device report with QRhi path support and conversion limits; report a remapped path, such as an FP16 path without a known luminance scale, as `Unknown` |
 | `open` | `openPatternWindow(screen, fp16)`; `fp16` from the bit depth (see [Swap chain output](#swap-chain-output)) |
 | `present` | Convert on a worker (see [Asynchronous presentation](#asynchronous-presentation)). Then send the [HDR10 static metadata](#hdr10-static-metadata) and `presentPattern(pixels, width, height)`; wait for successful submission of this frame |
 
@@ -43,15 +45,43 @@ Physical display discovery and capability queries use [`nitpick-display`](../dis
 
 ### Screen to device mapping
 
-The bridge gives only the native identity of a Qt screen (`screenIdentity`). The adapter maps it to a device and reads the device through `DisplayDeviceControl::query_device`:
+The bridge gives only the native identity of a Qt screen (`screenIdentity`). The `DisplayId` key of a screen is its native name in the first column below. Unlike the Qt screen index, it does not change when another screen is added or removed. The adapter maps the identity to a device and reads the device through `DisplayDeviceControl::query_device`:
 
-| Platform | Screen identity | Device match |
+| Platform | Screen identity (`DisplayId` key) | Device match |
 |---|---|---|
 | Windows | `MONITORINFOEXW::szDevice` of the screen's `HMONITOR` | The one active `DisplayConfig` path with this GDI source name. A source with two targets (clone mode) is ambiguous. |
 | macOS | `NSScreenNumber` of the `NSScreen` | The active display with this `CGDirectDisplayID`. |
-| Linux | `QScreen::name()` | Not implemented. See [Linux reports](../display_device.md#linux-reports) for the planned rule. |
+| Linux | `QScreen::name()` and `QGuiApplication::platformName()` | The rule in [Linux reports](../display_device.md#linux-reports). On `xcb`, the adapter reads the RandR output of the same name through a second X connection to `DISPLAY` (`x11` feature of `nitpick-display`); Qt does not give the EDID. Other Qt platforms have no mapping. |
 
-A screen without one match has an unknown device report with the reason. Output continues with the path rules below and warnings. **Status:** the launcher and `QrhiDriver::query` query the device on the Qt GUI thread for each reference table and each "Show pattern". This deviates from the worker rule in [Identity and execution](../display_device.md#identity-and-execution). **Unverified:** the macOS mapping; it was not built or run on macOS.
+A screen without one match has an unknown device report with the reason. Output continues with the path rules below and warnings. **Unverified:** the macOS mapping; it was not built or run on macOS. The Linux mapping on a real desktop; only injected device lists were tested.
+
+### Host lifecycle
+
+`session.rs` keeps the host lifecycle on the GUI thread. `launcher.rs` connects it to QML. The device reports are in a cache that the session and the driver share. `query` and `open` read the cache and do no native I/O.
+
+```mermaid
+sequenceDiagram
+    participant Q as QML
+    participant S as session.rs
+    participant W as device worker
+    participant D as QrhiDriver
+    Q->>S: refreshDisplays (start, screen change, display selection)
+    S->>S: cancel pending presentation
+    S->>D: displays, screens
+    S->>W: screen identities
+    W-->>S: device reports (cache, deviceRevision)
+    Q->>S: showPattern(display key)
+    S->>W: screen identities
+    W-->>S: device reports
+    S->>D: query, open, render at surface size
+    S->>D: present (awaited, see below)
+```
+
+Rules:
+- Each refresh replaces all cached reports, so a removed or changed screen loses its old report. A refresh older than the applied one does nothing.
+- The reference table uses the cached report of the selected display and the screen size from `displays`. Before the first report, the table shows the path limits with an unknown display state.
+- A new "Show pattern", a display selection or a screen change drops the pending presentation before the driver is borrowed again. A screen change closes the window if its screen is gone. Statuses go through the Qt event queue in order. A status of an older request does not apply.
+- `open` runs a nested event loop without user input (see above). If a screen change arrives in this loop, the refresh cannot borrow the driver; the launcher posts it again.
 
 ### Output report
 
@@ -103,9 +133,9 @@ Dropping the future drops both receivers and the submission registration. It doe
 - Dropping the `LocalTask` handle drops the future at once. `async-task` alone drops a cancelled future at the next event loop pass, after the launcher borrows the driver again.
 - If the event loop rejects a post from a worker thread (at exit, after the launcher is destroyed), the task step is leaked. `async-task` panics if a local task step drops on another thread.
 
-The launcher keeps the driver in `Rc<RefCell<…>>`. The task holds the driver borrow until `present` completes. "Show pattern" drops the earlier task before it borrows the driver, so the earlier `Disconnected` does not reach the status line. `query` and `open` stay synchronous. `open` still runs a nested event loop without user input for up to 5 s, see above.
+The session keeps the driver in `Rc<RefCell<…>>`. The task holds the driver borrow from `open` until `present` completes. A new request drops the earlier task before it borrows the driver, so the earlier `Disconnected` does not reach the status line. See [Host lifecycle](#host-lifecycle). `query` and `open` stay synchronous. `open` still runs a nested event loop without user input for up to 5 s, see above.
 
-**Unverified:** that Qt timers and controls stay active during conversion and submission in the real Qt event loop. The unit tests use a simulated event loop with controlled workers.
+**Unverified:** that Qt timers and controls stay active during the device read, conversion and submission in the real Qt event loop. The unit tests of `qrhi_driver.rs` and `session.rs` use a simulated event loop with controlled workers.
 
 ## Signalling
 
@@ -128,7 +158,7 @@ No swap chain API (DXGI, Vulkan, Metal) has a 12-bit integer format. Thus the bi
 
 The scale is a property of the platform, not of the FP16 storage format. Windows scRGB uses 1.0 = 80 cd/m². The Linux path uses the scRGB convention of its extended-linear-sRGB Vulkan colour space; its compositor behaviour still needs a device test. GNOME 50 on Wayland gives no extended-linear-sRGB colour space (checked with NVIDIA 595 and with RADV in Mesa 26.0.8). Thus the 12-bit path uses the Vulkan fallback there, with a warning.
 
-On Linux, the status line shows the display state as unknown until the screen mapping exists. The adapter does not use QRhi's `hdrInfo()`: the Qt 6.12 Vulkan backend reads the display only on Windows; on Linux it gives fixed default values (0 to 1000 cd/m²). A successful HDR10 open does not show that HDR is on: GNOME 50 on Wayland gives an HDR10 swap chain also for an SDR display with HDR off. **Unverified:** how the compositor converts the HDR10 signal for an SDR display.
+On Linux, the display state comes from the [screen to device mapping](#screen-to-device-mapping). The adapter does not use QRhi's `hdrInfo()`: the Qt 6.12 Vulkan backend reads the display only on Windows; on Linux it gives fixed default values (0 to 1000 cd/m²). A successful HDR10 open does not show that HDR is on: GNOME 50 on Wayland gives an HDR10 swap chain also for an SDR display with HDR off. **Unverified:** how the compositor converts the HDR10 signal for an SDR display.
 
 On macOS, Qt's linear HDR path uses 1.0 for the current SDR white. Its luminance varies with display settings and is not known to the driver. See [Qt's luminance behaviour](https://github.com/qt/qtbase/blob/6.12/src/gui/rhi/qrhi.cpp). Thus macOS reports `available = Unknown` and `exact = No` for 12-bit output, with the reason "absolute FP16 luminance scale unavailable". The window shows the pattern with the 80 cd/m² conversion, so the luminance is wrong by the ratio of SDR white to 80 cd/m². Use it only for a visual check. Do not claim an absolute scale with 80, 100 or Qt's placeholder SDR-white value, or reduce the output to 10 bits. HDR10 10-bit output remains available when the swap chain supports it.
 
@@ -186,6 +216,10 @@ Automatic light levels use $D / (2^n - 1)$ as full-range PQ for every input enco
 | Metadata on Linux | Qt private API; none | Qt private API | QRhi exposes no `VkSwapchainKHR`. Cost: the binary must use the exact Qt version of its private headers. |
 | GUI-thread executor | `qmetaobject` `execute_async`; a C++ bridge that posts with `QMetaObject::invokeMethod`; `async-task` with `CxxQtThread::queue` | `async-task` with `CxxQtThread::queue` | `qmetaobject` is a different Qt binding. `CxxQtThread::queue` is the existing cxx-qt path to the GUI thread and accepts jobs from any thread. `async-task` gives the task state and wakers; the glue code is only the post and the drop handle. |
 | Wake channels | custom wakers in `submission.rs`; `futures-channel` oneshot | `futures-channel` oneshot | The receiver wakes the task on send. A dropped receiver tells the worker that the result is not needed. |
+| `DisplayId` key | Qt screen index; native screen name | native screen name | The index changes when another screen is added or removed. The native name is the input of the device mapping. |
+| Device report timing | query on the GUI thread; refresh on a worker into a shared cache | worker into a shared cache | Native queries can block. `query` and `open` stay synchronous, as the trait requires. The cache is outside the driver borrow, so the reference table can read it while a presentation holds the driver. |
+| Lifecycle location | in the `QObject`; a separate Rust type | separate type (`session.rs`) | Tests run it with a simulated event loop, a fake window and held workers, without Qt. |
+| X11 EDID source | Qt private `QXcbScreen`; `xcb-randr` in C++; `x11rb` in Rust | `x11rb` | Pure Rust: no extra C library, and the code compiles on every OS. Cost: a second X connection, which follows only `DISPLAY`. |
 
 ## Testing
 
