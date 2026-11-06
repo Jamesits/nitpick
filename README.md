@@ -2,6 +2,8 @@
 
 An opinionated color profiling, calibration and verification workstation.
 
+![Project Status - Development](https://img.shields.io/badge/Project_Status-Development-red)![100% Written by AI](https://img.shields.io/badge/Written_by_AI-100%25-blue)
+
 ## Building
 
 ### Windows
