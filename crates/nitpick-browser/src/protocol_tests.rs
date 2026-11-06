@@ -12,6 +12,17 @@ fn server_messages_have_the_interface_shape() {
         serde_json::from_str(&ServerMessage::Authenticated { token: "ab".into() }.to_json())
             .unwrap();
     assert_eq!(json, json!({"type": "authenticated", "token": "ab"}));
+    let show = ServerMessage::Show {
+        id: 3,
+        width: 2360,
+        height: 1640,
+    };
+    let json: Value = serde_json::from_str(&show.to_json()).unwrap();
+    assert_eq!(
+        json,
+        json!({"type": "show", "id": 3, "width": 2360, "height": 1640})
+    );
+    assert_eq!(ServerMessage::Close.to_json(), r#"{"type":"close"}"#);
 }
 
 #[test]
@@ -37,14 +48,55 @@ fn other_client_messages_keep_their_fields() {
         panic!("not hello");
     };
     assert_eq!(fields.get("pixelRatio"), Some(&json!(2)));
-    assert!(matches!(
-        ClientMessage::parse(r#"{"type":"applied","id":1}"#),
-        Ok(ClientMessage::Applied(_))
-    ));
-    assert!(matches!(
-        ClientMessage::parse(r#"{"type":"error","id":1,"message":"x"}"#),
-        Ok(ClientMessage::Error(_))
-    ));
+    assert_eq!(
+        ClientMessage::parse(
+            r#"{"type":"applied","id":1,"naturalWidth":4,"naturalHeight":2,
+                "layoutWidth":4,"layoutHeight":2.5}"#
+        )
+        .unwrap(),
+        ClientMessage::Applied(Applied {
+            id: 1,
+            natural_width: 4,
+            natural_height: 2,
+            layout_width: 4.0,
+            layout_height: 2.5,
+        })
+    );
+    assert_eq!(
+        ClientMessage::parse(r#"{"type":"error","id":1,"message":"x"}"#).unwrap(),
+        ClientMessage::Error {
+            id: 1,
+            message: "x".into()
+        }
+    );
+}
+
+#[test]
+fn applied_layout_must_be_finite_and_not_negative() {
+    let applied = Applied {
+        id: 1,
+        natural_width: 4,
+        natural_height: 2,
+        layout_width: 0.0,
+        layout_height: 2.0,
+    };
+    assert!(applied.is_valid());
+    for bad in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            !Applied {
+                layout_width: bad,
+                ..applied
+            }
+            .is_valid()
+        );
+        assert!(
+            !Applied {
+                layout_height: bad,
+                ..applied
+            }
+            .is_valid()
+        );
+    }
 }
 
 #[test]
@@ -56,6 +108,10 @@ fn unknown_or_malformed_messages_are_rejected() {
         r#"{"code":"0042"}"#,
         r#"{"type":"show","id":1}"#,
         r#"{"type":"auth"}"#,
+        r#"{"type":"applied","id":1}"#,
+        r#"{"type":"applied","id":-1,"naturalWidth":4,"naturalHeight":2,"layoutWidth":4,"layoutHeight":2}"#,
+        r#"{"type":"applied","id":"1","naturalWidth":4,"naturalHeight":2,"layoutWidth":4,"layoutHeight":2}"#,
+        r#"{"type":"error","id":1}"#,
     ] {
         assert!(ClientMessage::parse(text).is_err(), "{text}");
     }

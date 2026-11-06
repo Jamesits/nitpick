@@ -13,9 +13,11 @@ pub mod service;
 mod session;
 #[cfg(test)]
 mod test_support;
+pub mod worker;
 
 pub use driver::BrowserDriver;
 pub use encode::{Clipping, EncodeError, EncodedFrame, PngSamples, encode_frame};
 pub use service::{
     BindHost, BrowserService, ClientState, ServiceConfig, ServiceEvent, ServiceEvents, StartError,
 };
+pub use worker::{EncodeWorker, Job, Workers};

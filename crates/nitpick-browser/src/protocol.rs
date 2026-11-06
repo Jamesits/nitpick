@@ -24,11 +24,21 @@ pub(crate) mod close {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ServerMessage {
     AuthRequired,
-    Authenticated { token: String },
+    Authenticated {
+        token: String,
+    },
+    /// Fetch and show frame `id`; the PNG has this size.
+    Show {
+        id: u64,
+        width: usize,
+        height: usize,
+    },
+    /// Show a black page.
+    Close,
 }
 
-/// The server checks only the message type and the `auth` code here.
-/// The fields of the other messages belong to the driver.
+/// The `hello` fields are checked by [`crate::client::Hello::parse`], so
+/// that an invalid `hello` has its own close reason.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ClientMessage {
@@ -37,8 +47,32 @@ pub(crate) enum ClientMessage {
         code: String,
     },
     Hello(Map<String, Value>),
-    Applied(Map<String, Value>),
-    Error(Map<String, Value>),
+    Applied(Applied),
+    Error {
+        id: u64,
+        message: String,
+    },
+}
+
+/// The client decoded and laid out frame `id`. The natural size is in image
+/// pixels; the layout size is in display pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Applied {
+    pub(crate) id: u64,
+    pub(crate) natural_width: u64,
+    pub(crate) natural_height: u64,
+    pub(crate) layout_width: f64,
+    pub(crate) layout_height: f64,
+}
+
+impl Applied {
+    /// Layout sizes are finite and not negative.
+    pub(crate) fn is_valid(&self) -> bool {
+        [self.layout_width, self.layout_height]
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0)
+    }
 }
 
 impl ClientMessage {

@@ -20,7 +20,10 @@ use serde_json::{Map, Value};
 pub(crate) const MAX_SURFACE_SIDE: u16 = 16_384;
 
 /// Path name shared by both depths: the PNG has 16-bit samples for each.
-const PNG_PATH: &str = "16-bit PNG, cICP";
+pub(crate) const PNG_PATH: &str = "16-bit PNG, cICP";
+
+/// Stale-surface reason for the status line.
+pub(crate) const VIEWPORT_CHANGED: &str = "the browser viewport changed; open the surface again";
 
 /// Fields of the `hello` message. Sizes are in CSS pixels.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -171,7 +174,9 @@ impl Hello {
             .then_some("not full screen: the pattern covers the browser viewport only")
     }
 
-    pub(crate) fn query(&self) -> Query {
+    /// `layout`: the layout size of the last `applied` in display pixels,
+    /// for the current geometry.
+    pub(crate) fn query(&self, layout: Option<(f64, f64)>) -> Query {
         let sdr = self.sdr_reason();
         let interpretation = match &sdr {
             Some(reason) => Support::No(format!(
@@ -223,7 +228,7 @@ impl Hello {
             hdr_metadata: Support::Unknown(
                 "written to PNG mDCV and cLLI; browser use is not reported".into(),
             ),
-            pixel_exact: self.pixel_exact(),
+            pixel_exact: self.pixel_exact(layout),
         };
         let mode = ModeSettings {
             hdr_on: Some(sdr.is_none()),
@@ -239,8 +244,9 @@ impl Hello {
     }
 
     /// `Yes` needs the layout size from `applied`; before it, the best
-    /// state is `Unknown`.
-    fn pixel_exact(&self) -> Support {
+    /// state is `Unknown`. The image size is the surface size: `present`
+    /// rejects other sizes.
+    pub(crate) fn pixel_exact(&self, layout: Option<(f64, f64)>) -> Support {
         let r = self.pixel_ratio;
         if r.fract() != 0.0 {
             return Support::No(format!(
@@ -254,7 +260,23 @@ impl Hello {
                 self.viewport.scale
             ));
         }
-        Support::Unknown("the client reports the layout size after the first frame".into())
+        let Some((w, h)) = layout else {
+            return Support::Unknown(
+                "the client reports the layout size after the first frame".into(),
+            );
+        };
+        let (iw, ih) = self.surface_size();
+        #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+        // Sizes are at most MAX_SURFACE_SIDE, exact in f64. The client
+        // reports the layout size that the browser uses; any difference
+        // resamples the image.
+        if (w, h) == (iw as f64, ih as f64) {
+            Support::Yes
+        } else {
+            Support::No(format!(
+                "the client laid out the {iw}×{ih} image at {w}×{h} display px"
+            ))
+        }
     }
 
     fn description(&self, sdr: Option<&str>) -> String {
@@ -352,6 +374,15 @@ pub(crate) struct ClientRecord {
     /// Changes with each session and each change of [`Geometry`]. An open
     /// surface is valid while its generation is current.
     pub(crate) generation: u64,
+    /// Layout size in display pixels from the last matching `applied` of
+    /// this generation.
+    pub(crate) layout: Option<(f64, f64)>,
+}
+
+impl ClientRecord {
+    pub(crate) fn query(&self) -> Query {
+        self.hello.query(self.layout)
+    }
 }
 
 #[cfg(test)]

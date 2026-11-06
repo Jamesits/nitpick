@@ -1,124 +1,13 @@
 use std::collections::HashSet;
 
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use super::*;
 use crate::service::ServiceEvents;
-use crate::test_support::{PEER, hello_json, hello_with};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Outgoing {
-    Text(Value),
-    Close(u16, &'static str),
-}
-
-struct MockTransport {
-    from_client: mpsc::UnboundedReceiver<Incoming>,
-    to_client: mpsc::UnboundedSender<Outgoing>,
-}
-
-impl Transport for MockTransport {
-    async fn recv(&mut self) -> Incoming {
-        self.from_client
-            .recv()
-            .await
-            .unwrap_or_else(|| Incoming::Closed("client closed".into()))
-    }
-
-    fn send(&mut self, text: String) -> impl Future<Output = Result<(), String>> + Send {
-        let value = serde_json::from_str(&text).expect("server sends JSON");
-        let result = self
-            .to_client
-            .send(Outgoing::Text(value))
-            .map_err(|_| "client gone".into());
-        std::future::ready(result)
-    }
-
-    async fn close(&mut self, code: u16, reason: &'static str) {
-        let _ = self.to_client.send(Outgoing::Close(code, reason));
-    }
-}
-
-/// The client end of a mock connection.
-struct Client {
-    tx: mpsc::UnboundedSender<Incoming>,
-    rx: mpsc::UnboundedReceiver<Outgoing>,
-    task: JoinHandle<()>,
-}
-
-impl Client {
-    fn send_text(&self, text: &str) {
-        self.tx.send(Incoming::Text(text.into())).unwrap();
-    }
-
-    fn send_json(&self, value: &Value) {
-        self.send_text(&value.to_string());
-    }
-
-    fn auth(&self, code: &str) {
-        self.send_json(&json!({"type": "auth", "code": code}));
-    }
-
-    async fn next(&mut self) -> Option<Outgoing> {
-        self.rx.recv().await
-    }
-
-    /// Waits for the session to end and the reservation to be released.
-    async fn finished(self) -> Vec<Outgoing> {
-        let Self { tx, mut rx, task } = self;
-        drop(tx);
-        task.await.unwrap();
-        let mut rest = Vec::new();
-        while let Ok(message) = rx.try_recv() {
-            rest.push(message);
-        }
-        rest
-    }
-}
-
-fn hub(pairing: Pairing) -> (Arc<SessionHub>, ServiceEvents) {
-    let (sender, events) = EventSender::channel();
-    (SessionHub::new(sender, pairing), events)
-}
-
-fn connect(hub: &Arc<SessionHub>) -> Client {
-    let reservation = hub.reserve(PEER).expect("slot free");
-    let (tx, from_client) = mpsc::unbounded_channel();
-    let (to_client, rx) = mpsc::unbounded_channel();
-    let transport = MockTransport {
-        from_client,
-        to_client,
-    };
-    Client {
-        tx,
-        rx,
-        task: tokio::spawn(run_session(transport, reservation)),
-    }
-}
-
-fn auth_required() -> Outgoing {
-    Outgoing::Text(json!({"type": "auth_required"}))
-}
-
-async fn expect_token(client: &mut Client) -> String {
-    match client.next().await {
-        Some(Outgoing::Text(value)) if value["type"] == "authenticated" => {
-            value["token"].as_str().expect("token string").to_owned()
-        }
-        other => panic!("expected authenticated, got {other:?}"),
-    }
-}
-
-/// Authenticates a new connection with the fixed code.
-async fn authenticated_client(hub: &Arc<SessionHub>, code: &str) -> (Client, String) {
-    let mut client = connect(hub);
-    assert_eq!(client.next().await, Some(auth_required()));
-    client.auth(code);
-    let token = expect_token(&mut client).await;
-    (client, token)
-}
+use crate::test_support::{
+    Client, Outgoing, PEER, auth_required, authenticated_client, connect, expect_token, hello_json,
+    hello_with, hub,
+};
 
 fn bearer(token: &str) -> String {
     format!("Bearer {token}")
@@ -259,7 +148,7 @@ async fn messages_other_than_auth_fail_before_authentication() {
     let cases: [(Incoming, &str); 6] = [
         (Incoming::Text(hello), "expected auth"),
         (
-            Incoming::Text(r#"{"type":"applied","id":1}"#.into()),
+            Incoming::Text(applied(1, (4, 2)).to_string()),
             "expected auth",
         ),
         (Incoming::Text("not json".into()), "malformed message"),
@@ -355,7 +244,8 @@ async fn authenticated_session_accepts_client_messages_in_order() {
     let (hub, _events) = hub(Pairing::Fixed("1234".into()));
     let (mut client, token) = authenticated_client(&hub, "1234").await;
     client.send_json(&hello_json());
-    client.send_json(&json!({"type": "applied", "id": 1}));
+    // No frame is pending: replies to unknown IDs change nothing.
+    client.send_json(&applied(1, (2360, 1640)));
     client.send_json(&json!({"type": "error", "id": 1, "message": "decode"}));
     // Long after the authentication timeout: it no longer applies.
     tokio::time::advance(AUTH_TIMEOUT * 2).await;
@@ -432,16 +322,6 @@ async fn aborted_session_releases_the_slot() {
     assert!(!hub.authorize(Some(&bearer(&token))));
     assert!(hub.reserve(PEER).is_ok());
     assert!(drain(&mut events).contains(&disconnected("server stopped or upgrade failed")));
-}
-
-#[test]
-fn frame_lookup_matches_the_current_id_only() {
-    let (sender, _events) = EventSender::channel();
-    let hub = SessionHub::new(sender, Pairing::Random);
-    assert_eq!(hub.frame(1), None);
-    hub.set_frame(7, Bytes::from_static(b"png"));
-    assert_eq!(hub.frame(7), Some(Bytes::from_static(b"png")));
-    assert_eq!(hub.frame(6), None);
 }
 
 /// Waits for the next client event other than `Connected` and
@@ -537,4 +417,247 @@ async fn each_session_gets_a_new_display_id() {
         ));
     }
     assert_ne!(displays[0], displays[1]);
+}
+
+fn applied(id: u64, size: (u64, u64)) -> Value {
+    json!({
+        "type": "applied",
+        "id": id,
+        "naturalWidth": size.0,
+        "naturalHeight": size.1,
+        "layoutWidth": size.0,
+        "layoutHeight": size.1,
+    })
+}
+
+/// An authenticated client after a valid `hello`.
+async fn ready_client(hub: &Arc<SessionHub>, events: &mut ServiceEvents) -> (Client, DisplayId) {
+    let (client, _token) = authenticated_client(hub, "1234").await;
+    client.send_json(&hello_json());
+    let ClientState::Ready(display) = next_client_event(events).await else {
+        panic!("expected Ready");
+    };
+    (client, display)
+}
+
+const SIZE: (usize, usize) = (2360, 1640);
+
+fn submit(
+    hub: &SessionHub,
+    display: &DisplayId,
+    png: &'static [u8],
+) -> (u64, oneshot::Receiver<Reply>) {
+    let generation = hub.client().expect("client").generation;
+    hub.submit(display, generation, SIZE, Bytes::from_static(png))
+        .expect("submitted")
+}
+
+async fn expect_show(client: &mut Client, id: u64) {
+    assert_eq!(
+        client.next().await,
+        Some(Outgoing::Text(
+            json!({"type": "show", "id": id, "width": SIZE.0, "height": SIZE.1})
+        ))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn submit_stores_the_frame_and_sends_show() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, display) = ready_client(&hub, &mut events).await;
+    let (first, _reply) = submit(&hub, &display, b"one");
+    expect_show(&mut client, first).await;
+    assert_eq!(hub.frame(first), Some(Bytes::from_static(b"one")));
+    assert_eq!(hub.frame(first + 1), None);
+
+    // A new frame releases the old PNG.
+    let (second, _reply) = submit(&hub, &display, b"two");
+    assert!(second > first);
+    expect_show(&mut client, second).await;
+    assert_eq!(hub.frame(first), None);
+    assert_eq!(hub.frame(second), Some(Bytes::from_static(b"two")));
+
+    client.finished().await;
+    assert_eq!(hub.frame(second), None, "released on disconnect");
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_the_latest_unsent_show_is_sent() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, display) = ready_client(&hub, &mut events).await;
+    // No await between the submits: the session task cannot run.
+    let (first, first_reply) = submit(&hub, &display, b"one");
+    let (second, _reply) = submit(&hub, &display, b"two");
+    expect_show(&mut client, second).await;
+    assert!(client.rx.try_recv().is_err());
+    // The replaced registration has no reply.
+    assert!(first_reply.await.is_err());
+    assert_eq!(hub.frame(first), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn applied_resolves_the_matching_frame_only() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, display) = ready_client(&hub, &mut events).await;
+    let (id, mut reply) = submit(&hub, &display, b"png");
+    expect_show(&mut client, id).await;
+    client.send_json(&applied(id - 1, (2360, 1640)));
+    client.send_json(&applied(id + 1, (2360, 1640)));
+    tokio::task::yield_now().await;
+    assert!(reply.try_recv().is_err(), "other IDs");
+    client.send_json(&applied(id, (2360, 1640)));
+    assert_eq!(reply.await.unwrap(), Ok((2360.0, 1640.0)));
+    assert_eq!(hub.client().unwrap().layout, Some((2360.0, 1640.0)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn wrong_natural_size_or_client_error_fails_the_frame() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, display) = ready_client(&hub, &mut events).await;
+    let (id, reply) = submit(&hub, &display, b"png");
+    expect_show(&mut client, id).await;
+    client.send_json(&applied(id, (2360, 1639)));
+    assert!(matches!(
+        reply.await.unwrap(),
+        Err(OutputError::Platform(m)) if m.contains("2360×1639")
+    ));
+    assert_eq!(hub.client().unwrap().layout, None);
+
+    let (id, reply) = submit(&hub, &display, b"png");
+    expect_show(&mut client, id).await;
+    client.send_json(&json!({"type": "error", "id": id, "message": "decode failed"}));
+    assert!(matches!(
+        reply.await.unwrap(),
+        Err(OutputError::Platform(m)) if m.contains("decode failed")
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn acknowledgement_times_out_10_s_after_show() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, display) = ready_client(&hub, &mut events).await;
+    let (id, mut reply) = submit(&hub, &display, b"png");
+    expect_show(&mut client, id).await;
+    let almost = ACK_TIMEOUT.checked_sub(Duration::from_millis(1)).unwrap();
+    tokio::time::advance(almost).await;
+    assert!(reply.try_recv().is_err());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(reply.try_recv(), Ok(Err(OutputError::Timeout)));
+
+    // A late reply after the timeout does not complete the next frame.
+    let (next, mut next_reply) = submit(&hub, &display, b"png");
+    expect_show(&mut client, next).await;
+    client.send_json(&applied(id, (2360, 1640)));
+    tokio::task::yield_now().await;
+    assert!(next_reply.try_recv().is_err());
+    // Each `show` starts its own timer.
+    tokio::time::advance(ACK_TIMEOUT).await;
+    tokio::task::yield_now().await;
+    assert_eq!(next_reply.try_recv(), Ok(Err(OutputError::Timeout)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn resize_and_disconnect_fail_the_pending_frame() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, display) = ready_client(&hub, &mut events).await;
+    let (id, reply) = submit(&hub, &display, b"png");
+    expect_show(&mut client, id).await;
+    // A mode change keeps the frame; a resize fails it.
+    client.send_json(&hello_with(&[("dynamicRange", Some(json!("standard")))]));
+    client.send_json(&hello_with(&[("viewport.width", Some(json!(1000)))]));
+    assert_eq!(
+        reply.await.unwrap(),
+        Err(OutputError::Platform(VIEWPORT_CHANGED.into()))
+    );
+    let generation = hub.client().unwrap().generation;
+    let (id, reply) = hub
+        .submit(
+            &display,
+            generation,
+            (2000, 1640),
+            Bytes::from_static(b"png"),
+        )
+        .unwrap();
+    assert!(matches!(client.next().await, Some(Outgoing::Text(v)) if v["id"] == id));
+    client.finished().await;
+    assert_eq!(reply.await.unwrap(), Err(OutputError::Disconnected));
+    assert_eq!(
+        hub.submit(&display, generation, (2000, 1640), Bytes::new())
+            .err(),
+        Some(OutputError::Disconnected)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_generation_or_other_display_is_rejected_at_submit() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (_client, display) = ready_client(&hub, &mut events).await;
+    let generation = hub.client().unwrap().generation;
+    assert_eq!(
+        hub.submit(&display, generation + 1, SIZE, Bytes::new())
+            .err(),
+        Some(OutputError::Platform(VIEWPORT_CHANGED.into()))
+    );
+    let other = DisplayId {
+        driver: DRIVER,
+        key: "other".into(),
+    };
+    assert_eq!(
+        hub.submit(&other, generation, SIZE, Bytes::new()).err(),
+        Some(OutputError::Disconnected)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_and_close_release_the_registration() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, display) = ready_client(&hub, &mut events).await;
+    let (id, reply) = submit(&hub, &display, b"png");
+    hub.cancel(id + 1);
+    expect_show(&mut client, id).await;
+    hub.cancel(id);
+    assert!(reply.await.is_err(), "registration removed");
+    // The client can still fetch the cancelled frame.
+    assert!(hub.frame(id).is_some());
+
+    let (id, reply) = submit(&hub, &display, b"png");
+    expect_show(&mut client, id).await;
+    hub.close(&display);
+    assert!(reply.await.is_err());
+    assert_eq!(hub.frame(id), None);
+    assert_eq!(
+        client.next().await,
+        Some(Outgoing::Text(json!({"type": "close"})))
+    );
+    // No timer after `close`.
+    tokio::time::advance(ACK_TIMEOUT * 2).await;
+    assert!(client.rx.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn frame_ids_are_not_reused_across_sessions() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, display) = ready_client(&hub, &mut events).await;
+    let (first, _reply) = submit(&hub, &display, b"png");
+    expect_show(&mut client, first).await;
+    client.finished().await;
+    next_client_event(&mut events).await;
+    let (_client, display) = ready_client(&hub, &mut events).await;
+    let (second, _reply) = submit(&hub, &display, b"png");
+    assert!(second > first);
+}
+
+#[tokio::test(start_paused = true)]
+async fn invalid_applied_ends_the_session() {
+    let (hub, mut events) = hub(Pairing::Fixed("1234".into()));
+    let (mut client, _display) = ready_client(&hub, &mut events).await;
+    let mut message = applied(1, (2360, 1640));
+    message["layoutWidth"] = json!(-1);
+    client.send_json(&message);
+    assert_eq!(
+        client.next().await,
+        Some(Outgoing::Close(close::PROTOCOL, "invalid applied"))
+    );
+    client.finished().await;
 }

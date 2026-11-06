@@ -111,7 +111,7 @@ fn engine_rules_follow_the_user_agent() {
 
 #[test]
 fn hdr_client_reports_unknown_precision_and_metadata_effect() {
-    let q = hello(&[]).query();
+    let q = hello(&[]).query(None);
     let caps = &q.capabilities;
     assert_eq!(q.mode.hdr_on, Some(true));
     assert_eq!(q.mode.gamut, Some(Gamut::P3));
@@ -150,14 +150,14 @@ fn gamut_follows_the_media_query() {
         ("p3", Gamut::P3),
         ("srgb", Gamut::Srgb),
     ] {
-        let q = hello(&[("colorGamut", Some(json!(value)))]).query();
+        let q = hello(&[("colorGamut", Some(json!(value)))]).query(None);
         assert_eq!(q.mode.gamut, Some(gamut));
     }
 }
 
 #[test]
 fn standard_dynamic_range_is_an_sdr_preview() {
-    let q = hello(&[("dynamicRange", Some(json!("standard")))]).query();
+    let q = hello(&[("dynamicRange", Some(json!("standard")))]).query(None);
     assert_eq!(q.mode.hdr_on, Some(false));
     assert!(
         q.mode.description.contains("SDR preview"),
@@ -177,7 +177,7 @@ fn sdr_engines_report_hdr_off_despite_the_media_query() {
     for ua in [FIREFOX_WINDOWS, FIREFOX_LINUX, WEBKITGTK] {
         let h = hello(&[("client.userAgent", Some(json!(ua)))]);
         assert_eq!(h.dynamic_range, DynamicRange::High);
-        let q = h.query();
+        let q = h.query(None);
         assert_eq!(q.mode.hdr_on, Some(false), "{ua}");
         assert!(q.mode.description.contains("SDR preview"), "{ua}");
         assert!(
@@ -205,7 +205,7 @@ fn pixel_mapping_rules() {
             ("pixelRatio", Some(json!(ratio))),
             ("viewport.scale", Some(json!(scale))),
         ])
-        .query();
+        .query(None);
         match (rejection, &q.capabilities.pixel_exact) {
             // `Yes` needs the layout size from `applied`.
             (None, Support::Unknown(_)) => {}
@@ -216,10 +216,32 @@ fn pixel_mapping_rules() {
 }
 
 #[test]
+fn pixel_exact_needs_a_layout_equal_to_the_image() {
+    let h = hello(&[]);
+    assert_eq!(h.pixel_exact(Some((2360.0, 1640.0))), Support::Yes);
+    for layout in [(2359.0, 1640.0), (2360.0, 1640.5), (1180.0, 820.0)] {
+        assert!(
+            matches!(h.pixel_exact(Some(layout)), Support::No(r) if r.contains("laid out")),
+            "{layout:?}"
+        );
+    }
+    // The ratio and zoom rules apply before the layout.
+    let zoomed = hello(&[("viewport.scale", Some(json!(1.5)))]);
+    assert!(matches!(
+        zoomed.pixel_exact(Some((2360.0, 1640.0))),
+        Support::No(r) if r.contains("zoom")
+    ));
+    assert_eq!(
+        h.query(Some((2360.0, 1640.0))).capabilities.pixel_exact,
+        Support::Yes
+    );
+}
+
+#[test]
 fn layout_warning_until_full_screen() {
     let h = hello(&[("fullscreen", Some(json!(false)))]);
     let warning = h.layout_warning().expect("warning");
-    assert!(h.query().mode.description.contains(warning));
+    assert!(h.query(None).mode.description.contains(warning));
     assert_eq!(hello(&[]).layout_warning(), None);
 }
 
@@ -258,7 +280,7 @@ fn geometry_changes_with_size_ratio_and_zoom_only() {
 
 #[test]
 fn output_limits_apply_the_browser_rules() {
-    let caps = hello(&[]).query().capabilities;
+    let caps = hello(&[]).query(None).capabilities;
     let pq = Format::new(Encoding::PqNarrow, BitDepth::Ten);
     let auto = Hdr10Request {
         primaries: [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],

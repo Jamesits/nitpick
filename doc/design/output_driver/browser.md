@@ -177,6 +177,35 @@ The client sends `applied` after `HTMLImageElement.decode()`, the DOM change and
 
 The client keeps the latest requested frame ID. After decode, it checks this ID before changing the DOM or sending `applied`. A newer `show` or `close` invalidates the old request, so a slow decode cannot replace a newer pattern or the black close page.
 
+Server side of `present`:
+
+```mermaid
+sequenceDiagram
+    participant H as host task
+    participant W as encoding worker
+    participant S as session task (server runtime)
+    participant C as client
+    H->>W: owned copy of the frame
+    W-->>H: PNG (oneshot channel)
+    H->>H: check generation, store PNG, register frame ID
+    H->>S: show command
+    S->>C: show {id}
+    S->>S: start 10 s timer
+    C->>S: applied {id, sizes}
+    S-->>H: layout size (oneshot channel, wakes the task)
+```
+
+- The encoding worker is one thread with one queued job. A new job replaces a queued job that has not started. A job of a dropped future skips the encoding if it has not started; otherwise it discards its result. At most one job runs and one job waits.
+- Frame IDs increase and are not reused, also across sessions. The server keeps the PNG of the latest frame only. A new frame, `close` or the end of the session releases it. A cancelled frame stays available until then, because the client can already fetch it.
+- The session sends only the latest command. A `show` that it did not send yet is replaced by the next `show` or `close`.
+- The driver checks the surface generation again after the encoding. A resize during the encoding gives the viewport-change error and sends no `show`.
+- `applied` with the pending ID resolves the frame. Its natural size must equal the image size; otherwise `present` gives `Platform`. An `error` with the pending ID gives `Platform` with the client message. Messages with other IDs are late and change nothing. An `applied` with a negative or non-finite layout size ends the session with close code 4003.
+- A geometry change resolves the pending frame with the viewport-change error. The end of the session resolves it with `Disconnected`.
+- `close` sends `close` to the client, releases the PNG and removes the pending registration.
+- The layout size of the last matching `applied` stays in the client state until the next geometry change. `query` and `open` use it for `pixel_exact`.
+
+The status line names the frame ID, format and surface size, then the mode description. It adds "Pixel-exact layout" for `pixel_exact = Yes`, then the warnings of the open and frame checks with the state after `applied`, and the PNG clipping.
+
 ### Mapping to `ModeSettings`
 
 - `hdr_on`: `dynamicRange == "high"`, and `Some(false)` for an SDR-only engine. See [Graphics path](#graphics-path).
@@ -228,7 +257,7 @@ Settings before a measurement on an iPad:
 
 Tests and pass criteria are in [Output verification](testing.md): [browser unit tests](testing.md#browser-output), [browser integration](testing.md#browser-integration), and [physical output criteria](testing.md#pass-criteria). Use a probe for the remote display; a capture on the server does not test it.
 
-Service unit tests (`nitpick-browser`, `service_tests.rs`) cover start, loopback default, bind failures, the embedded page, event order on a Rust executor and bounded shutdown. They also run WebSocket authentication over real HTTP with a `tokio-tungstenite` client: `409`, `429`, `401`, `no-store`, revocation on close and the message size limit. Session unit tests (`session_tests.rs`) use a mock transport and the paused Tokio clock. They cover leading-zero and fixed codes, wrong and out-of-order messages, the 60 s timeout, the lock steps, the one-session reservation, token checks, revocation and reconnect. They also cover `hello` caching, invalid `hello`, the event order on resize and a new display ID for each session. Client unit tests (`client_tests.rs`) cover `hello` validation, display-pixel rounding, the user-agent rules, the capability and mode report, the pixel-mapping rules and the surface geometry. Driver unit tests (`driver_tests.rs`) cover `displays`, `query` and `open` from cached state, disconnect, warnings, and stale, closed or mismatched surfaces in `present` on the first poll. PNG unit tests (`encode_tests.rs`) cover samples, clipping and the cICP chunk; they decode with `zune-png` and check chunk CRCs with `crc32fast`, not with the `png` crate. **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
+Service unit tests (`nitpick-browser`, `service_tests.rs`) cover start, loopback default, bind failures, the embedded page, event order on a Rust executor and bounded shutdown. They also run WebSocket authentication over real HTTP with a `tokio-tungstenite` client: `409`, `429`, `401`, `no-store`, revocation on close and the message size limit. Session unit tests (`session_tests.rs`) use a mock transport and the paused Tokio clock. They cover leading-zero and fixed codes, wrong and out-of-order messages, the 60 s timeout, the lock steps, the one-session reservation, token checks, revocation and reconnect. They also cover `hello` caching, invalid `hello`, the event order on resize and a new display ID for each session. For presentation, they cover frame storage and release, the latest-command rule, matching `applied` and `error` IDs, a wrong natural size, the 10 s timeout from `show`, late replies, resize, disconnect, cancellation, `close`, invalid `applied` and frame IDs across sessions. Client unit tests (`client_tests.rs`) cover `hello` validation, display-pixel rounding, the user-agent rules, the capability and mode report, the pixel-mapping rules and the surface geometry. Driver unit tests (`driver_tests.rs`) cover `displays`, `query` and `open` from cached state, disconnect, warnings, and stale, closed or mismatched surfaces in `present` on the first poll. With a session task, a mock transport and injected workers, they cover the status line, `pixel_exact` after `applied`, clipping warnings, late replies and late worker results, a resize during the encoding, the timeout on the server runtime without host polls, resize and disconnect while pending, `close` after cancellation, and service events during the mutable driver borrow. A service test presents a frame over real HTTP and WebSocket, and decodes the fetched PNG with `zune-png`. Worker unit tests (`worker_tests.rs`) cover the job thread, the replacement of a queued job and drop. PNG unit tests (`encode_tests.rs`) cover samples, clipping and the cICP chunk; they decode with `zune-png` and check chunk CRCs with `crc32fast`, not with the `png` crate. **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
 
 ## Future enhancements
 

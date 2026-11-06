@@ -254,6 +254,10 @@ mod session {
 
     /// Plain HTTP/1.1 GET with extra header lines.
     fn request(addr: SocketAddr, path: &str, headers: &[String]) -> String {
+        String::from_utf8(request_bytes(addr, path, headers)).unwrap()
+    }
+
+    fn request_bytes(addr: SocketAddr, path: &str, headers: &[String]) -> Vec<u8> {
         let mut stream = TcpStream::connect(addr).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -265,8 +269,8 @@ mod session {
         }
         head.push_str("\r\n");
         stream.write_all(head.as_bytes()).unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
         response
     }
 
@@ -389,6 +393,9 @@ mod session {
             (ws, reply["token"].as_str().unwrap().to_owned())
         };
         assert_ne!(new_token, token);
+        // The end of a session releases the frame.
+        assert_eq!(service.hub().frame(1), None);
+        service.hub().set_frame(1, Bytes::from_static(b"PNG test"));
         assert_eq!(status(&request(addr, FRAME_PATH, &auth)), 401);
         let new_auth = [format!("Authorization: Bearer {new_token}")];
         assert_eq!(status(&request(addr, FRAME_PATH, &new_auth)), 200);
@@ -504,5 +511,95 @@ mod session {
             Some(ServiceEvent::Client(ClientState::Disconnected(_)))
         ) {}
         assert_eq!(driver.displays(), []);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn frame_is_presented_over_http() {
+        use std::io::Cursor;
+
+        use nitpick_core::driver::{Frame, OutputDriver};
+        use nitpick_core::image::Image;
+        use nitpick_core::signal::{BitDepth, Encoding, Format, Rgb};
+        use zune_png::PngDecoder;
+        use zune_png::zune_core::result::DecodingResult;
+
+        use crate::driver::BrowserDriver;
+        use crate::test_support::hello_with;
+
+        let (service, mut events) = start_fixed();
+        let addr = service.local_addr();
+        let mut driver = BrowserDriver::new(&service);
+        let (mut ws, token) = authenticate(addr).await;
+        send_json(
+            &mut ws,
+            &hello_with(&[
+                ("viewport.width", Some(json!(8))),
+                ("viewport.height", Some(json!(4))),
+                ("pixelRatio", Some(json!(1))),
+            ]),
+        )
+        .await;
+        let display = loop {
+            if let ServiceEvent::Client(ClientState::Ready(d)) = events.next().await.unwrap() {
+                break d;
+            }
+        };
+        let surface = driver.open(&display, BitDepth::Ten).unwrap();
+        assert_eq!(surface.size, (8, 4));
+        let image = Image::new(
+            8,
+            4,
+            Rgb {
+                r: 940,
+                g: 64,
+                b: 502,
+            },
+        );
+        let frame = Frame {
+            image: &image,
+            format: Format::new(Encoding::PqNarrow, BitDepth::Ten),
+            metadata: None,
+        };
+
+        let client = async {
+            let show = next_json(&mut ws).await;
+            assert_eq!(show["type"], "show");
+            assert_eq!(
+                (show["width"].clone(), show["height"].clone()),
+                (json!(8), json!(4))
+            );
+            let id = show["id"].as_u64().unwrap();
+            let response = request_bytes(
+                addr,
+                &format!("/api/v1/frame/{id}.png"),
+                &[format!("Authorization: Bearer {token}")],
+            );
+            let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            let head = String::from_utf8_lossy(&response[..split]).into_owned();
+            assert_eq!(status(&head), 200, "{head}");
+            let mut decoder = PngDecoder::new(Cursor::new(&response[split + 4..]));
+            let DecodingResult::U16(samples) = decoder.decode().unwrap() else {
+                panic!("expected 16-bit samples");
+            };
+            assert_eq!(decoder.dimensions(), Some((8, 4)));
+            // Narrow peak, narrow black and a mid code (see `png_sample`).
+            assert_eq!(&samples[..3], &[65535, 0, 32768]);
+            send_json(
+                &mut ws,
+                &json!({"type": "applied", "id": id, "naturalWidth": 8, "naturalHeight": 4,
+                        "layoutWidth": 8, "layoutHeight": 4}),
+            )
+            .await;
+        };
+        let (status_line, ()) = tokio::join!(driver.present(&surface, &frame), client);
+        let status_line = status_line.unwrap();
+        assert!(status_line.contains("Pixel-exact layout"), "{status_line}");
+        assert_eq!(
+            driver.query(&display).unwrap().capabilities.pixel_exact,
+            nitpick_core::driver::Support::Yes
+        );
+
+        driver.close(&display);
+        assert_eq!(next_json(&mut ws).await, json!({"type": "close"}));
     }
 }

@@ -2,25 +2,29 @@
 //! `doc/design/output_driver/browser.md`.
 //!
 //! `displays`, `query` and `open` read the client state that the session
-//! cached from `hello`; they never wait for the client.
+//! cached from `hello`; they never wait for the client. `present` encodes
+//! on a worker, stores the PNG in the session hub and awaits the matching
+//! `applied` through a oneshot channel. The session task on the server
+//! runtime runs the acknowledgement timeout and wakes the host task.
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use nitpick_core::driver::{
-    DisplayId, DisplayInfo, Frame, OutputDriver, OutputError, PresentFuture, Query, Surface,
-    check_open,
+    DisplayId, DisplayInfo, Frame, OutputDriver, OutputError, PresentFuture, Query, Support,
+    Surface, check_frame, check_open,
 };
 use nitpick_core::signal::BitDepth;
+use tokio::sync::oneshot;
 
-use crate::client::ClientRecord;
+use crate::client::{ClientRecord, VIEWPORT_CHANGED};
+use crate::encode::encode_frame;
 use crate::service::BrowserService;
 use crate::session::SessionHub;
+use crate::worker::{EncodeWorker, Workers};
 
 /// [`DisplayId::driver`] of browser clients.
 pub const DRIVER: &str = "browser";
-
-/// Stale-surface reason for the status line.
-const VIEWPORT_CHANGED: &str = "the browser viewport changed; open the surface again";
 
 #[derive(Debug)]
 struct Opened {
@@ -29,41 +33,58 @@ struct Opened {
     size: (usize, usize),
     /// [`ClientRecord::generation`] at `open`.
     generation: u64,
-    #[allow(dead_code)] // For the presentation status.
-    warnings: Vec<String>,
 }
 
 /// Browser output driver. It shares the session state with the service;
 /// the host keeps the [`BrowserService`] and its event receiver separately.
 #[derive(Debug)]
-pub struct BrowserDriver {
+pub struct BrowserDriver<J = EncodeWorker> {
     hub: Arc<SessionHub>,
+    workers: J,
     opened: Option<Opened>,
 }
 
 impl BrowserDriver {
     #[must_use]
     pub fn new(service: &BrowserService) -> Self {
-        Self::with_hub(Arc::clone(service.hub()))
-    }
-
-    pub(crate) fn with_hub(hub: Arc<SessionHub>) -> Self {
-        Self { hub, opened: None }
-    }
-
-    /// The cached state of `display`.
-    ///
-    /// # Errors
-    /// `Disconnected` if no client with a valid `hello` has this ID.
-    fn client(&self, display: &DisplayId) -> Result<ClientRecord, OutputError> {
-        self.hub
-            .client()
-            .filter(|c| c.display == *display)
-            .ok_or(OutputError::Disconnected)
+        Self::with_hub(Arc::clone(service.hub()), EncodeWorker::default())
     }
 }
 
-impl OutputDriver for BrowserDriver {
+impl<J: Workers> BrowserDriver<J> {
+    pub(crate) fn with_hub(hub: Arc<SessionHub>, workers: J) -> Self {
+        Self {
+            hub,
+            workers,
+            opened: None,
+        }
+    }
+}
+
+/// The cached state of `display`.
+///
+/// # Errors
+/// `Disconnected` if no client with a valid `hello` has this ID.
+fn client(hub: &SessionHub, display: &DisplayId) -> Result<ClientRecord, OutputError> {
+    hub.client()
+        .filter(|c| c.display == *display)
+        .ok_or(OutputError::Disconnected)
+}
+
+/// Removes the pending registration when the `present` future completes
+/// or is dropped.
+struct Registration<'a> {
+    hub: &'a SessionHub,
+    id: u64,
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        self.hub.cancel(self.id);
+    }
+}
+
+impl<J: Workers> OutputDriver for BrowserDriver<J> {
     fn id(&self) -> &'static str {
         DRIVER
     }
@@ -81,12 +102,12 @@ impl OutputDriver for BrowserDriver {
     }
 
     fn query(&mut self, display: &DisplayId) -> Result<Query, OutputError> {
-        Ok(self.client(display)?.hello.query())
+        Ok(client(&self.hub, display)?.query())
     }
 
     fn open(&mut self, display: &DisplayId, depth: BitDepth) -> Result<Surface, OutputError> {
-        let client = self.client(display)?;
-        let mut warnings = check_open(&client.hello.query().capabilities, depth)?;
+        let client = client(&self.hub, display)?;
+        let mut warnings = check_open(&client.query().capabilities, depth)?;
         let size = client.hello.surface_size();
         let mut description = format!("16-bit PNG, {}×{} display px", size.0, size.1);
         if let Some(sdr) = client.hello.sdr_reason() {
@@ -104,7 +125,6 @@ impl OutputDriver for BrowserDriver {
             depth,
             size,
             generation: client.generation,
-            warnings,
         });
         Ok(Surface {
             display: display.clone(),
@@ -115,14 +135,18 @@ impl OutputDriver for BrowserDriver {
 
     fn present<'a>(&'a mut self, surface: &'a Surface, frame: &'a Frame<'a>) -> PresentFuture<'a> {
         Box::pin(async move {
-            let open = self
-                .opened
+            let Self {
+                hub,
+                workers,
+                opened,
+            } = self;
+            let open = opened
                 .as_ref()
                 .filter(|o| o.display == surface.display && o.size == surface.size)
                 .ok_or(OutputError::Disconnected)?;
             // From the cached state only: a stale surface fails without a
             // network wait.
-            let client = self.client(&open.display)?;
+            let client = client(hub, &open.display)?;
             if client.generation != open.generation {
                 return Err(OutputError::Platform(VIEWPORT_CHANGED.into()));
             }
@@ -137,8 +161,65 @@ impl OutputDriver for BrowserDriver {
                     "image size differs from the surface size".into(),
                 ));
             }
-            Err(OutputError::Platform(
-                "browser presentation is not implemented".into(),
+            // Rejects the frame before the encoding; the status repeats the
+            // check with the state after `applied`.
+            check_frame(&client.query().capabilities, frame.format, frame.metadata)?;
+
+            // The job owns copies. Dropping the future drops the receiver;
+            // the job then skips or discards its result.
+            let (tx, rx) = oneshot::channel();
+            let (image, format, request) =
+                (frame.image.clone(), frame.format, frame.metadata.copied());
+            workers.spawn(Box::new(move || {
+                if !tx.is_closed() {
+                    let _ = tx.send(encode_frame(&image, format, request.as_ref()));
+                }
+            }));
+            let encoded = rx
+                .await
+                .map_err(|_| OutputError::Platform("the PNG encoding worker stopped".into()))??;
+
+            // `submit` checks the generation again: the client can resize
+            // during encoding.
+            let (id, reply) = hub.submit(
+                &open.display,
+                open.generation,
+                open.size,
+                Bytes::from(encoded.bytes),
+            )?;
+            let _registration = Registration { hub, id };
+            // A dropped sender: a newer frame replaced this one.
+            let layout = reply.await.map_err(|_| OutputError::Disconnected)??;
+            // The mode can change during the wait without a new surface.
+            let client = hub
+                .client()
+                .filter(|c| c.display == open.display)
+                .unwrap_or(client);
+
+            let mut caps = client.query().capabilities;
+            caps.pixel_exact = client.hello.pixel_exact(Some(layout));
+            let mut warnings = check_open(&caps, open.depth)?;
+            warnings.extend(check_frame(&caps, frame.format, frame.metadata)?);
+            warnings.extend(encoded.clipping.warning());
+            let pixel = if caps.pixel_exact == Support::Yes {
+                " Pixel-exact layout."
+            } else {
+                ""
+            };
+            let warnings = if warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" Warnings: {}.", warnings.join("; "))
+            };
+            // The mode description has the SDR preview and full-screen
+            // warnings; the open description is not reused, because its
+            // pixel-exact state predates `applied`.
+            Ok(format!(
+                "Frame {id} applied by the client: {}, 16-bit PNG, {}×{} display px. {}.{pixel}{warnings}",
+                frame.format,
+                open.size.0,
+                open.size.1,
+                client.query().mode.description
             ))
         })
     }
@@ -146,6 +227,7 @@ impl OutputDriver for BrowserDriver {
     fn close(&mut self, display: &DisplayId) {
         if self.opened.as_ref().is_some_and(|o| o.display == *display) {
             self.opened = None;
+            self.hub.close(display);
         }
     }
 }
