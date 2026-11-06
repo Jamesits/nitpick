@@ -23,19 +23,6 @@ TODO:
 
 - In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
-### 19. Encode browser PNG samples and colour tags
-
-Requires: 18.
-
-Open questions:
-
-- Does the selected `png` version expose the required colour and metadata chunks? Qualify its APIs; use `Writer::write_chunk` where needed.
-
-TODO:
-
-- Implement 16-bit RGB conversion and cICP output from [Code to PNG sample](../design/output_driver/browser.md#code-to-png-sample). Return clipping information with the encoded frame.
-- Decode with an independent reader. Check every scalar code at both depths, inverse mapping in the nominal range, endpoint clipping, dimensions and channel order. Parse chunk placement and CRC independently. HLG must keep its HLG tag, with no competing colour tag.
-
 ### 20. Encode browser metadata from stored samples
 
 Requires: 19.

@@ -82,7 +82,10 @@ impl std::error::Error for CodeRangeError {}
 /// Rejects the first pixel (in row-major order) with a code above the
 /// maximum of `depth`. Masking or clamping would put a different code on
 /// the wire without notice.
-fn check_codes(img: &Image, depth: BitDepth) -> Result<(), CodeRangeError> {
+///
+/// # Errors
+/// The first pixel with a code above the maximum of `depth`.
+pub fn check_codes(img: &Image, depth: BitDepth) -> Result<(), CodeRangeError> {
     let max = depth.max_code();
     match img.pixels().iter().position(|c| c.max_component() > max) {
         None => Ok(()),

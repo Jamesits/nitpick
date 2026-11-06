@@ -11,7 +11,12 @@ description = "Browser output driver and HTTP/WebSocket service for nitpick"
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 nitpick-core = { path = "../nitpick-core" }
+png = "0.18.1"
 tokio = { version = "1.54.1", features = ["macros", "net", "rt", "sync", "time"] }
+
+[dev-dependencies]
+crc32fast = "1.5.4"
+zune-png = "0.5.2"
 
 [lints]
 workspace = true
