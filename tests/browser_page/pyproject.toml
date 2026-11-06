@@ -2,7 +2,7 @@
 name = "nitpick-browser-page"
 version = "1.0.0"
 description = "Real-browser checks of the nitpick browser client page"
-requires-python = "==3.13.*"
+requires-python = "==3.15.*"
 dependencies = []
 
 [dependency-groups]
