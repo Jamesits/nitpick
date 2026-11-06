@@ -129,6 +129,14 @@ fn main() {
             println!("cargo::rustc-link-lib=framework=QuartzCore");
             println!("cargo::rustc-link-lib=framework=AppKit");
         }
+        "linux" => {
+            // The window code uses Qt private API, so the binary must load the
+            // Qt of its headers, not a different system Qt.
+            println!(
+                "cargo::rustc-link-arg=-Wl,-rpath,{}",
+                qmake_query("QT_INSTALL_LIBS")
+            );
+        }
         _ => {}
     }
 }

@@ -53,8 +53,23 @@ cargo make package
 
 ### Linux
 
-Requirements: TBD
+Requirements:
 
-Development build: TBD
+- GCC or Clang
+- Vulkan headers (`libvulkan-dev` on Debian and Ubuntu)
+- Qt 6.12 with private headers and Qt Shader Tools. The binary must use the Qt of its headers. If the distribution has a different Qt version, install Qt with [aqtinstall](https://github.com/miurahr/aqtinstall):
+
+```sh
+uvx --from aqtinstall aqt install-qt linux desktop 6.12.0 linux_gcc_64 -m qtshadertools -O ~/Qt
+```
+
+Development build:
+
+```sh
+export QMAKE=~/Qt/6.12.0/gcc_64/bin/qmake
+cargo run -p nitpick-app
+```
+
+The binary finds the Qt libraries through its run path. The build warning "Neither mold, lld, nor gold linkers were found" has no effect: Rust links with its own `rust-lld`.
 
 Packaging for release: TBD

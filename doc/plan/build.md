@@ -8,10 +8,6 @@ Test if the package works on a Windows device without the development environmen
 
 ## Linux
 
-### 2. Build and run on Linux
-
-Build on a distribution with Qt 6.12 private headers and Vulkan headers. Fix compile errors in `pattern_window.cpp`.
-
 ### 3. Clean Install Test
 
 Test if the package works on a Linux device without the development environment.

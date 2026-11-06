@@ -37,7 +37,11 @@ TODO:
 
 ### 4. Verify pattern and HDR10 metadata
 
-- Run on a Wayland compositor with HDR (for example KDE Plasma 6). Done when both swap chains show both patterns and the metadata status shows "HDR10 metadata".
+Open questions:
+- Which Linux compositor gives the FP16 swap chain? GNOME 50 does not, see [Swap chain output](../design/output_driver/qt.md#swap-chain-output).
+
+TODO:
+- Run on a Wayland compositor with HDR (for example KDE Plasma 6) and an HDR display. Done when both swap chains show both patterns and the metadata status shows "HDR10 metadata".
 
 
 ## macOS

@@ -44,7 +44,7 @@ namespace {
 
 using nitpick::HdrMetadata;
 
-// Time for the compositor to map and expose the full-screen window.
+// Time for the compositor to map the window and apply the full-screen state.
 constexpr int kInitTimeoutMs = 5000;
 
 template <typename... Args> std::string sformat(const char *fmt, Args... args) {
@@ -136,8 +136,9 @@ std::string describeOutput(IDXGIOutput6 *output) {
 #elif !defined(Q_OS_MACOS)
 
 // Created once and never destroyed: windows that use it may live until the
-// application exits.
-QVulkanInstance *vulkanInstance() {
+// application exits. Not named `vulkanInstance`: inside a QWindow subclass
+// that name finds QWindow::vulkanInstance(), which returns null here.
+QVulkanInstance *sharedVulkanInstance() {
     static QVulkanInstance *instance = [] {
         auto *inst = new QVulkanInstance;
         // Includes VK_EXT_swapchain_colorspace, which HDR swap chains need.
@@ -177,7 +178,8 @@ QSize screenPatternSize(QScreen *screen) {
 // external scope verifies.
 class PatternWindow final : public QWindow {
 public:
-    PatternWindow(QScreen *screen, bool fp16) : m_fp16(fp16) {
+    PatternWindow(QScreen *screen, bool fp16)
+        : m_fp16(fp16), m_expectedSize(screenPatternSize(screen)) {
 #if defined(Q_OS_WIN)
         setSurfaceType(QSurface::Direct3DSurface);
         findOutput(monitorOf(screen), m_adapter, m_output);
@@ -185,7 +187,7 @@ public:
         setSurfaceType(QSurface::MetalSurface);
 #else
         setSurfaceType(QSurface::VulkanSurface);
-        setVulkanInstance(vulkanInstance());
+        setVulkanInstance(sharedVulkanInstance());
 #endif
         setFlags(Qt::Window | Qt::FramelessWindowHint);
         setScreen(screen);
@@ -194,14 +196,17 @@ public:
         setTitle(QStringLiteral("nitpick pattern"));
     }
 
-    // Blocks until the first expose has created the swap chain.
+    // Blocks until the swap chain exists and the pattern area has the size of
+    // the reference table. GNOME on Wayland first exposes the window at the
+    // work-area size and applies the full-screen state later. After the
+    // timeout, a swap chain of a different size is used; describe() warns.
     void waitUntilReady() {
-        if (!m_ready && m_error.empty()) {
+        if (!settled() && m_error.empty()) {
             QEventLoop loop;
-            m_onInit = [&loop] { loop.quit(); };
+            m_onSettled = [&loop] { loop.quit(); };
             QTimer::singleShot(kInitTimeoutMs, &loop, &QEventLoop::quit);
             loop.exec(QEventLoop::ExcludeUserInputEvents);
-            m_onInit = nullptr;
+            m_onSettled = nullptr;
         }
         if (!m_error.empty()) {
             throw std::runtime_error(m_error);
@@ -227,6 +232,10 @@ public:
         s += " (" + std::string(m_rhi->backendName()) + ")";
 #if defined(Q_OS_WIN)
         s += "; " + describeOutput(m_output.Get());
+#elif !defined(Q_OS_MACOS)
+        // Qt's Vulkan hdrInfo() queries the display only on Windows. Elsewhere
+        // it returns the fixed QRhiSwapChain defaults (0 to 1000 cd/m²).
+        s += "; display luminance and HDR state unknown";
 #else
         const QRhiSwapChainHdrInfo i = m_sc->hdrInfo();
         if (i.limitsType == QRhiSwapChainHdrInfo::LuminanceInNits) {
@@ -238,7 +247,7 @@ public:
                         i.limits.colorComponentValue.maxPotentialColorComponentValue);
         }
 #endif
-        if (patternArea().size() != screenPatternSize(screen())) {
+        if (patternArea().size() != m_expectedSize) {
             s += "; WARNING: the pattern area differs from the screen size of the reference table";
         }
         return s;
@@ -301,13 +310,11 @@ protected:
             } catch (const std::exception &e) {
                 m_error = e.what();
             }
-            if (m_onInit) {
-                m_onInit();
-            }
         }
         if (m_ready) {
             render();
         }
+        notifyIfSettled();
     }
 
     bool event(QEvent *e) override {
@@ -316,6 +323,7 @@ protected:
             if (m_ready) {
                 render();
             }
+            notifyIfSettled();
             return true;
         case QEvent::PlatformSurface:
             // The swap chain must go before the native surface.
@@ -347,6 +355,14 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *) override { deleteLater(); }
 
 private:
+    bool settled() const { return m_ready && patternArea().size() == m_expectedSize; }
+
+    void notifyIfSettled() {
+        if (m_onSettled && (!m_error.empty() || settled())) {
+            m_onSettled();
+        }
+    }
+
     void init() {
 #if defined(Q_OS_WIN)
         QRhiD3D11InitParams params;
@@ -359,7 +375,7 @@ private:
         m_rhi.reset(QRhi::create(QRhi::Metal, &params));
 #else
         QRhiVulkanInitParams params;
-        params.inst = vulkanInstance();
+        params.inst = sharedVulkanInstance();
         params.window = this;
         // Unsupported device extensions are ignored; applyMetadata checks.
         params.deviceExtensions = {"VK_EXT_hdr_metadata"};
@@ -468,7 +484,7 @@ private:
 #else
         const auto *handles = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles());
         auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-            vulkanInstance()->getInstanceProcAddr("vkGetDeviceProcAddr"));
+            sharedVulkanInstance()->getInstanceProcAddr("vkGetDeviceProcAddr"));
         auto setHdrMetadata =
             getDeviceProcAddr ? reinterpret_cast<PFN_vkSetHdrMetadataEXT>(
                                     getDeviceProcAddr(handles->dev, "vkSetHdrMetadataEXT"))
@@ -495,9 +511,11 @@ private:
     }
 
     bool m_fp16;
+    // Pattern area size of the reference table, see screenPatternSize().
+    QSize m_expectedSize;
     bool m_ready = false;
     std::string m_error;
-    std::function<void()> m_onInit;
+    std::function<void()> m_onSettled;
     QByteArray m_pending;
 #if defined(Q_OS_WIN)
     LUID m_adapter{};
