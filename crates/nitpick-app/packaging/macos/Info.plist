@@ -1,14 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- package.sh sets the versions and adds LSMinimumSystemVersion. -->
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
     <string>nitpick</string>
-    <!-- The identity of macOS privacy permissions (for example Screen
-         Recording); changing it later resets them. -->
     <key>CFBundleIdentifier</key>
-    <string>org.nitpick.nitpick</string>
+    <string>com.nekomimirouter.nitpick</string>
     <key>CFBundleName</key>
     <string>nitpick</string>
     <key>CFBundlePackageType</key>

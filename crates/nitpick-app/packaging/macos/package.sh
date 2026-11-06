@@ -1,8 +1,5 @@
 #!/bin/bash
-# Self-contained macOS app bundle and zip archive (macdeployqt). Run by
-# `cargo make package` after the release build. Output: <target>/dist/nitpick.app
-# and <target>/dist/nitpick-<version>-macos-<arch>.zip. The bundle is ad-hoc
-# signed and not notarized. Compatible with the bash 3.2 of macOS.
+# Self-contained macOS app bundle and zip archive (macdeployqt).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 QMAKE="${QMAKE:-qmake}"
@@ -16,7 +13,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$TARGET/release/nitpick" "$APP/Contents/MacOS/nitpick"
 
-# The build rpath points at the Qt installation. If it stays, a Mac with the
+# Remove the build rpath points at the Qt installation. If it stays, a Mac with the
 # same Qt loads that Qt instead of the bundled one, which hides missing files.
 EXE="$APP/Contents/MacOS/nitpick"
 for RPATH in $(otool -l "$EXE" | awk '/cmd LC_RPATH/ {getline; getline; print $2}'); do
@@ -34,9 +31,8 @@ plutil -replace CFBundleVersion -string "$VERSION" "$PLIST"
 # Info.plist still changes.
 "$QT_BIN/macdeployqt" "$APP" -qmldir="$HERE/../../qml" -libpath="$QT_LIBS" -no-codesign
 
-# `otool -L` also lists the install name of a library itself; it does not
-# affect loading, so it is skipped.
 deps() {
+    # skips the install name of a library itself
     ID=$(otool -D "$1" 2>/dev/null | tail -n +2)
     otool -L "$1" 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -vxF "${ID:-//}" || true
 }

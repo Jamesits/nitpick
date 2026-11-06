@@ -1,7 +1,6 @@
-# Self-contained Windows folder and zip archive (windeployqt). Run by
-# `cargo make package` after the release build. Output:
-# <target>/dist/nitpick/ and <target>/dist/nitpick-<version>-windows-x64.zip.
+# Self-contained Windows folder and zip archive (windeployqt).
 $ErrorActionPreference = "Stop"
+
 $QMAKE = if ($env:QMAKE) { $env:QMAKE } else { "qmake" }
 $QT_BIN = & $QMAKE -query QT_INSTALL_BINS
 $QML = Join-Path $PSScriptRoot "../../qml"

@@ -49,8 +49,6 @@ cargo install cargo-make
 cargo make package
 ```
 
-The package is ad-hoc signed and not notarized; on another Mac, Gatekeeper blocks it until the user allows it in System Settings > Privacy & Security. Homebrew builds Qt for the installed macOS version, so the package needs that major macOS version or later (`LSMinimumSystemVersion` in `Info.plist`). For older macOS versions, package with the Qt online installer build.
-
 ### Linux
 
 Requirements: TBD
