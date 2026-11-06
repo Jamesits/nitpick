@@ -35,6 +35,7 @@ Requirements:
 
 ## Code
 - Write modular and reproducible code
+- When adding external dependencies, DO check and use the latest version where feasible
 
 ### Rust
 - DO run clippy and cargo format after each job and fix all lint issues
