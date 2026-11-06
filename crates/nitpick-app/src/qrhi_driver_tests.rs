@@ -54,7 +54,7 @@ pub(crate) struct WindowLog {
     /// `set` or `clear`, in call order, with the number of frames queued
     /// before the call.
     metadata: Vec<(&'static str, usize)>,
-    reject_queue: Option<String>,
+    pub(crate) reject_queue: Option<String>,
 }
 
 #[derive(Clone, Default)]

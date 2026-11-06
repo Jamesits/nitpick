@@ -19,6 +19,8 @@ pub mod qobject {
         /// Changes when new device reports arrive; the reference table
         /// depends on it.
         #[qproperty(i32, device_revision, cxx_name = "deviceRevision")]
+        /// Saved measurement delay in ms; see `saveMeasurementDelay`.
+        #[qproperty(i32, measurement_delay, cxx_name = "measurementDelay")]
         type Launcher = super::LauncherRust;
 
         /// JSON object: `{patterns: [{id, label, description, encodings: [{id, label}]}],
@@ -44,10 +46,16 @@ pub mod qobject {
         #[cxx_name = "refreshDisplays"]
         fn refresh_displays(self: Pin<&mut Self>);
 
+        /// Sets and saves `measurementDelay`. A negative value sets an
+        /// error status and changes nothing.
+        #[qinvokable]
+        #[cxx_name = "saveMeasurementDelay"]
+        fn save_measurement_delay(self: Pin<&mut Self>, ms: i32);
+
         /// Reads the device state of `display` on a worker, renders the
         /// pattern at the pattern area size of a new full-screen window
-        /// and shows it. `metadata` is a JSON object, see
-        /// `request_from_json`. `status` follows each step.
+        /// and shows it, then waits `delay` ms. `metadata` is a JSON
+        /// object, see `request_from_json`. `status` follows each step.
         #[qinvokable]
         #[cxx_name = "showPattern"]
         fn show_pattern(
@@ -57,6 +65,7 @@ pub mod qobject {
             depth: &QString,
             display: &QString,
             metadata: &QString,
+            delay: i32,
         );
     }
 
@@ -75,16 +84,34 @@ use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, D65, Encoding, Format};
 use serde_json::{Value, json};
 
+use crate::delay::delay_from;
 use crate::display;
 use crate::session::{Event, Session, ShowRequest};
+use crate::settings::Settings;
 
-#[derive(Default)]
 pub struct LauncherRust {
     status: QString,
     displays: QString,
     device_revision: i32,
+    measurement_delay: i32,
+    settings: Settings,
     /// Created at the first request, which gives the Qt thread handle.
     session: Option<Session>,
+}
+
+impl Default for LauncherRust {
+    fn default() -> Self {
+        let settings = Settings::native();
+        Self {
+            status: QString::default(),
+            displays: QString::default(),
+            device_revision: 0,
+            // Saved delays fit a Qt timer interval, see `delay_from`.
+            measurement_delay: i32::try_from(settings.measurement_delay_ms()).unwrap_or(i32::MAX),
+            settings,
+            session: None,
+        }
+    }
 }
 
 fn parse(
@@ -215,6 +242,7 @@ impl qobject::Launcher {
         depth: &QString,
         display: &QString,
         metadata: &QString,
+        delay: i32,
     ) {
         let request = parse(pattern, encoding, depth).and_then(|(kind, format)| {
             Ok(ShowRequest {
@@ -222,11 +250,24 @@ impl qobject::Launcher {
                 format,
                 metadata: request_from_json(&metadata.to_string())?,
                 display: display::display_for_key(display.to_string()),
+                delay_ms: delay_from(delay)?,
             })
         });
         match request {
             Ok(r) => self.as_mut().session().show(r),
             Err(e) => self.set_status(QString::from(&format!("Error: {e}"))),
+        }
+    }
+
+    pub fn save_measurement_delay(mut self: Pin<&mut Self>, ms: i32) {
+        let saved = delay_from(ms).and_then(|valid| {
+            self.as_mut().set_measurement_delay(ms);
+            self.settings
+                .set_measurement_delay_ms(valid)
+                .map_err(|e| format!("cannot save the measurement delay: {e}"))
+        });
+        if let Err(e) = saved {
+            self.set_status(QString::from(&format!("Error: {e}")));
         }
     }
 

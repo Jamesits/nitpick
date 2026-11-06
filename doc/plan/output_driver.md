@@ -21,8 +21,7 @@ Requires: 16.
 
 TODO:
 
-- Add the saved delay control, Qt timer and status transitions from [Measurement delay](../design/output_driver/overview.md#measurement-delay). Keep warnings in the ready status.
-- With a controlled clock, verify acknowledgement plus delay, zero delay, negative-input rejection and cancellation. Failed presentation must start no timer. Verify the default and persistence across launcher restart.
+- In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
 ### 18. Add the independent browser service
 

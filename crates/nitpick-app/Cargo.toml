@@ -15,6 +15,7 @@ async-task = "4.7.1"
 cxx = "1.0.176"
 cxx-qt = "0.10.0"
 cxx-qt-lib = { version = "0.10.0", features = ["qt_gui", "qt_qml", "qt_quickcontrols"] }
+dirs = "7.0.0"
 futures-channel = "0.3.34"
 nitpick-core = { path = "../nitpick-core" }
 nitpick-display = { path = "../nitpick-display", features = ["x11"] }
@@ -25,3 +26,6 @@ cxx-qt-build = "0.10.0"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

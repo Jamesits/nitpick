@@ -235,11 +235,32 @@ ApplicationWindow {
                 }
             }
 
+            RowLayout {
+                Layout.fillWidth: true
+
+                Label {
+                    text: qsTr("Measurement delay (ms)")
+                }
+                // The value comes from the saved setting; each change is
+                // saved. The upper limit is a UI choice, not a timer limit.
+                SpinBox {
+                    id: delayBox
+
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 600000
+                    stepSize: 100
+                    editable: true
+                    value: launcher.measurementDelay
+                    onValueModified: launcher.saveMeasurementDelay(value)
+                }
+            }
+
             Button {
                 Layout.fillWidth: true
                 text: qsTr("Show pattern (Esc closes)")
                 onClicked: launcher.showPattern(root.pattern.id, root.encoding.id, root.depth.id,
-                                                root.selectedKey, root.metadataJson())
+                                                root.selectedKey, root.metadataJson(), delayBox.value)
             }
 
             Label {

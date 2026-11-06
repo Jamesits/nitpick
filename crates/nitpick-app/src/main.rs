@@ -1,5 +1,6 @@
 //! nitpick: HDR/WCG test pattern launcher.
 
+mod delay;
 mod display;
 mod gui_executor;
 mod hdr_metadata;
@@ -9,6 +10,7 @@ mod hdr_metadata;
 mod launcher;
 mod qrhi_driver;
 mod session;
+mod settings;
 mod submission;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};

@@ -238,3 +238,34 @@ fn completion_can_register_again() {
     super::closed();
     assert_eq!(*log.borrow(), vec![(id, Err(OutputError::Disconnected))]);
 }
+
+#[test]
+fn close_watch_resolves_at_the_next_close() {
+    let mut s = Submissions::default();
+    let since = s.close_count();
+    let mut rx = s.watch_close(since);
+    assert_eq!(rx.try_recv(), Ok(None));
+    run(s.closed());
+    assert_eq!(rx.try_recv(), Ok(Some(())));
+    assert_eq!(s.close_count(), since + 1);
+}
+
+#[test]
+fn close_watch_after_a_close_resolves_at_once() {
+    let mut s = Submissions::default();
+    let since = s.close_count();
+    run(s.closed());
+    assert_eq!(s.watch_close(since).try_recv(), Ok(Some(())));
+    // A watch from the current count waits.
+    assert_eq!(s.watch_close(s.close_count()).try_recv(), Ok(None));
+}
+
+#[test]
+fn dropped_close_watches_are_released() {
+    let mut s = Submissions::default();
+    for _ in 0..3 {
+        drop(s.watch_close(0));
+    }
+    let _kept = s.watch_close(0);
+    assert_eq!(s.close_watchers.len(), 1);
+}

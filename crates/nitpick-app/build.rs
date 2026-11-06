@@ -103,8 +103,9 @@ fn main() {
     let mut builder =
         CxxQtBuilder::new_qml_module(QmlModule::new("nitpick").qml_file("qml/main.qml"))
             .qt_module("Gui")
-            .files(["src/launcher.rs", "src/display.rs"])
-            .cpp_file("cpp/pattern_window.cpp");
+            .files(["src/launcher.rs", "src/display.rs", "src/delay.rs"])
+            .cpp_file("cpp/pattern_window.cpp")
+            .cpp_file("cpp/delay_timer.cpp");
     if target_os == "macos" {
         builder = builder.cpp_file("cpp/macos.mm");
     }

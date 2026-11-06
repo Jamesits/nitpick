@@ -75,6 +75,7 @@ sequenceDiagram
     W-->>S: device reports
     S->>D: query, open, render at surface size
     S->>D: present (awaited, see below)
+    S->>S: release the driver, measurement delay (Qt timer)
 ```
 
 Rules:
@@ -82,6 +83,12 @@ Rules:
 - The reference table uses the cached report of the selected display and the screen size from `displays`. Before the first report, the table shows the path limits with an unknown display state.
 - A new "Show pattern", a display selection or a screen change drops the pending presentation before the driver is borrowed again. A screen change closes the window if its screen is gone. Statuses go through the Qt event queue in order. A status of an older request does not apply.
 - `open` runs a nested event loop without user input (see above). If a screen change arrives in this loop, the refresh cannot borrow the driver; the launcher posts it again.
+
+Measurement delay (contract: [Measurement delay](overview.md#measurement-delay)):
+- The presentation task waits for the delay after `present` succeeds. It releases the driver borrow first. Dropping the task drops the timer, so the cancellation rules above also cancel the delay.
+- A closed pattern window (Esc) cancels the delay. `submission.rs` counts window closes. The task reads the count after `open`, because `open` closes an earlier window. A close after that count cancels the delay, also if it arrives before the task resumes after the acknowledgement.
+- The timer is a single-shot `Qt::PreciseTimer`. A coarse Qt timer can fire up to 5 % early. Tests replace the timer with a controlled clock.
+- The launcher saves the delay in the `measurementDelayMs` key of `launcher.json` in the OS configuration directory (`dirs::config_dir()/nitpick`). A missing or invalid value gives the default. The file is written to a temporary file and renamed. QSettings was not used, because a JSON file can be tested without a Qt application or a registry.
 
 ### Output report
 

@@ -11,6 +11,7 @@
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
+use futures_channel::oneshot;
 use nitpick_core::driver::OutputError;
 
 /// Unique per process; 0 means "no frame" at the C++ boundary.
@@ -35,6 +36,10 @@ pub struct Submissions {
     queued: Option<FrameId>,
     /// One completion: the driver has at most one pending frame.
     waiter: Option<(FrameId, Completion)>,
+    /// Number of closed windows. The host compares it across the
+    /// measurement delay, when no frame is pending.
+    closes: u64,
+    close_watchers: Vec<oneshot::Sender<()>>,
 }
 
 impl Submissions {
@@ -103,9 +108,32 @@ impl Submissions {
     /// `Disconnected`, also if its frame was not yet queued.
     pub fn closed(&mut self) -> Option<Fired> {
         self.queued = None;
+        self.closes += 1;
+        for watcher in self.close_watchers.drain(..) {
+            // Only wakes the task; it runs from a later event loop pass.
+            let _ = watcher.send(());
+        }
         self.waiter
             .take()
             .map(|(_, done)| (done, Err(OutputError::Disconnected)))
+    }
+
+    /// Resolves at the first window close after `since`, a value of
+    /// [`Self::close_count`]. Already resolved if a window closed since.
+    pub fn watch_close(&mut self, since: u64) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.close_watchers.retain(|w| !w.is_canceled());
+        if self.closes == since {
+            self.close_watchers.push(tx);
+        } else {
+            let _ = tx.send(());
+        }
+        rx
+    }
+
+    #[must_use]
+    pub fn close_count(&self) -> u64 {
+        self.closes
     }
 
     fn resolve(&mut self, id: FrameId, result: Result<(), OutputError>) -> Option<Fired> {
@@ -195,6 +223,16 @@ pub fn timed_out(id: FrameId) {
 
 pub fn closed() {
     fire(Submissions::closed);
+}
+
+pub fn close_count() -> u64 {
+    with(|s| s.close_count())
+}
+
+/// See [`Submissions::watch_close`]. During thread-local teardown, the
+/// receiver resolves with `Canceled`.
+pub fn watch_close(since: u64) -> oneshot::Receiver<()> {
+    with(|s| Some(s.watch_close(since))).unwrap_or_else(|| oneshot::channel().1)
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ use nitpick_core::pattern::{MIN_SIZE, PatternKind};
 use nitpick_core::signal::{BitDepth, Encoding, Format};
 
 use super::{Busy, DeviceReader, Event, Session, ShowRequest};
+use crate::delay::DelayTimer;
 use crate::display::{Backend, DeviceReports, display_for_key, ffi};
 use crate::qrhi_driver::Job;
 use crate::qrhi_driver::tests::{ChannelPost, FakeWindow, HeldWorkers, id, identity};
@@ -38,11 +39,38 @@ impl HeldReader {
     }
 }
 
+type Timer = (u32, oneshot::Sender<()>);
+
+/// Controlled clock: timers expire only when the test fires them.
+#[derive(Clone, Default)]
+struct HeldTimer(Rc<RefCell<Vec<Timer>>>);
+
+impl DelayTimer for HeldTimer {
+    fn start(&self, ms: u32) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.0.borrow_mut().push((ms, tx));
+        rx
+    }
+}
+
+impl HeldTimer {
+    fn started(&self) -> Vec<u32> {
+        self.0.borrow().iter().map(|(ms, _)| *ms).collect()
+    }
+
+    /// Expires the oldest timer. `false` if it was cancelled.
+    fn fire(&self) -> bool {
+        let (_, tx) = self.0.borrow_mut().remove(0);
+        tx.send(()).is_ok()
+    }
+}
+
 struct Setup {
     session: Session<FakeWindow, HeldWorkers>,
     window: FakeWindow,
     workers: HeldWorkers,
     reader: HeldReader,
+    timer: HeldTimer,
     events: Rc<RefCell<Vec<Event>>>,
     /// The posted jobs, in place of the Qt event loop.
     jobs: mpsc::Receiver<Job>,
@@ -87,6 +115,7 @@ fn setup() -> Setup {
     window.0.borrow_mut().size = Some(MIN_SIZE);
     let workers = HeldWorkers::default();
     let reader = HeldReader::default();
+    let timer = HeldTimer::default();
     let events = Rc::new(RefCell::new(Vec::new()));
     let (tx, jobs) = mpsc::channel();
     let log = Rc::clone(&events);
@@ -95,6 +124,7 @@ fn setup() -> Setup {
         window.clone(),
         workers.clone(),
         Box::new(reader.clone()),
+        Rc::new(timer.clone()),
         Arc::new(ChannelPost(Mutex::new(tx))),
         move |e| log.borrow_mut().push(e),
     );
@@ -103,6 +133,7 @@ fn setup() -> Setup {
         window,
         workers,
         reader,
+        timer,
         events,
         jobs,
     }
@@ -114,7 +145,23 @@ fn request(screen: i32) -> ShowRequest {
         format: Format::new(Encoding::PqFull, BitDepth::Ten),
         metadata: None::<Hdr10Request>,
         display: id(screen),
+        delay_ms: 0,
     }
+}
+
+fn delayed(screen: i32, delay_ms: u32) -> ShowRequest {
+    ShowRequest {
+        delay_ms,
+        ..request(screen)
+    }
+}
+
+/// Acknowledges the held submission.
+fn acknowledge(s: &Setup) {
+    s.workers.take()();
+    s.pass();
+    submission::ended(submission::take_upload(), "");
+    s.pass();
 }
 
 /// Shows a pattern on screen 1 up to the held conversion.
@@ -201,7 +248,7 @@ fn show_reads_devices_before_query_and_open() {
     assert_eq!(status.len(), 1);
     assert!(
         status[0].starts_with(&format!(
-            "PQ grayscale / brightness ({}) at {}x{}",
+            "Ready after delay: 0 ms. PQ grayscale / brightness ({}) at {}x{}",
             request(1).format,
             MIN_SIZE.0,
             MIN_SIZE.1
@@ -357,4 +404,173 @@ fn identities_go_to_the_reader() {
     s.session.show(request(1));
     let (screens, _) = s.reader.take();
     assert_eq!(screens, vec![identity(0), identity(1)]);
+}
+
+#[test]
+fn ready_after_acknowledgement_plus_delay() {
+    let mut s = setup();
+    s.session.show(delayed(1, 1500));
+    s.pass();
+    s.reply();
+    s.pass();
+    s.take_events();
+    acknowledge(&s);
+    let status = s.statuses();
+    assert_eq!(status.len(), 1);
+    assert!(
+        status[0].starts_with("Waiting for measurement delay: 1500 ms. PQ grayscale"),
+        "{status:?}"
+    );
+    assert_eq!(s.timer.started(), vec![1500]);
+    // The event loop keeps running; the driver is free during the delay.
+    s.pass();
+    assert_eq!(s.statuses().len(), 0);
+    assert!(s.session.driver().try_borrow_mut().is_ok());
+
+    assert!(s.timer.fire());
+    s.pass();
+    let ready = s.statuses();
+    assert_eq!(ready.len(), 1);
+    assert!(
+        ready[0].starts_with("Ready after delay: 1500 ms. PQ grayscale"),
+        "{ready:?}"
+    );
+    // The driver warnings stay in the ready status.
+    assert!(
+        ready[0].contains("display state unknown: unmapped"),
+        "{ready:?}"
+    );
+    assert!(ready[0].ends_with("Esc closes the pattern."));
+}
+
+#[test]
+fn zero_delay_is_ready_without_a_timer() {
+    let mut s = setup();
+    s.session.show(delayed(1, 0));
+    s.reply();
+    s.pass();
+    s.take_events();
+    acknowledge(&s);
+    let status = s.statuses();
+    assert_eq!(status.len(), 1);
+    assert!(
+        status[0].starts_with("Ready after delay: 0 ms. "),
+        "{status:?}"
+    );
+    assert_eq!(s.timer.started(), Vec::<u32>::new());
+}
+
+#[test]
+fn failed_presentation_starts_no_timer() {
+    let mut s = setup();
+    s.window.0.borrow_mut().reject_queue = Some("queue failed".into());
+    s.session.show(delayed(1, 1000));
+    s.reply();
+    s.pass();
+    s.workers.take()();
+    s.pass();
+    assert!(s.statuses().last().unwrap().starts_with("Error: "));
+    assert_eq!(s.timer.started(), Vec::<u32>::new());
+
+    // A failed acknowledgement.
+    s.window.0.borrow_mut().reject_queue = None;
+    s.session.show(delayed(1, 1000));
+    s.reply();
+    s.pass();
+    s.workers.take()();
+    s.pass();
+    submission::ended(submission::take_upload(), "endFrame failed");
+    s.pass();
+    assert!(s.statuses().last().unwrap().starts_with("Error: "));
+    assert_eq!(s.timer.started(), Vec::<u32>::new());
+}
+
+#[test]
+fn a_new_frame_cancels_the_old_timer() {
+    let mut s = setup();
+    s.session.show(delayed(1, 1000));
+    s.reply();
+    s.pass();
+    acknowledge(&s);
+    s.take_events();
+    s.session.show(delayed(1, 2000));
+    s.take_events();
+    // The old timer belongs to the dropped task.
+    assert!(!s.timer.fire());
+    s.pass();
+    assert_eq!(s.statuses().len(), 0);
+
+    s.reply();
+    s.pass();
+    acknowledge(&s);
+    s.take_events();
+    assert!(s.timer.fire());
+    s.pass();
+    assert!(s.statuses()[0].starts_with("Ready after delay: 2000 ms. "));
+}
+
+#[test]
+fn a_display_change_cancels_the_delay() {
+    let mut s = setup();
+    s.session.show(delayed(1, 1000));
+    s.reply();
+    s.pass();
+    acknowledge(&s);
+    s.take_events();
+    s.session.refresh().unwrap();
+    assert_eq!(s.statuses(), vec!["Cancelled: display changed"]);
+    assert!(!s.timer.fire());
+    s.pass();
+    assert_eq!(s.statuses().len(), 0);
+}
+
+#[test]
+fn a_closed_window_cancels_the_delay() {
+    let mut s = setup();
+    s.session.show(delayed(1, 1000));
+    s.reply();
+    s.pass();
+    acknowledge(&s);
+    s.take_events();
+    // Esc in the pattern window.
+    submission::closed();
+    s.pass();
+    assert_eq!(s.statuses(), vec!["Cancelled: the pattern window closed"]);
+    assert!(!s.timer.fire());
+    s.pass();
+    assert_eq!(s.statuses().len(), 0);
+}
+
+#[test]
+fn a_close_before_the_task_resumes_cancels_the_delay() {
+    let mut s = setup();
+    s.session.show(delayed(1, 1000));
+    s.reply();
+    s.pass();
+    s.workers.take()();
+    s.pass();
+    s.take_events();
+    // The acknowledgement and the close arrive in one event loop pass.
+    submission::ended(submission::take_upload(), "");
+    submission::closed();
+    s.pass();
+    let status = s.statuses();
+    assert_eq!(status.len(), 2, "{status:?}");
+    assert!(status[0].starts_with("Waiting for measurement delay: "));
+    assert_eq!(status[1], "Cancelled: the pattern window closed");
+}
+
+#[test]
+fn a_close_before_open_does_not_cancel_the_new_delay() {
+    let mut s = setup();
+    s.session.show(delayed(1, 1000));
+    // The old window closes while the device state is read.
+    submission::closed();
+    s.reply();
+    s.pass();
+    acknowledge(&s);
+    s.take_events();
+    assert!(s.timer.fire());
+    s.pass();
+    assert!(s.statuses()[0].starts_with("Ready after delay: 1000 ms. "));
 }
