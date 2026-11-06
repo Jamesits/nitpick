@@ -55,7 +55,7 @@ std::uint32_t displayIdOf(QScreen *screen) {
     }
 }
 
-void setMetalHdrMetadata(QWindow *window, const HdrMetadata &md) {
+void setLayerHdrMetadata(QWindow *window, const MetalHdrMetadata *md) {
     @autoreleasepool {
         // The NSView layer is a container; the CAMetalLayer is its content
         // sublayer. QRhi's Metal swap chain gets the layer the same way.
@@ -66,14 +66,17 @@ void setMetalHdrMetadata(QWindow *window, const HdrMetadata &md) {
         }
         CAMetalLayer *layer = (CAMetalLayer *)content;
         if (@available(macOS 10.15, *)) {
-            NSData *display = [NSData dataWithBytes:md.mastering_display.data()
-                                             length:md.mastering_display.size()];
-            NSData *content = [NSData dataWithBytes:md.content_light_level.data()
-                                             length:md.content_light_level.size()];
-            // 100: linear 1.0 is 100 cd/m², the EDR convention (as in Chromium).
+            if (!md) {
+                layer.EDRMetadata = nil;
+                return;
+            }
+            NSData *display = [NSData dataWithBytes:md->display_info.data()
+                                             length:md->display_info.size()];
+            NSData *contentInfo = [NSData dataWithBytes:md->content_info.data()
+                                                 length:md->content_info.size()];
             layer.EDRMetadata = [CAEDRMetadata HDR10MetadataWithDisplayInfo:display
-                                                                contentInfo:content
-                                                         opticalOutputScale:100.0f];
+                                                                contentInfo:contentInfo
+                                                         opticalOutputScale:md->optical_output_scale];
         } else {
             throw std::runtime_error("HDR10 EDR metadata needs macOS 10.15 or later");
         }

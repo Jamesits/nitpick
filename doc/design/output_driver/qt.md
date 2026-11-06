@@ -8,7 +8,8 @@ The QRhi driver shows test patterns in a borderless full-screen Qt window on a l
 graph LR
     L[launcher.rs] -->|OutputDriver| Q[QrhiDriver<br/>display.rs]
     Q -->|hdr10_bytes, scrgb_bytes| O[nitpick-core<br/>output]
-    Q -->|screen size, window, pixels, metadata| D[display.rs<br/>cxx bridge]
+    Q -->|screen size, window, pixels| D[display.rs<br/>cxx bridge]
+    Q -->|native metadata| M[hdr_metadata.rs<br/>MetadataSink] --> D
     Q -->|device identity, capabilities, mode| N[nitpick-display<br/>DisplayDeviceControl]
     D --> W[pattern_window.cpp<br/>QWindow + QRhi swap chain]
     W -->|HDR10 or FP16 scRGB| GPU[GPU output] --> Scope[vectorscope]
@@ -21,7 +22,7 @@ Mapping to `OutputDriver`:
 | `displays` | Map Qt screens to native devices from `DisplayDeviceControl`; get window pixel geometry from Qt |
 | `query` | Combine the refreshed native device report with QRhi path support and conversion limits; report a remapped path, such as an FP16 path without a known luminance scale, as `Unknown` |
 | `open` | `openPatternWindow(screen, fp16)`; `fp16` from the bit depth (see [Swap chain output](#swap-chain-output)) |
-| `present` | `presentPattern(pixels, width, height, metadata)`; wait for successful submission of this frame |
+| `present` | Send the [HDR10 static metadata](#hdr10-static-metadata), then `presentPattern(pixels, width, height)`; wait for successful submission of this frame |
 
 The pattern window closes on Esc, Q, Space or a double click.
 
@@ -115,15 +116,20 @@ The `*` marks apply only to this FP16 path. A browser reference table uses its o
 
 ## HDR10 static metadata
 
-The metadata values are in [HDR10 static metadata](../test_patterns.md#hdr10-static-metadata). QRhi has no metadata API. The window sets the metadata on the native swap chain before the first present:
+The metadata values are in [HDR10 static metadata](../test_patterns.md#hdr10-static-metadata). QRhi has no metadata API. The adapter sets the metadata on the native swap chain before it presents the frame:
 
-| Platform | Call | Access to the native swap chain |
-|---|---|---|
-| Windows | `IDXGISwapChain4::SetHDRMetaData` | Qt private header `qrhid3d11_p.h` (`QD3D11SwapChain::swapChain`) |
-| Linux | `vkSetHdrMetadataEXT` (device extension `VK_EXT_hdr_metadata`, requested if available) | Qt private header `qrhivulkan_p.h` (`QVkSwapChain::sc`) |
-| macOS | `CAMetalLayer.EDRMetadata = [CAEDRMetadata HDR10MetadataWithDisplayInfo:…]` | Qt private header `qpa/qplatformwindow_p.h` (`QNativeInterface::Private::QCocoaWindow::contentLayer`). The `NSView` layer is a container; the `CAMetalLayer` is its content sublayer. |
+| Platform | Native structure | Set | Remove | Access to the native swap chain |
+|---|---|---|---|---|
+| Windows | `DXGI_HDR_METADATA_HDR10` | `IDXGISwapChain4::SetHDRMetaData` | `SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE)` | Qt private header `qrhid3d11_p.h` (`QD3D11SwapChain::swapChain`) |
+| Linux | `VkHdrMetadataEXT` | `vkSetHdrMetadataEXT` (device extension `VK_EXT_hdr_metadata`, requested if available) | None | Qt private header `qrhivulkan_p.h` (`QVkSwapChain::sc`) |
+| macOS | SEI payloads and `opticalOutputScale` | `CAMetalLayer.EDRMetadata = [CAEDRMetadata HDR10MetadataWithDisplayInfo:…]` | `EDRMetadata = nil` | Qt private header `qpa/qplatformwindow_p.h` (`QNativeInterface::Private::QCocoaWindow::contentLayer`). The `NSView` layer is a container; the `CAMetalLayer` is its content sublayer. |
 
-Each pattern window has a new swap chain without metadata, so "off" needs no call.
+`hdr_metadata.rs` resolves the request and packs the native structure in Rust. The C++ bridge copies the fields into the native call; it does no unit conversion. The packing goes through the `MetadataSink` trait; unit tests inject a recording sink. Rules:
+- All backends get the values after rounding to the ST 2086 and CTA-861.3 fields. Vulkan gets these values as `f32` in natural units.
+- DXGI `MaxMasteringLuminance` is in whole cd/m², rounded half up. The other DXGI luminance fields keep their ST 2086 and CTA-861.3 units.
+- A new swap chain has no metadata. Metadata off on a swap chain without metadata makes no call.
+- A frame with metadata always sends it, also if the values did not change. A frame with metadata off after a frame with metadata removes it.
+- A failed call does not stop the frame; the status line reports it. After a failed set, earlier metadata can stay on the swap chain. Vulkan has no remove call, so the status line reports that the earlier metadata stays until the window closes.
 
 Automatic light levels use $D / (2^n - 1)$ as full-range PQ for every input encoding, including HLG scope input. This describes the intended PQ signal of this driver. It is not an HLG luminance calculation or a measurement of compositor output.
 

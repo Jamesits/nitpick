@@ -52,14 +52,14 @@ use cxx_qt_lib::QString;
 use nitpick_core::driver::{
     ContentLightLevel, Hdr10Request, OutputLimits, Query, check_frame, check_open,
 };
-use nitpick_core::image::Image;
-use nitpick_core::metadata::{self, Hdr10Metadata, MasteringPrimaries};
+use nitpick_core::metadata::MasteringPrimaries;
 use nitpick_core::output::{SwapChainFormat, swap_chain_bytes};
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, D65, Encoding, Format};
 use serde_json::{Value, json};
 
 use crate::display::{self, Backend, ffi};
+use crate::hdr_metadata::{self, BridgeSink, SwapChainMetadata};
 
 #[derive(Default)]
 pub struct LauncherRust {
@@ -120,54 +120,6 @@ fn request_from_json(json: &str) -> Result<Option<Hdr10Request>, String> {
     }))
 }
 
-/// Bridge metadata for `request`. Automatic light levels come from the
-/// rendered image.
-fn bridge_metadata(
-    request: Option<&Hdr10Request>,
-    image: &Image,
-    depth: BitDepth,
-) -> ffi::HdrMetadata {
-    let Some(request) = request else {
-        return ffi::HdrMetadata {
-            enabled: false,
-            chromaticity: [0; 8],
-            max_mastering: 0,
-            min_mastering: 0,
-            max_cll: 0,
-            max_fall: 0,
-            mastering_display: [0; 24],
-            content_light_level: [0; 4],
-        };
-    };
-    // QRhi sends every encoding as full-range PQ (see the QRhi design).
-    let max = f64::from(depth.max_code());
-    let md = request.resolve(|| {
-        metadata::light_level(
-            image
-                .pixels()
-                .iter()
-                .map(|p| [p.r, p.g, p.b].map(|c| f64::from(c) / max)),
-        )
-    });
-    let [r, g, b] = md.primaries;
-    let xy = [r, g, b, md.white].map(|[x, y]| {
-        [
-            Hdr10Metadata::chromaticity_code(x),
-            Hdr10Metadata::chromaticity_code(y),
-        ]
-    });
-    ffi::HdrMetadata {
-        enabled: true,
-        chromaticity: xy.concat().try_into().unwrap_or([0; 8]),
-        max_mastering: Hdr10Metadata::luminance_code(md.max_mastering_nits),
-        min_mastering: Hdr10Metadata::luminance_code(md.min_mastering_nits),
-        max_cll: Hdr10Metadata::light_level_code(md.max_cll),
-        max_fall: Hdr10Metadata::light_level_code(md.max_fall),
-        mastering_display: md.mastering_display_bytes(),
-        content_light_level: md.content_light_level_bytes(),
-    }
-}
-
 fn show(
     pattern: &QString,
     encoding: &QString,
@@ -194,9 +146,11 @@ fn show(
         .render(format, width, height)
         .map_err(|e| e.to_string())?;
     let pixels = swap_chain_bytes(&image, format).map_err(|e| e.to_string())?;
-    let md = bridge_metadata(request.as_ref(), &image, format.depth);
-    let result = ffi::present_pattern(&pixels, opened.width, opened.height, &md)
-        .map_err(|e| e.to_string())?;
+    let md = hdr_metadata::resolve(request.as_ref(), &image, format.depth);
+    // The window is new, so its swap chain has no metadata yet.
+    let result =
+        SwapChainMetadata::default().apply(&mut BridgeSink, Backend::current(), md.as_ref());
+    ffi::present_pattern(&pixels, opened.width, opened.height).map_err(|e| e.to_string())?;
     let warnings = if warnings.is_empty() {
         String::new()
     } else {

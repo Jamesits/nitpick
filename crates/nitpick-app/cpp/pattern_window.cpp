@@ -13,6 +13,8 @@
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -42,7 +44,9 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-using nitpick::HdrMetadata;
+using nitpick::DxgiHdrMetadata;
+using nitpick::MetalHdrMetadata;
+using nitpick::VulkanHdrMetadata;
 using nitpick::ScreenIdentity;
 
 // Time for the compositor to map the window and apply the full-screen state.
@@ -240,8 +244,7 @@ public:
     // Empty if QRhi accepted the swap chain format; see init().
     const std::string &fallback() const { return m_fallback; }
 
-    std::string present(const std::uint8_t *data, std::size_t size, int width, int height,
-                        const HdrMetadata &metadata) {
+    void present(const std::uint8_t *data, std::size_t size, int width, int height) {
         if (QSize(width, height) != patternArea().size()) {
             throw std::runtime_error("image size differs from the pattern area size");
         }
@@ -279,10 +282,64 @@ public:
             throw std::runtime_error("cannot create the graphics pipeline");
         }
         m_pending = QByteArray(reinterpret_cast<const char *>(data), qsizetype(size));
-        std::string status = applyMetadata(metadata);
         requestUpdate();
-        return status;
     }
+
+    // Each metadata call applies at the next present of the swap chain.
+#if defined(Q_OS_WIN)
+    void setMetadata(const DxgiHdrMetadata &md) {
+        DXGI_HDR_METADATA_HDR10 d{};
+        std::copy_n(md.red_primary.data(), 2, d.RedPrimary);
+        std::copy_n(md.green_primary.data(), 2, d.GreenPrimary);
+        std::copy_n(md.blue_primary.data(), 2, d.BluePrimary);
+        std::copy_n(md.white_point.data(), 2, d.WhitePoint);
+        d.MaxMasteringLuminance = md.max_mastering_luminance;
+        d.MinMasteringLuminance = md.min_mastering_luminance;
+        d.MaxContentLightLevel = md.max_content_light_level;
+        d.MaxFrameAverageLightLevel = md.max_frame_average_light_level;
+        check(swapChain4()->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof d, &d),
+              "SetHDRMetaData");
+    }
+
+    void clearMetadata() {
+        check(swapChain4()->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr),
+              "SetHDRMetaData(NONE)");
+    }
+#elif defined(Q_OS_MACOS)
+    void setMetadata(const MetalHdrMetadata &md) { nitpick::setLayerHdrMetadata(this, &md); }
+
+    void clearMetadata() { nitpick::setLayerHdrMetadata(this, nullptr); }
+#else
+    void setMetadata(const VulkanHdrMetadata &md) {
+        const auto xy = [](const std::array<float, 2> &v) { return VkXYColorEXT{v[0], v[1]}; };
+        VkHdrMetadataEXT d{};
+        d.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT;
+        d.displayPrimaryRed = xy(md.display_primary_red);
+        d.displayPrimaryGreen = xy(md.display_primary_green);
+        d.displayPrimaryBlue = xy(md.display_primary_blue);
+        d.whitePoint = xy(md.white_point);
+        d.maxLuminance = md.max_luminance;
+        d.minLuminance = md.min_luminance;
+        d.maxContentLightLevel = md.max_content_light_level;
+        d.maxFrameAverageLightLevel = md.max_frame_average_light_level;
+        const auto *handles = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles());
+        auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+            sharedVulkanInstance()->getInstanceProcAddr("vkGetDeviceProcAddr"));
+        auto setHdrMetadata =
+            getDeviceProcAddr ? reinterpret_cast<PFN_vkSetHdrMetadataEXT>(
+                                    getDeviceProcAddr(handles->dev, "vkSetHdrMetadataEXT"))
+                              : nullptr;
+        if (!setHdrMetadata) {
+            throw std::runtime_error("the Vulkan driver has no VK_EXT_hdr_metadata");
+        }
+        VkSwapchainKHR sc = static_cast<QVkSwapChain *>(m_sc.get())->sc;
+        setHdrMetadata(handles->dev, 1, &sc, &d);
+    }
+
+    void clearMetadata() {
+        throw std::runtime_error("VK_EXT_hdr_metadata has no call to remove metadata");
+    }
+#endif
 
 protected:
     void exposeEvent(QExposeEvent *) override {
@@ -447,69 +504,14 @@ private:
         m_rhi->endFrame(m_sc.get());
     }
 
-    // The swap chain of each window starts without metadata, so a disabled
-    // metadata needs no call.
-    std::string applyMetadata(const HdrMetadata &md) {
-        if (!md.enabled) {
-            return "No HDR metadata.";
-        }
-        const std::string values =
-            sformat("MaxCLL %u, MaxFALL %u, mastering %.4f to %.0f cd/m2", unsigned(md.max_cll),
-                   unsigned(md.max_fall), md.min_mastering / 10000.0, md.max_mastering / 10000.0);
 #if defined(Q_OS_WIN)
+    ComPtr<IDXGISwapChain4> swapChain4() const {
         auto *sc = static_cast<QD3D11SwapChain *>(m_sc.get())->swapChain;
         ComPtr<IDXGISwapChain4> sc4;
         check(sc->QueryInterface(IID_PPV_ARGS(&sc4)), "IDXGISwapChain4");
-        DXGI_HDR_METADATA_HDR10 d{};
-        const auto &c = md.chromaticity;
-        d.RedPrimary[0] = c[0], d.RedPrimary[1] = c[1];
-        d.GreenPrimary[0] = c[2], d.GreenPrimary[1] = c[3];
-        d.BluePrimary[0] = c[4], d.BluePrimary[1] = c[5];
-        d.WhitePoint[0] = c[6], d.WhitePoint[1] = c[7];
-        // DXGI documents the maximum in whole cd/m² and the minimum in
-        // 0.0001 cd/m², unlike ST 2086, which uses 0.0001 for both.
-        d.MaxMasteringLuminance = UINT(std::lround(md.max_mastering / 10000.0));
-        d.MinMasteringLuminance = md.min_mastering;
-        d.MaxContentLightLevel = md.max_cll;
-        d.MaxFrameAverageLightLevel = md.max_fall;
-        // Not fatal: an SDR fallback swap chain can refuse metadata.
-        const HRESULT hr = sc4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof d, &d);
-        if (FAILED(hr)) {
-            return sformat("HDR metadata NOT sent: SetHDRMetaData failed: 0x%08lX.",
-                           static_cast<unsigned long>(hr));
-        }
-        return "HDR10 metadata: " + values + ".";
-#elif defined(Q_OS_MACOS)
-        nitpick::setMetalHdrMetadata(this, md);
-        return "EDR HDR10 metadata: " + values + ".";
-#else
-        const auto *handles = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles());
-        auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-            sharedVulkanInstance()->getInstanceProcAddr("vkGetDeviceProcAddr"));
-        auto setHdrMetadata =
-            getDeviceProcAddr ? reinterpret_cast<PFN_vkSetHdrMetadataEXT>(
-                                    getDeviceProcAddr(handles->dev, "vkSetHdrMetadataEXT"))
-                              : nullptr;
-        if (!setHdrMetadata) {
-            return "HDR metadata NOT sent: the Vulkan driver has no VK_EXT_hdr_metadata.";
-        }
-        const auto &c = md.chromaticity;
-        const auto xy = [&c](int i) { return VkXYColorEXT{c[i] / 50000.0f, c[i + 1] / 50000.0f}; };
-        VkHdrMetadataEXT d{};
-        d.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT;
-        d.displayPrimaryRed = xy(0);
-        d.displayPrimaryGreen = xy(2);
-        d.displayPrimaryBlue = xy(4);
-        d.whitePoint = xy(6);
-        d.maxLuminance = md.max_mastering / 10000.0f;
-        d.minLuminance = md.min_mastering / 10000.0f;
-        d.maxContentLightLevel = md.max_cll;
-        d.maxFrameAverageLightLevel = md.max_fall;
-        VkSwapchainKHR sc = static_cast<QVkSwapChain *>(m_sc.get())->sc;
-        setHdrMetadata(handles->dev, 1, &sc, &d);
-        return "HDR10 metadata: " + values + ".";
-#endif
+        return sc4;
     }
+#endif
 
     bool m_fp16;
     // Pattern area size of the reference table, see screenPatternSize().
@@ -535,6 +537,13 @@ private:
 };
 
 QPointer<PatternWindow> g_window;
+
+PatternWindow &openWindow() {
+    if (!g_window) {
+        throw std::runtime_error("no pattern window is open");
+    }
+    return *g_window;
+}
 
 } // namespace
 
@@ -576,12 +585,38 @@ PatternSurface openPatternWindow(std::int32_t screen, bool fp16) {
     return surface;
 }
 
-rust::String presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
-                            std::int32_t height, const HdrMetadata &metadata) {
-    if (!g_window) {
-        throw std::runtime_error("no pattern window is open");
-    }
-    return rust::String(g_window->present(pixels.data(), pixels.size(), width, height, metadata));
+void presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
+                    std::int32_t height) {
+    openWindow().present(pixels.data(), pixels.size(), width, height);
 }
+
+void setDxgiHdrMetadata(const DxgiHdrMetadata &metadata) {
+#if defined(Q_OS_WIN)
+    openWindow().setMetadata(metadata);
+#else
+    (void)metadata;
+    throw std::runtime_error("DXGI metadata needs the D3D11 backend");
+#endif
+}
+
+void setVulkanHdrMetadata(const VulkanHdrMetadata &metadata) {
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
+    openWindow().setMetadata(metadata);
+#else
+    (void)metadata;
+    throw std::runtime_error("Vulkan metadata needs the Vulkan backend");
+#endif
+}
+
+void setMetalHdrMetadata(const MetalHdrMetadata &metadata) {
+#if defined(Q_OS_MACOS)
+    openWindow().setMetadata(metadata);
+#else
+    (void)metadata;
+    throw std::runtime_error("EDR metadata needs the Metal backend");
+#endif
+}
+
+void clearHdrMetadata() { openWindow().clearMetadata(); }
 
 } // namespace nitpick

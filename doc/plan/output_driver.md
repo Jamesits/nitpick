@@ -6,15 +6,6 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 12. Resolve and inspect QRhi metadata
-
-Requires: 11.
-
-TODO:
-
-- Resolve automatic QRhi metadata from full-range PQ for every accepted encoding, including HLG scope input. Move native metadata packing behind an injectable bridge sink.
-- Verify native field order, units, automatic and explicit values, disabled metadata and replacement. Use [QRhi metadata](../design/output_driver/qt.md#hdr10-static-metadata) as the contract. Keep the listed DXGI, Metal and display-effect questions open for device tests.
-
 ### 13. Acknowledge QRhi submission by frame ID
 
 Requires: 11.
@@ -26,7 +17,7 @@ TODO:
 
 ### 14. Implement asynchronous QrhiDriver
 
-Requires: 2, 12, 13.
+Requires: 2, 13.
 
 Open questions:
 
@@ -43,7 +34,7 @@ Requires: 14, 15.
 
 TODO:
 
-- Change `launcher.rs` and `qml/main.qml` to refresh native device state on a worker before the synchronous output query and open; the launcher now queries on the GUI thread. Replace the screen-index `DisplayId` with the native screen mapping in `display.rs`. Render at the returned size, pass metadata requests and retain frame data until completion or cancellation. Remove the launcher metadata resolution (`bridge_metadata`); the driver resolves the request.
+- Change `launcher.rs` and `qml/main.qml` to refresh native device state on a worker before the synchronous output query and open; the launcher now queries on the GUI thread. Replace the screen-index `DisplayId` with the native screen mapping in `display.rs`. Render at the returned size, pass metadata requests and retain frame data until completion or cancellation.
 - Add the Linux screen mapping in [Linux reports](../design/display_device.md#linux-reports) as a portable function in `nitpick-display`, next to the evidence format it reads. Use it in the Linux branch of `display.rs`; Windows and macOS map by GDI name and display ID. Run the macOS mapping on a Mac. With injected device lists, verify kernel names, the GNOME `HDMI` form, an unknown name, one name on two cards, and the X11 EDID MD5 rule. On GNOME 50, map both screens with the Wayland and xcb Qt platforms.
 - Verify depth selection, mode reporting and warnings. Keep QRhi narrow PQ and HLG selectable. Replacement, display change and closure must drop the future before reusing or closing the driver. Controls must remain active, and late results must not change the current status.
 
@@ -242,7 +233,7 @@ TODO:
 
 ### 38. Verify QRhi swap-chain setup and failure handling
 
-Requires: 12, 17, 33, 37.
+Requires: 17, 33, 37.
 
 TODO:
 

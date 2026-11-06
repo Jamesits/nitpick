@@ -5,23 +5,49 @@
 
 #[cxx_qt::bridge]
 pub mod ffi {
-    /// HDR10 static metadata in SMPTE ST 2086 and CTA-861.3 units
-    /// (see `nitpick_core::metadata::Hdr10Metadata`).
+    /// `DXGI_HDR_METADATA_HDR10`, in its field order and units.
     #[namespace = "nitpick"]
-    struct HdrMetadata {
-        /// If false, the window clears the metadata of the swap chain.
-        enabled: bool,
-        /// CIE xy of red, green, blue and white in units of 0.00002.
-        chromaticity: [u16; 8],
-        /// Mastering display luminance in units of 0.0001 cd/m².
-        max_mastering: u32,
-        min_mastering: u32,
-        /// Content light levels in cd/m².
-        max_cll: u16,
-        max_fall: u16,
-        /// The same values as big-endian SEI payloads, for `CAEDRMetadata` (macOS).
-        mastering_display: [u8; 24],
-        content_light_level: [u8; 4],
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct DxgiHdrMetadata {
+        /// CIE xy in units of 0.00002.
+        red_primary: [u16; 2],
+        green_primary: [u16; 2],
+        blue_primary: [u16; 2],
+        white_point: [u16; 2],
+        /// Whole cd/m², as documented by DXGI. ST 2086 uses 0.0001 cd/m².
+        max_mastering_luminance: u32,
+        /// 0.0001 cd/m².
+        min_mastering_luminance: u32,
+        /// cd/m².
+        max_content_light_level: u16,
+        max_frame_average_light_level: u16,
+    }
+
+    /// `VkHdrMetadataEXT` without `sType` and `pNext`, in its field order.
+    #[namespace = "nitpick"]
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct VulkanHdrMetadata {
+        /// CIE xy.
+        display_primary_red: [f32; 2],
+        display_primary_green: [f32; 2],
+        display_primary_blue: [f32; 2],
+        white_point: [f32; 2],
+        /// cd/m².
+        max_luminance: f32,
+        min_luminance: f32,
+        max_content_light_level: f32,
+        max_frame_average_light_level: f32,
+    }
+
+    /// Arguments of `[CAEDRMetadata HDR10MetadataWithDisplayInfo:contentInfo:opticalOutputScale:]`.
+    #[namespace = "nitpick"]
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct MetalHdrMetadata {
+        /// Big-endian SEI payloads, see `nitpick_core::metadata::Hdr10Metadata`.
+        display_info: [u8; 24],
+        content_info: [u8; 4],
+        /// cd/m² of linear 1.0.
+        optical_output_scale: f32,
     }
 
     /// The open pattern window: pattern area size in pixels and a description
@@ -75,16 +101,26 @@ pub mod ffi {
         fn open_pattern_window(screen: i32, fp16: bool) -> Result<PatternSurface>;
 
         /// Shows `pixels` in the open window: tightly packed rows in the swap
-        /// chain format, `width × height` equal to the pattern area size. Sets
-        /// the HDR metadata first. Returns a status line.
+        /// chain format, `width × height` equal to the pattern area size.
         #[namespace = "nitpick"]
         #[cxx_name = "presentPattern"]
-        fn present_pattern(
-            pixels: &[u8],
-            width: i32,
-            height: i32,
-            metadata: &HdrMetadata,
-        ) -> Result<String>;
+        fn present_pattern(pixels: &[u8], width: i32, height: i32) -> Result<()>;
+
+        /// Set or remove the HDR metadata of the swap chain of the open
+        /// window. Each fails on another backend. Use them through
+        /// `hdr_metadata::BridgeSink`.
+        #[namespace = "nitpick"]
+        #[cxx_name = "setDxgiHdrMetadata"]
+        fn set_dxgi_hdr_metadata(metadata: &DxgiHdrMetadata) -> Result<()>;
+        #[namespace = "nitpick"]
+        #[cxx_name = "setVulkanHdrMetadata"]
+        fn set_vulkan_hdr_metadata(metadata: &VulkanHdrMetadata) -> Result<()>;
+        #[namespace = "nitpick"]
+        #[cxx_name = "setMetalHdrMetadata"]
+        fn set_metal_hdr_metadata(metadata: &MetalHdrMetadata) -> Result<()>;
+        #[namespace = "nitpick"]
+        #[cxx_name = "clearHdrMetadata"]
+        fn clear_hdr_metadata() -> Result<()>;
     }
 }
 
