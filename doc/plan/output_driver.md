@@ -19,13 +19,6 @@ TODO:
 - Add the native output queries in [Platform implementations](../design/display_device.md#platform-implementations). Keep capability discovery usable when the profile service is absent. Use compositor or DRM colour state only where available.
 - Verify missing protocols, unknown HDR or depth, output replacement and ambiguous identity with injected calls. Check reported fields on the selected desktop. Missing metadata must not be replaced with guessed display values.
 
-### 9. Extend QRhi integer packing checks
-
-TODO:
-
-- Extend `output_tests.rs` with independent `R10G10B10A2` expectations for every scalar code, asymmetric channels, alpha and row boundaries. Test equal input codes under all three encodings.
-- Verify exact bytes and channel order. The scope encodings must retain the full-range PQ transport described in [Signalling](../design/output_driver/qt.md#signalling).
-
 ### 10. Test FP16 conversion and neighbour search independently
 
 TODO:

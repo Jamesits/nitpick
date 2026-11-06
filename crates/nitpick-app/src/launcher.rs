@@ -52,7 +52,7 @@ use cxx_qt_lib::QString;
 use nitpick_core::driver::{ContentLightLevel, Hdr10Request};
 use nitpick_core::image::Image;
 use nitpick_core::metadata::{self, Hdr10Metadata, MasteringPrimaries};
-use nitpick_core::output::{SwapChainFormat, hdr10_bytes, scrgb_bytes};
+use nitpick_core::output::{SwapChainFormat, swap_chain_bytes};
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, D65, Encoding, Format};
 use serde_json::{Value, json};
@@ -171,10 +171,7 @@ fn show(
     let image = kind
         .render(format, size(width)?, size(height)?)
         .map_err(|e| e.to_string())?;
-    let pixels = match swap_chain {
-        SwapChainFormat::Hdr10 => hdr10_bytes(&image),
-        SwapChainFormat::ScRgb => scrgb_bytes(&image, format.depth),
-    };
+    let pixels = swap_chain_bytes(&image, format).map_err(|e| e.to_string())?;
     let md = metadata_from_json(&metadata.to_string(), &image, format.depth)?;
     let result = ffi::present_pattern(&pixels, width, height, &md).map_err(|e| e.to_string())?;
     Ok(format!(

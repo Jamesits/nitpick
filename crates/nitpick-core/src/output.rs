@@ -10,13 +10,14 @@
 //! the narrow-range encodings (see [`crate::signal::Encoding`]).
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::OnceLock;
 
 use half::f16;
 
 use crate::image::Image;
 use crate::signal::{
-    BT709_PRIMARIES, BT2020_PRIMARIES, BitDepth, D65, Rgb, pq_eotf, pq_inverse_eotf,
+    BT709_PRIMARIES, BT2020_PRIMARIES, BitDepth, D65, Format, Rgb, pq_eotf, pq_inverse_eotf,
 };
 
 /// Swap chain pixel format.
@@ -46,28 +47,92 @@ impl SwapChainFormat {
     }
 }
 
-/// Packs 10-bit codes to `R10G10B10A2_UNORM` (R in the low bits), alpha opaque.
+/// A pixel code above the maximum code of the swap chain depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodeRangeError {
+    pub x: usize,
+    pub y: usize,
+    pub code: Rgb,
+    pub depth: BitDepth,
+}
+
+impl fmt::Display for CodeRangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Rgb { r, g, b } = self.code;
+        write!(
+            f,
+            "pixel ({}, {}) code ({r}, {g}, {b}) exceeds {} for {}",
+            self.x,
+            self.y,
+            self.depth.max_code(),
+            self.depth
+        )
+    }
+}
+
+impl std::error::Error for CodeRangeError {}
+
+/// Rejects the first pixel (in row-major order) with a code above the
+/// maximum of `depth`. Masking or clamping would put a different code on
+/// the wire without notice.
+fn check_codes(img: &Image, depth: BitDepth) -> Result<(), CodeRangeError> {
+    let max = depth.max_code();
+    match img.pixels().iter().position(|c| c.max_component() > max) {
+        None => Ok(()),
+        Some(i) => Err(CodeRangeError {
+            x: i % img.width(),
+            y: i / img.width(),
+            code: img.pixels()[i],
+            depth,
+        }),
+    }
+}
+
+/// Swap chain pixels of an image in `format`, for the swap chain of
+/// [`SwapChainFormat::for_depth`]. The encoding does not change the pixels:
+/// every code is a full-range PQ code on the wire.
+///
+/// # Errors
+/// If a code exceeds the maximum code of `format.depth`.
+pub fn swap_chain_bytes(img: &Image, format: Format) -> Result<Vec<u8>, CodeRangeError> {
+    match SwapChainFormat::for_depth(format.depth) {
+        SwapChainFormat::Hdr10 => hdr10_bytes(img),
+        SwapChainFormat::ScRgb => scrgb_bytes(img, format.depth),
+    }
+}
+
+/// Packs 10-bit codes to `R10G10B10A2_UNORM` (R in the low bits), alpha
+/// opaque. `None` if a code exceeds 1023.
 #[must_use]
-pub const fn pack_r10g10b10a2(c: Rgb) -> u32 {
-    (0b11 << 30)
-        | ((c.b as u32 & 0x3ff) << 20)
-        | ((c.g as u32 & 0x3ff) << 10)
-        | (c.r as u32 & 0x3ff)
+pub const fn pack_r10g10b10a2(c: Rgb) -> Option<u32> {
+    if c.r > 0x3ff || c.g > 0x3ff || c.b > 0x3ff {
+        return None;
+    }
+    Some((0b11 << 30) | ((c.b as u32) << 20) | ((c.g as u32) << 10) | c.r as u32)
 }
 
 /// Swap chain pixels of a 10-bit image in little-endian byte order.
-#[must_use]
-pub fn hdr10_bytes(img: &Image) -> Vec<u8> {
-    img.pixels()
+///
+/// # Errors
+/// If a code exceeds 1023.
+pub fn hdr10_bytes(img: &Image) -> Result<Vec<u8>, CodeRangeError> {
+    check_codes(img, BitDepth::Ten)?;
+    Ok(img
+        .pixels()
         .iter()
-        .flat_map(|&c| pack_r10g10b10a2(c).to_le_bytes())
-        .collect()
+        // `check_codes` passed, so every pixel packs.
+        .filter_map(|&c| pack_r10g10b10a2(c))
+        .flat_map(u32::to_le_bytes)
+        .collect())
 }
 
 /// Swap chain pixels of an image at `depth` as `R16G16B16A16_FLOAT` scRGB,
 /// in little-endian byte order.
-#[must_use]
-pub fn scrgb_bytes(img: &Image, depth: BitDepth) -> Vec<u8> {
+///
+/// # Errors
+/// If a code exceeds the maximum code of `depth`.
+pub fn scrgb_bytes(img: &Image, depth: BitDepth) -> Result<Vec<u8>, CodeRangeError> {
+    check_codes(img, depth)?;
     let mut cache: HashMap<Rgb, [u8; 8]> = HashMap::new();
     let mut out = Vec::with_capacity(img.pixels().len() * 8);
     for &c in img.pixels() {
@@ -82,7 +147,7 @@ pub fn scrgb_bytes(img: &Image, depth: BitDepth) -> Vec<u8> {
         });
         out.extend_from_slice(&px);
     }
-    out
+    Ok(out)
 }
 
 type Matrix = [[f64; 3]; 3];
