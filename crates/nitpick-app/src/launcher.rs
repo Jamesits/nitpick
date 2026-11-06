@@ -30,7 +30,7 @@ pub mod qobject {
             screen: i32,
         ) -> QString;
 
-        /// Renders the pattern at the swap chain size of a new full-screen
+        /// Renders the pattern at the pattern area size of a new full-screen
         /// window on `screen` and shows it. `metadata` is a JSON object, see
         /// `metadata_from_json`. The result or error goes to `status`.
         #[qinvokable]
@@ -155,7 +155,7 @@ fn show(
     let surface = ffi::open_pattern_window(screen, swap_chain == SwapChainFormat::ScRgb)
         .map_err(|e| e.to_string())?;
     let (width, height) = (surface.width, surface.height);
-    let size = |v: i32| usize::try_from(v).map_err(|_| format!("invalid swap chain size {v}"));
+    let size = |v: i32| usize::try_from(v).map_err(|_| format!("invalid pattern area size {v}"));
     let image = kind
         .render(format, size(width)?, size(height)?)
         .map_err(|e| e.to_string())?;

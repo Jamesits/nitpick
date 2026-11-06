@@ -21,8 +21,9 @@ pub mod ffi {
         content_light_level: [u8; 4],
     }
 
-    /// The open pattern window: swap chain size in pixels and a description
-    /// of the display output.
+    /// The open pattern window: pattern area size in pixels and a description
+    /// of the display output. The pattern area is the swap chain without the
+    /// safe-area margins of the window.
     #[namespace = "nitpick"]
     struct PatternSurface {
         width: i32,
@@ -33,7 +34,9 @@ pub mod ffi {
     unsafe extern "C++" {
         include!("nitpick-app/cpp/pattern_window.h");
 
-        /// Native pixel size of screen `screen` (index into `QGuiApplication::screens()`).
+        /// Pixel size of the pattern area of a full-screen window on screen
+        /// `screen` (index into `QGuiApplication::screens()`): the native size
+        /// without the safe-area insets.
         #[namespace = "nitpick"]
         #[cxx_name = "screenPixelWidth"]
         fn screen_pixel_width(screen: i32) -> Result<i32>;
@@ -49,7 +52,7 @@ pub mod ffi {
         fn open_pattern_window(screen: i32, fp16: bool) -> Result<PatternSurface>;
 
         /// Shows `pixels` in the open window: tightly packed rows in the swap
-        /// chain format, `width × height` equal to the swap chain size. Sets
+        /// chain format, `width × height` equal to the pattern area size. Sets
         /// the HDR metadata first. Returns a status line.
         #[namespace = "nitpick"]
         #[cxx_name = "presentPattern"]

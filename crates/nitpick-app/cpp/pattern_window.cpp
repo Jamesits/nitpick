@@ -34,7 +34,7 @@
 #include <wrl/client.h>
 using Microsoft::WRL::ComPtr;
 #elif defined(Q_OS_MACOS)
-#include "nitpick-app/cpp/metal_hdr.h"
+#include "nitpick-app/cpp/macos.h"
 #else
 #include <QtGui/QVulkanInstance>
 #include <QtGui/private/qrhivulkan_p.h>
@@ -152,6 +152,21 @@ QVulkanInstance *vulkanInstance() {
 
 #endif
 
+// Pixel size of the pattern area of a full-screen window on `screen`. The
+// launcher renders reference tables at this size before the window exists.
+QSize screenPatternSize(QScreen *screen) {
+#if defined(Q_OS_WIN)
+    const RECT r = monitorRect(screen);
+    return QSize(r.right - r.left, r.bottom - r.top);
+#elif defined(Q_OS_MACOS)
+    return nitpick::screenSafePixelSize(screen);
+#else
+    // QScreen has no safe-area insets.
+    return QSize(int(std::lround(screen->geometry().width() * screen->devicePixelRatio())),
+                 int(std::lround(screen->geometry().height() * screen->devicePixelRatio())));
+#endif
+}
+
 // Borderless full-screen window that scans out one static image through
 // QRhi: D3D11 on Windows, Metal on macOS, Vulkan elsewhere.
 //
@@ -196,17 +211,22 @@ public:
         }
     }
 
-    QSize pixelSize() const { return m_sc->currentPixelSize(); }
+    // The swap chain without the safe-area margins of the window, in pixels.
+    // The pattern is drawn only inside this area; the rest stays black.
+    QRect patternArea() const {
+        const QSize s = m_sc->currentPixelSize();
+        const QMargins m = safeAreaMargins();
+        const qreal dpr = devicePixelRatio();
+        const auto px = [dpr](int v) { return int(std::lround(v * dpr)); };
+        return QRect(QPoint(px(m.left()), px(m.top())),
+                     QPoint(s.width() - px(m.right()) - 1, s.height() - px(m.bottom()) - 1));
+    }
 
     std::string describe() const {
         std::string s = m_fp16 ? "FP16 scRGB swap chain" : "HDR10 swap chain";
         s += " (" + std::string(m_rhi->backendName()) + ")";
 #if defined(Q_OS_WIN)
         s += "; " + describeOutput(m_output.Get());
-        const RECT r = monitorRect(screen());
-        if (r.right - r.left != pixelSize().width() || r.bottom - r.top != pixelSize().height()) {
-            s += "; WARNING: swap chain size differs from the native screen size";
-        }
 #else
         const QRhiSwapChainHdrInfo i = m_sc->hdrInfo();
         if (i.limitsType == QRhiSwapChainHdrInfo::LuminanceInNits) {
@@ -218,13 +238,16 @@ public:
                         i.limits.colorComponentValue.maxPotentialColorComponentValue);
         }
 #endif
+        if (patternArea().size() != screenPatternSize(screen())) {
+            s += "; WARNING: the pattern area differs from the screen size of the reference table";
+        }
         return s;
     }
 
     std::string present(const std::uint8_t *data, std::size_t size, int width, int height,
                         const HdrMetadata &metadata) {
-        if (QSize(width, height) != pixelSize()) {
-            throw std::runtime_error("image size differs from the swap chain size");
+        if (QSize(width, height) != patternArea().size()) {
+            throw std::runtime_error("image size differs from the pattern area size");
         }
         const auto format = m_fp16 ? QRhiTexture::RGBA16F : QRhiTexture::RGB10A2;
         const std::size_t bytesPerPixel = m_fp16 ? 8 : 4;
@@ -241,8 +264,11 @@ public:
             throw std::runtime_error("cannot create the pattern texture");
         }
         m_srb.reset(m_rhi->newShaderResourceBindings());
-        m_srb->setBindings({QRhiShaderResourceBinding::sampledTexture(
-            1, QRhiShaderResourceBinding::FragmentStage, m_tex.get(), m_sampler.get())});
+        m_srb->setBindings(
+            {QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::FragmentStage,
+                                                      m_area.get()),
+             QRhiShaderResourceBinding::sampledTexture(
+                 1, QRhiShaderResourceBinding::FragmentStage, m_tex.get(), m_sampler.get())});
         if (!m_srb->create()) {
             throw std::runtime_error("cannot create the shader resource bindings");
         }
@@ -364,12 +390,17 @@ private:
         if (!m_sampler->create()) {
             throw std::runtime_error("cannot create the sampler");
         }
+        // std140 `ivec2 origin`, padded to 16 bytes.
+        m_area.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 16));
+        if (!m_area->create()) {
+            throw std::runtime_error("cannot create the pattern area buffer");
+        }
     }
 
     void render() {
         if (m_sc->currentPixelSize() != m_sc->surfacePixelSize()) {
             // The pattern texture keeps its size; the shader draws it 1:1
-            // from the top-left corner.
+            // from the top-left corner of the pattern area.
             m_sc->createOrResize();
         }
         QRhi::FrameOpResult r = m_rhi->beginFrame(m_sc.get());
@@ -380,9 +411,12 @@ private:
         if (r != QRhi::FrameOpSuccess) {
             return;
         }
-        QRhiResourceUpdateBatch *updates = nullptr;
+        QRhiResourceUpdateBatch *updates = m_rhi->nextResourceUpdateBatch();
+        // The safe-area margins can change after the first expose.
+        const QPoint origin = patternArea().topLeft();
+        const std::int32_t area[2] = {origin.x(), origin.y()};
+        updates->updateDynamicBuffer(m_area.get(), 0, sizeof area, area);
         if (!m_pending.isEmpty()) {
-            updates = m_rhi->nextResourceUpdateBatch();
             updates->uploadTexture(
                 m_tex.get(),
                 QRhiTextureUploadEntry(0, 0, QRhiTextureSubresourceUploadDescription(m_pending)));
@@ -474,6 +508,7 @@ private:
     std::unique_ptr<QRhiSwapChain> m_sc;
     std::unique_ptr<QRhiRenderPassDescriptor> m_rp;
     std::unique_ptr<QRhiSampler> m_sampler;
+    std::unique_ptr<QRhiBuffer> m_area;
     std::unique_ptr<QRhiTexture> m_tex;
     std::unique_ptr<QRhiShaderResourceBindings> m_srb;
     std::unique_ptr<QRhiGraphicsPipeline> m_ps;
@@ -486,23 +521,11 @@ QPointer<PatternWindow> g_window;
 namespace nitpick {
 
 std::int32_t screenPixelWidth(std::int32_t screen) {
-#if defined(Q_OS_WIN)
-    const RECT r = monitorRect(screenAt(screen));
-    return r.right - r.left;
-#else
-    QScreen *s = screenAt(screen);
-    return std::int32_t(std::lround(s->geometry().width() * s->devicePixelRatio()));
-#endif
+    return screenPatternSize(screenAt(screen)).width();
 }
 
 std::int32_t screenPixelHeight(std::int32_t screen) {
-#if defined(Q_OS_WIN)
-    const RECT r = monitorRect(screenAt(screen));
-    return r.bottom - r.top;
-#else
-    QScreen *s = screenAt(screen);
-    return std::int32_t(std::lround(s->geometry().height() * s->devicePixelRatio()));
-#endif
+    return screenPatternSize(screenAt(screen)).height();
 }
 
 PatternSurface openPatternWindow(std::int32_t screen, bool fp16) {
@@ -513,8 +536,8 @@ PatternSurface openPatternWindow(std::int32_t screen, bool fp16) {
     window->requestActivate();
     window->waitUntilReady();
     PatternSurface surface;
-    surface.width = window->pixelSize().width();
-    surface.height = window->pixelSize().height();
+    surface.width = window->patternArea().width();
+    surface.height = window->patternArea().height();
     surface.description = rust::String(window->describe());
     g_window = window.release();
     return surface;

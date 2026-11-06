@@ -106,7 +106,7 @@ fn main() {
             .files(["src/launcher.rs", "src/display.rs"])
             .cpp_file("cpp/pattern_window.cpp");
     if target_os == "macos" {
-        builder = builder.cpp_file("cpp/metal_hdr.mm");
+        builder = builder.cpp_file("cpp/macos.mm");
     }
     // SAFETY: only adds include directories to the C++ build.
     let builder = unsafe {
