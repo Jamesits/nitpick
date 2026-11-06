@@ -257,6 +257,11 @@ const SEARCH: i32 = 2;
 /// that [`codes_from_scrgb`] decodes closest to `c`. Negative errors on a
 /// zero component are harmless, because the decoder clamps them to 0.
 ///
+/// "Closest" is the smallest largest-component code error, then the
+/// smallest sum of step offsets. On an equal score the offset
+/// (dR, dG, dB) that is first in lexicographic order wins. An unchanged -0
+/// in a searched set becomes +0.
+///
 /// Some levels have no exact set (see [`scrgb_is_exact`]): a component
 /// near black next to bright components.
 #[must_use]

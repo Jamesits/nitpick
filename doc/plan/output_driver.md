@@ -19,14 +19,6 @@ TODO:
 - Add the native output queries in [Platform implementations](../design/display_device.md#platform-implementations). Keep capability discovery usable when the profile service is absent. Use compositor or DRM colour state only where available.
 - Verify missing protocols, unknown HDR or depth, output replacement and ambiguous identity with injected calls. Check reported fields on the selected desktop. Missing metadata must not be replaced with guessed display values.
 
-### 10. Test FP16 conversion and neighbour search independently
-
-TODO:
-
-- Add independent PQ, primary-matrix and 80 cd/m² vectors, including negative components. Extend the existing grey test with per-level BT.2111 results and fixed difficult cases for the deliberate ±2-neighbour search.
-- Check native D65 matrices with primary and white vectors. Keep ICC D50 adaptation, assumed monitor white and rounded EDID coordinates out of the scRGB reference calculation.
-- Verify the stored bits, tie behaviour, search bounds and residual code errors under [QRhi output](../design/output_driver/testing.md#qrhi-output). Do not use the production inverse or a total failure count as the sole expected result.
-
 ### 11. Report QRhi capabilities and reject unknown FP16 scales
 
 Requires: 2, 5, 6, 7, 9, 10.

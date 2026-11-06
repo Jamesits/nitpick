@@ -66,7 +66,7 @@ For the supported 80 cd/m² path, convert the code triple $(R', G', B')$ at dept
 1. Each code is a full-range PQ code on the wire: $L = \mathrm{EOTF}_{PQ}(D / (2^n - 1))$ in cd/m².
 2. $L_{709} = M \cdot L_{2020}$. $M$ is calculated from the BT.709 and BT.2020 primaries and D65.
 3. The value is $L_{709} / 80$, rounded to f16.
-4. Deviation from a plain conversion: rounding each component separately is not sufficient. The matrix mixes the rounding error of the bright components into the dark ones. The conversion thus searches ±2 f16 steps per component. It takes the triple that a reference decoder (exact inverse matrix, PQ inverse EOTF, round, negative values clamped to 0) decodes closest to the codes.
+4. Deviation from a plain conversion: rounding each component separately is not sufficient. The matrix mixes the rounding error of the bright components into the dark ones. The conversion thus searches ±2 f16 steps per component. It takes the triple that a reference decoder (exact inverse matrix, PQ inverse EOTF, round, negative values clamped to 0) decodes closest to the codes: smallest largest-component code error, then smallest sum of step offsets. On an equal score, the offset $(\Delta R, \Delta G, \Delta B)$ that is first in lexicographic order wins.
 
 Results of the reference decoder for this 80 cd/m² path:
 - All 4096 12-bit grey codes decode exactly, also without the search.

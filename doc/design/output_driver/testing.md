@@ -156,7 +156,7 @@ All supported input formats run in ordinary CI on Windows, macOS and Linux. Unsu
 
 ### QRhi output
 
-The conversion rules stay in [QRhi signalling and conversion](qt.md#signalling). The tests below use those rules, including their deliberate deviations from normal signal interpretation.
+The conversion rules stay in [QRhi signalling and conversion](qt.md#signalling). The tests below use those rules, including their deliberate deviations from normal signal interpretation. FP16 expected values come from a 60-digit evaluation of the ST 2084 constants, the BT.709 and BT.2020 primaries and D65. The tests do not use the production conversion or decoder to make expected values.
 
 | Test | Assertion |
 |---|---|
