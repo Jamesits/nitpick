@@ -164,6 +164,34 @@ impl<N: WindowsNative> WindowsDisplay<N> {
         Self { native }
     }
 
+    /// The device shown by the GDI display `name`, for example the
+    /// `MONITORINFOEXW::szDevice` of a window-system screen.
+    ///
+    /// # Errors
+    /// [`DeviceError::AmbiguousIdentity`] if the source drives more than
+    /// one target (clone mode); [`DeviceError::Unsupported`] if no active
+    /// path has this source; a `QueryDisplayConfig` failure.
+    pub fn device_for_gdi_name(&mut self, name: &str) -> Result<DeviceId, DeviceError> {
+        let snapshot = self.snapshot()?;
+        let mut matches = snapshot.entries.iter().filter(|e| {
+            e.path
+                .source_name
+                .as_ref()
+                .is_ok_and(|n| n.eq_ignore_ascii_case(name))
+        });
+        let first = matches
+            .next()
+            .ok_or_else(|| unsupported("screen lookup", format!("no display path for {name}")))?;
+        let others = matches.count();
+        if others > 0 {
+            return Err(DeviceError::AmbiguousIdentity(format!(
+                "{name} drives {} display targets",
+                others + 1
+            )));
+        }
+        Ok(first.info.id.clone())
+    }
+
     fn snapshot(&mut self) -> Result<Snapshot, DeviceError> {
         let entries: Vec<Entry> = self
             .native

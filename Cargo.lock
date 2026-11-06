@@ -632,6 +632,7 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "nitpick-core",
+ "nitpick-display",
  "serde_json",
 ]
 

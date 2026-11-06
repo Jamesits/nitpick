@@ -32,7 +32,7 @@ pub mod qobject {
 
         /// Renders the pattern at the pattern area size of a new full-screen
         /// window on `screen` and shows it. `metadata` is a JSON object, see
-        /// `metadata_from_json`. The result or error goes to `status`.
+        /// `request_from_json`. The result or error goes to `status`.
         #[qinvokable]
         #[cxx_name = "showPattern"]
         fn show_pattern(
@@ -50,8 +50,7 @@ use core::pin::Pin;
 
 use cxx_qt_lib::QString;
 use nitpick_core::driver::{
-    Capabilities, ContentLightLevel, Conversion, DepthSupport, EncodingSupport, Hdr10Request,
-    OutputLimits, Support,
+    ContentLightLevel, Hdr10Request, OutputLimits, Query, check_frame, check_open,
 };
 use nitpick_core::image::Image;
 use nitpick_core::metadata::{self, Hdr10Metadata, MasteringPrimaries};
@@ -60,7 +59,7 @@ use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, D65, Encoding, Format};
 use serde_json::{Value, json};
 
-use crate::display::ffi;
+use crate::display::{self, Backend, ffi};
 
 #[derive(Default)]
 pub struct LauncherRust {
@@ -77,48 +76,9 @@ fn parse(
     Ok((pattern.to_string().parse()?, Format::new(encoding, depth)))
 }
 
-/// Output path report of the current window code, which does not query the
-/// device yet. Values follow the `QRhi` feature matrix of the output driver
-/// design.
-fn qrhi_capabilities() -> Capabilities {
-    let depth = |d: BitDepth| {
-        let support = match SwapChainFormat::for_depth(d) {
-            SwapChainFormat::Hdr10 => DepthSupport {
-                available: Support::Yes,
-                path: "HDR10 swap chain".into(),
-                conversion: Conversion::Direct,
-                exact: Support::Unknown("the compositor can change codes".into()),
-            },
-            SwapChainFormat::ScRgb => DepthSupport {
-                available: Support::Yes,
-                path: "FP16 scRGB swap chain, 1.0 = 80 cd/m2".into(),
-                conversion: Conversion::ScRgb80,
-                exact: Support::No("FP16 cannot carry the levels marked *".into()),
-            },
-        };
-        (d, support)
-    };
-    let encoding = |e: Encoding| {
-        let interpretation = match e {
-            Encoding::PqFull => Support::Yes,
-            Encoding::PqNarrow => Support::No("codes are sent as full-range PQ".into()),
-            Encoding::HlgNarrow => {
-                Support::No("scope use only: codes are sent as full-range PQ".into())
-            }
-        };
-        let support = EncodingSupport {
-            input: Support::Yes,
-            interpretation,
-            auto_light_level: Support::Yes,
-        };
-        (e, support)
-    };
-    Capabilities {
-        depths: BitDepth::ALL.into_iter().map(depth).collect(),
-        encodings: Encoding::ALL.into_iter().map(encoding).collect(),
-        hdr_metadata: Support::Yes,
-        pixel_exact: Support::Yes,
-    }
+/// Output query of `screen` from its current native device state.
+fn screen_query(screen: i32) -> Query {
+    display::query(Backend::current(), &display::device_report(screen))
 }
 
 fn screen_size(screen: i32) -> Result<(usize, usize), String> {
@@ -128,15 +88,10 @@ fn screen_size(screen: i32) -> Result<(usize, usize), String> {
     Ok((size(width)?, size(height)?))
 }
 
-/// Builds the bridge metadata from the launcher JSON
+/// Parses the launcher JSON
 /// `{enabled, primaries, maxMastering, minMastering, fromPattern, maxCll, maxFall}`
-/// (luminances in cd/m²). With `fromPattern`, `MaxCLL` and `MaxFALL` come
-/// from the rendered image.
-fn metadata_from_json(
-    json: &str,
-    image: &Image,
-    depth: BitDepth,
-) -> Result<ffi::HdrMetadata, String> {
+/// (luminances in cd/m²). `None` if metadata is off.
+fn request_from_json(json: &str) -> Result<Option<Hdr10Request>, String> {
     let v: Value = serde_json::from_str(json).map_err(|e| format!("metadata: {e}"))?;
     let number = |key: &str| {
         v[key]
@@ -144,18 +99,8 @@ fn metadata_from_json(
             .filter(|n| n.is_finite() && *n >= 0.0)
             .ok_or_else(|| format!("metadata: `{key}` must be a number >= 0"))
     };
-    let enabled = v["enabled"].as_bool().unwrap_or(false);
-    if !enabled {
-        return Ok(ffi::HdrMetadata {
-            enabled,
-            chromaticity: [0; 8],
-            max_mastering: 0,
-            min_mastering: 0,
-            max_cll: 0,
-            max_fall: 0,
-            mastering_display: [0; 24],
-            content_light_level: [0; 4],
-        });
+    if !v["enabled"].as_bool().unwrap_or(false) {
+        return Ok(None);
     }
     let primaries: MasteringPrimaries = v["primaries"].as_str().unwrap_or_default().parse()?;
     let light_level = if v["fromPattern"].as_bool().unwrap_or(true) {
@@ -166,12 +111,33 @@ fn metadata_from_json(
             max_fall: number("maxFall")?,
         }
     };
-    let request = Hdr10Request {
+    Ok(Some(Hdr10Request {
         primaries: primaries.primaries(),
         white: D65,
         max_mastering_nits: number("maxMastering")?,
         min_mastering_nits: number("minMastering")?,
         light_level,
+    }))
+}
+
+/// Bridge metadata for `request`. Automatic light levels come from the
+/// rendered image.
+fn bridge_metadata(
+    request: Option<&Hdr10Request>,
+    image: &Image,
+    depth: BitDepth,
+) -> ffi::HdrMetadata {
+    let Some(request) = request else {
+        return ffi::HdrMetadata {
+            enabled: false,
+            chromaticity: [0; 8],
+            max_mastering: 0,
+            min_mastering: 0,
+            max_cll: 0,
+            max_fall: 0,
+            mastering_display: [0; 24],
+            content_light_level: [0; 4],
+        };
     };
     // QRhi sends every encoding as full-range PQ (see the QRhi design).
     let max = f64::from(depth.max_code());
@@ -190,8 +156,8 @@ fn metadata_from_json(
             Hdr10Metadata::chromaticity_code(y),
         ]
     });
-    Ok(ffi::HdrMetadata {
-        enabled,
+    ffi::HdrMetadata {
+        enabled: true,
         chromaticity: xy.concat().try_into().unwrap_or([0; 8]),
         max_mastering: Hdr10Metadata::luminance_code(md.max_mastering_nits),
         min_mastering: Hdr10Metadata::luminance_code(md.min_mastering_nits),
@@ -199,7 +165,7 @@ fn metadata_from_json(
         max_fall: Hdr10Metadata::light_level_code(md.max_fall),
         mastering_display: md.mastering_display_bytes(),
         content_light_level: md.content_light_level_bytes(),
-    })
+    }
 }
 
 fn show(
@@ -210,21 +176,36 @@ fn show(
     metadata: &QString,
 ) -> Result<String, String> {
     let (kind, format) = parse(pattern, encoding, depth)?;
+    let request = request_from_json(&metadata.to_string())?;
+    // Rejects an unavailable path, such as macOS 12-bit, before the window
+    // opens and before any conversion.
+    let query = screen_query(screen);
+    let caps = &query.capabilities;
+    let mut warnings = check_open(caps, format.depth).map_err(|e| e.to_string())?;
+    warnings.extend(check_frame(caps, format, request.as_ref()).map_err(|e| e.to_string())?);
     let swap_chain = SwapChainFormat::for_depth(format.depth);
-    let surface = ffi::open_pattern_window(screen, swap_chain == SwapChainFormat::ScRgb)
+    let opened = ffi::open_pattern_window(screen, swap_chain == SwapChainFormat::ScRgb)
         .map_err(|e| e.to_string())?;
-    let (width, height) = (surface.width, surface.height);
-    let size = |v: i32| usize::try_from(v).map_err(|_| format!("invalid pattern area size {v}"));
+    let surface = display::surface(display::display_id(screen), format.depth, &opened)
+        .map_err(|e| e.to_string())?;
+    let (width, height) = surface.size;
     let image = kind
-        .render(format, size(width)?, size(height)?)
+        .render(format, width, height)
         .map_err(|e| e.to_string())?;
     let pixels = swap_chain_bytes(&image, format).map_err(|e| e.to_string())?;
-    let md = metadata_from_json(&metadata.to_string(), &image, format.depth)?;
-    let result = ffi::present_pattern(&pixels, width, height, &md).map_err(|e| e.to_string())?;
+    let md = bridge_metadata(request.as_ref(), &image, format.depth);
+    let result = ffi::present_pattern(&pixels, opened.width, opened.height, &md)
+        .map_err(|e| e.to_string())?;
+    let warnings = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" Warnings: {}.", warnings.join("; "))
+    };
     Ok(format!(
-        "{} ({format}) at {width}x{height}. {}. {result} Esc closes the pattern.",
+        "{} ({format}) at {width}x{height}. {}. {}. {result}{warnings} Esc closes the pattern.",
         kind.label(),
-        surface.description
+        surface.description,
+        query.mode.description,
     ))
 }
 
@@ -279,7 +260,8 @@ impl qobject::Launcher {
     ) -> QString {
         let text = parse(pattern, encoding, depth)
             .and_then(|(kind, format)| {
-                let limits = OutputLimits::for_frame(&qrhi_capabilities(), format, None);
+                let limits =
+                    OutputLimits::for_frame(&screen_query(screen).capabilities, format, None);
                 kind.reference_table(format, screen_size(screen)?, &limits)
                     .map_err(|e| e.to_string())
             })

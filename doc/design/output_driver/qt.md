@@ -37,6 +37,31 @@ Only this adapter requires the Qt GUI thread and event loop. It stays in `nitpic
 
 Physical display discovery and capability queries use [`nitpick-display`](../display_device.md). The C++ bridge keeps window, swap-chain and submission work. It does not maintain a second native capability enumerator. The host refreshes the device report before calling synchronous `query` and `open`; a changed or missing device invalidates the cached mapping.
 
+### Screen to device mapping
+
+The bridge gives only the native identity of a Qt screen (`screenIdentity`). The adapter maps it to a device and reads the device through `DisplayDeviceControl::query_device`:
+
+| Platform | Screen identity | Device match |
+|---|---|---|
+| Windows | `MONITORINFOEXW::szDevice` of the screen's `HMONITOR` | The one active `DisplayConfig` path with this GDI source name. A source with two targets (clone mode) is ambiguous. |
+| macOS | `NSScreenNumber` of the `NSScreen` | The active display with this `CGDirectDisplayID`. |
+| Linux | `QScreen::name()` | Not implemented. See [Linux reports](../display_device.md#linux-reports) for the planned rule. |
+
+A screen without one match has an unknown device report with the reason. Output continues with the path rules below and warnings. **Status:** the launcher queries the device on the Qt GUI thread for each reference table and each "Show pattern". This deviates from the worker rule in [Identity and execution](../display_device.md#identity-and-execution). **Unverified:** the macOS mapping; it was not built or run on macOS.
+
+### Output report
+
+The adapter combines the device report with these path rules:
+
+| Field | Rule |
+|---|---|
+| 10-bit and 12-bit `available` | Windows: `No` if the device reports HDR off, also for SDR WCG. Reason: Qt 6.12 D3D11 gives both HDR swap chain formats only for an output in the DXGI PQ colour space (`QDxgiHdrInfo::isHdrCapable`). macOS 12-bit: `No` (see [Swap chain output](#swap-chain-output)). Linux 12-bit: `Unknown`, because the compositor scale is not tested. Otherwise `Yes`; the window checks swap chain support when it opens. |
+| `exact` | Never `Yes`: no device report includes calibration, dithering or compositor changes. `No` if the display reports no HDR support, if HDR is off, or if the wire depth is below the pattern depth. 12-bit is always `No` because of the FP16 limits. |
+| `hdr_metadata` | Windows and macOS: `Yes`. Linux: `Unknown`; the status line reports a missing `VK_EXT_hdr_metadata` after the pattern is shown. |
+| `ModeSettings` | Only from `DeviceMode`. Advanced Color support, SDR WCG, a gamut or a GPU colour conversion does not set `hdr_on`. `pixel_ratio` is 1. |
+
+The launcher applies `check_open` and `check_frame` before the window opens. Thus a rejected path, such as macOS 12-bit, fails before pixel conversion. If the window rejects the swap chain format, `open` fails with `Unsupported` and the window closes; there is no SDR fallback.
+
 The bridge queues the frame and returns to the Qt event loop. It reports the frame ID after its texture upload and a successful `endFrame`. This callback resolves the `present` future. `requestUpdate()` alone is not an acknowledgement. The bridge does not run a nested event loop. An unrecoverable error or a 10 s timeout from queueing the frame fails the future. Closing the window reports `Disconnected`. Cancellation removes the pending completion callback; late results are discarded by frame ID. This does not confirm physical scanout. The launcher then applies the [measurement delay](overview.md#measurement-delay).
 
 ## Signalling
@@ -60,7 +85,7 @@ No swap chain API (DXGI, Vulkan, Metal) has a 12-bit integer format. Thus the bi
 
 The scale is a property of the platform, not of the FP16 storage format. Windows scRGB uses 1.0 = 80 cd/m². The Linux path uses the scRGB convention of its extended-linear-sRGB Vulkan colour space; its compositor behaviour still needs a device test. GNOME 50 on Wayland gives no extended-linear-sRGB colour space (checked with NVIDIA 595 and with RADV in Mesa 26.0.8). Thus the 12-bit path fails there with "FP16 scRGB swap chain not supported".
 
-On Linux, the status line shows no display luminance and no HDR state. The Qt 6.12 Vulkan backend reads them only on Windows; on Linux it gives fixed default values (0 to 1000 cd/m²). A successful HDR10 open does not show that HDR is on: GNOME 50 on Wayland gives an HDR10 swap chain also for an SDR display with HDR off. **Unverified:** how the compositor converts the HDR10 signal for an SDR display.
+On Linux, the status line shows the display state as unknown until the screen mapping exists. The adapter does not use QRhi's `hdrInfo()`: the Qt 6.12 Vulkan backend reads the display only on Windows; on Linux it gives fixed default values (0 to 1000 cd/m²). A successful HDR10 open does not show that HDR is on: GNOME 50 on Wayland gives an HDR10 swap chain also for an SDR display with HDR off. **Unverified:** how the compositor converts the HDR10 signal for an SDR display.
 
 On macOS, Qt's linear HDR path uses 1.0 for the current SDR white. Its luminance varies with display settings and is not known to the driver. See [Qt's luminance behaviour](https://github.com/qt/qtbase/blob/6.12/src/gui/rhi/qrhi.cpp). Thus macOS reports `available = No` for 12-bit output, with the reason "absolute FP16 luminance scale unavailable". `open` also rejects it. Do not substitute 80, 100 or Qt's placeholder SDR-white value, or reduce the output to 10 bits. HDR10 10-bit output remains available when the swap chain supports it.
 

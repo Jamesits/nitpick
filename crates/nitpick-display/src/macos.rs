@@ -135,6 +135,26 @@ impl<N: MacNative> MacDisplay<N> {
         Self { native }
     }
 
+    /// The device of the Core Graphics display `display_id`, for example
+    /// the `NSScreenNumber` of a window-system screen.
+    ///
+    /// # Errors
+    /// [`DeviceError::Unsupported`] if no active display has this ID; a
+    /// `CGGetActiveDisplayList` failure.
+    pub fn device_for_display_id(&mut self, display_id: u32) -> Result<DeviceId, DeviceError> {
+        self.snapshot()?
+            .entries
+            .into_iter()
+            .find(|e| e.display.display_id == display_id)
+            .map(|e| e.info.id)
+            .ok_or_else(|| {
+                unsupported(
+                    "screen lookup",
+                    format!("no active display with ID {display_id}"),
+                )
+            })
+    }
+
     fn snapshot(&mut self) -> Result<Snapshot, DeviceError> {
         let displays = self.native.displays()?;
         let screens = self.native.screens();

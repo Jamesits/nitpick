@@ -6,6 +6,12 @@
 //! BT.709 primaries, 1.0 = 80 cd/m²): the compositor or the driver encodes
 //! the values back to PQ / BT.2020 codes at the wire bit depth.
 //!
+//! The 80 cd/m² scale is the Windows scRGB convention. The Vulkan
+//! extended-linear sRGB colour space uses the same convention; no
+//! compositor test confirms it. It does not apply to other linear HDR
+//! formats: macOS EDR has 1.0 = the current SDR white, so the `QRhi`
+//! driver rejects 12-bit output there and this conversion is not used.
+//!
 //! In both cases a code value is a full-range PQ code on the wire, also for
 //! the narrow-range encodings (see [`crate::signal::Encoding`]).
 
@@ -25,7 +31,8 @@ use crate::signal::{
 pub enum SwapChainFormat {
     /// `R10G10B10A2_UNORM` with PQ / BT.2020.
     Hdr10,
-    /// `R16G16B16A16_FLOAT` with linear scRGB.
+    /// `R16G16B16A16_FLOAT` with linear scRGB, 1.0 = 80 cd/m². Only for a
+    /// platform with this scale; see the module documentation.
     ScRgb,
 }
 
@@ -196,7 +203,7 @@ fn matrices() -> &'static (Matrix, Matrix) {
     })
 }
 
-/// scRGB value 1.0 in cd/m².
+/// scRGB value 1.0 in cd/m² (Windows scRGB). Not the macOS EDR scale.
 const SCRGB_WHITE_NITS: f64 = 80.0;
 
 /// Decodes scRGB components to codes at `depth` with exact arithmetic: the

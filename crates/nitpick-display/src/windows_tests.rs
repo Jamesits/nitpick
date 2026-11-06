@@ -467,3 +467,37 @@ fn profile_control_is_explicitly_unsupported() {
         Err(DeviceError::Unsupported { reason, .. }) if reason.contains("not implemented")
     ));
 }
+
+#[test]
+fn gdi_name_maps_to_its_device() {
+    let fake = Fake::default();
+    fake.set(
+        vec![hdr_path(1, "Monitor"), hdr_path(2, "Monitor")],
+        vec![pq(1), pq(2)],
+    );
+    let mut b = fake.backend();
+    let devices = b.devices().unwrap();
+    // GDI names are case-insensitive.
+    assert_eq!(
+        b.device_for_gdi_name(r"\\.\display2").unwrap(),
+        devices[1].id
+    );
+    assert!(matches!(
+        b.device_for_gdi_name(r"\\.\DISPLAY3"),
+        Err(DeviceError::Unsupported { .. })
+    ));
+}
+
+/// In clone mode one source drives two targets; the screen has no single
+/// device.
+#[test]
+fn cloned_source_is_ambiguous() {
+    let fake = Fake::default();
+    let mut clone = hdr_path(2, "Monitor");
+    clone.source_name = Ok(r"\\.\DISPLAY1".into());
+    fake.set(vec![hdr_path(1, "Monitor"), clone], vec![pq(1)]);
+    assert!(matches!(
+        fake.backend().device_for_gdi_name(r"\\.\DISPLAY1"),
+        Err(DeviceError::AmbiguousIdentity(_))
+    ));
+}

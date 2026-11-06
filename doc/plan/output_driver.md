@@ -6,16 +6,6 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 11. Report QRhi capabilities and reject unknown FP16 scales
-
-Requires: 2, 5, 6, 7, 9, 10.
-
-TODO:
-
-- Read physical device capabilities and mode through `DisplayDeviceControl` in `display.rs`. Remove duplicated native enumeration from `pattern_window.cpp`; keep its QRhi path-support checks. Combine the reports under the [feature matrix](../design/output_driver/overview.md#feature-matrix). Restrict the scale assumptions and comments in `output.rs` to the supported scRGB path.
-- Verify that macOS 12-bit output fails before conversion with the documented scale reason. Keep supported 10-bit HDR10 available. Test unsupported swap chains without an SDR fallback, Windows HDR-off reporting, and unknown mode fields on other platforms. Linux compositor scale remains unverified until capture and device qualification.
-- Test Windows SDR WCG separately from HDR. Generic Advanced Color enablement or an active GPU colour conversion must not alone set `hdr_on` to true. Unknown calibration or dithering state must not produce an exact-code claim.
-
 ### 12. Resolve and inspect QRhi metadata
 
 Requires: 11.
@@ -53,8 +43,8 @@ Requires: 14, 15.
 
 TODO:
 
-- Change `launcher.rs` and `qml/main.qml` to refresh native device state before the synchronous output query and open. Map Qt screens by native identity. Render at the returned size, pass metadata requests and retain frame data until completion or cancellation. Remove eager metadata calculation from `metadata_from_json`.
-- Add the Linux screen mapping in [Linux reports](../design/display_device.md#linux-reports) as a portable function in `nitpick-display`, next to the evidence format it reads. With injected device lists, verify kernel names, the GNOME `HDMI` form, an unknown name, one name on two cards, and the X11 EDID MD5 rule. On GNOME 50, map both screens with the Wayland and xcb Qt platforms.
+- Change `launcher.rs` and `qml/main.qml` to refresh native device state on a worker before the synchronous output query and open; the launcher now queries on the GUI thread. Replace the screen-index `DisplayId` with the native screen mapping in `display.rs`. Render at the returned size, pass metadata requests and retain frame data until completion or cancellation. Remove the launcher metadata resolution (`bridge_metadata`); the driver resolves the request.
+- Add the Linux screen mapping in [Linux reports](../design/display_device.md#linux-reports) as a portable function in `nitpick-display`, next to the evidence format it reads. Use it in the Linux branch of `display.rs`; Windows and macOS map by GDI name and display ID. Run the macOS mapping on a Mac. With injected device lists, verify kernel names, the GNOME `HDMI` form, an unknown name, one name on two cards, and the X11 EDID MD5 rule. On GNOME 50, map both screens with the Wayland and xcb Qt platforms.
 - Verify depth selection, mode reporting and warnings. Keep QRhi narrow PQ and HLG selectable. Replacement, display change and closure must drop the future before reusing or closing the driver. Controls must remain active, and late results must not change the current status.
 
 ### 17. Add the Qt measurement delay

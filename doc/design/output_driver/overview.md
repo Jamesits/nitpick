@@ -204,8 +204,8 @@ Before a measurement, set the delay for the display and probe, show the pattern,
 | Feature | QRhi | Browser |
 |---|---|---|
 | Displays | local screens (`QGuiApplication::screens()`) | connected web clients |
-| 10-bit | HDR10 swap chain, exact if the compositor does not change codes | 16-bit PNG, cICP; exact: `Unknown` |
-| 12-bit | FP16 scRGB where the luminance scale is known; macOS: `available = No`; see [Swap chain output](qt.md#swap-chain-output) | 16-bit PNG, cICP; exact: `Unknown` |
+| 10-bit | HDR10 swap chain; Windows with HDR off: `available = No`; exact: never `Yes`; see [Output report](qt.md#output-report) | 16-bit PNG, cICP; exact: `Unknown` |
+| 12-bit | FP16 scRGB where the luminance scale is known; macOS: `available = No`; Linux: `Unknown`; see [Swap chain output](qt.md#swap-chain-output) | 16-bit PNG, cICP; exact: `Unknown` |
 | `pq-narrow` / `pq-full` | `input = Yes`; written as full-range PQ codes; narrow interpretation: `No` | full-range PQ PNG; narrow input is rescaled; see [Code to PNG sample](browser.md#code-to-png-sample) |
 | `hlg-narrow` | `input = Yes`, `interpretation = No`; scope use only | full-range HLG PNG; narrow input is rescaled; interpretation: `Unknown` |
 | Automatic light levels | full-range PQ interpretation of all input encodings | PQ after PNG sample conversion; HLG: `No` |
@@ -217,7 +217,7 @@ Before a measurement, set the delay for the display and probe, show the pattern,
 | `sdr_white_nits` | device report where readable; otherwise `None` | `None` |
 | `pixel_exact` | `Yes` (swap chain size = pattern size) | `Yes` only for an integer `pixel_ratio` and a layout that fills the viewport |
 
-All native fields come through `DisplayDeviceControl`. Linux and macOS fields remain `None` where the selected backend cannot read them. Native capability reports do not establish code preservation or enable an FP16 path with an unknown luminance scale.
+All native fields come through `DisplayDeviceControl`. Fields remain `None` where the selected backend cannot read them, or where a screen has no device mapping (QRhi on Linux). Native capability reports do not establish code preservation or enable an FP16 path with an unknown luminance scale.
 
 ## Technical decisions
 

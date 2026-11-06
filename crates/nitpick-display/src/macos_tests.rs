@@ -411,3 +411,16 @@ fn profile_control_is_explicitly_unsupported() {
         Err(DeviceError::Unsupported { reason, .. }) if reason.contains("not implemented")
     ));
 }
+
+#[test]
+fn display_id_maps_to_its_device() {
+    let fake = Fake::default();
+    fake.set(vec![display(1), display(2)], vec![]);
+    let mut b = fake.backend();
+    let devices = b.devices().unwrap();
+    assert_eq!(b.device_for_display_id(2).unwrap(), devices[1].id);
+    assert!(matches!(
+        b.device_for_display_id(3),
+        Err(DeviceError::Unsupported { .. })
+    ));
+}

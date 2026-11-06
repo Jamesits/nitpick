@@ -43,6 +43,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 using nitpick::HdrMetadata;
+using nitpick::ScreenIdentity;
 
 // Time for the compositor to map the window and apply the full-screen state.
 constexpr int kInitTimeoutMs = 5000;
@@ -98,9 +99,22 @@ RECT monitorRect(QScreen *screen) {
     return info.rcMonitor;
 }
 
-// Finds the adapter that scans out `monitor`. Rendering on that adapter
-// avoids a cross-adapter copy on hybrid-GPU systems.
-void findOutput(HMONITOR monitor, LUID &adapterOut, ComPtr<IDXGIOutput6> &outputOut) {
+// GDI name of the monitor, for example `\\.\DISPLAY1`. The Rust adapter
+// maps it to a display device; capabilities come from that device report.
+std::string gdiName(QScreen *screen) {
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof info;
+    if (!GetMonitorInfoW(monitorOf(screen), &info)) {
+        throw std::runtime_error("GetMonitorInfoW failed");
+    }
+    char name[64];
+    std::snprintf(name, sizeof name, "%ls", info.szDevice);
+    return name;
+}
+
+// The adapter that scans out `monitor`. Rendering on that adapter avoids a
+// cross-adapter copy on hybrid-GPU systems.
+LUID adapterOf(HMONITOR monitor) {
     ComPtr<IDXGIFactory1> factory;
     check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "CreateDXGIFactory1");
     ComPtr<IDXGIAdapter1> adapter;
@@ -108,29 +122,14 @@ void findOutput(HMONITOR monitor, LUID &adapterOut, ComPtr<IDXGIOutput6> &output
         ComPtr<IDXGIOutput> output;
         for (UINT o = 0; adapter->EnumOutputs(o, &output) != DXGI_ERROR_NOT_FOUND; ++o) {
             DXGI_OUTPUT_DESC desc{};
-            if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == monitor &&
-                SUCCEEDED(output.As(&outputOut))) {
+            if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == monitor) {
                 DXGI_ADAPTER_DESC1 ad{};
                 check(adapter->GetDesc1(&ad), "GetDesc1");
-                adapterOut = ad.AdapterLuid;
-                return;
+                return ad.AdapterLuid;
             }
         }
     }
     throw std::runtime_error("no DXGI output for the selected screen");
-}
-
-std::string describeOutput(IDXGIOutput6 *output) {
-    DXGI_OUTPUT_DESC1 d{};
-    if (FAILED(output->GetDesc1(&d))) {
-        return "output description unavailable";
-    }
-    const bool hdr = d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-    char name[64];
-    std::snprintf(name, sizeof name, "%ls", d.DeviceName);
-    return sformat("%s: %u bpc, Windows HDR %s, EDID peak %.0f cd/m2, min %.4f cd/m2", name,
-                  d.BitsPerColor, hdr ? "on" : "OFF (signal is converted to SDR)",
-                  d.MaxLuminance, d.MinLuminance);
 }
 
 #elif !defined(Q_OS_MACOS)
@@ -182,7 +181,7 @@ public:
         : m_fp16(fp16), m_expectedSize(screenPatternSize(screen)) {
 #if defined(Q_OS_WIN)
         setSurfaceType(QSurface::Direct3DSurface);
-        findOutput(monitorOf(screen), m_adapter, m_output);
+        m_adapter = adapterOf(monitorOf(screen));
 #elif defined(Q_OS_MACOS)
         setSurfaceType(QSurface::MetalSurface);
 #else
@@ -227,31 +226,19 @@ public:
                      QPoint(s.width() - px(m.right()) - 1, s.height() - px(m.bottom()) - 1));
     }
 
+    // Swap chain and backend only. The display state comes from the device
+    // report of the Rust adapter, not from QRhi's hdrInfo() or DXGI here.
     std::string describe() const {
         std::string s = m_fp16 ? "FP16 scRGB swap chain" : "HDR10 swap chain";
         s += " (" + std::string(m_rhi->backendName()) + ")";
-#if defined(Q_OS_WIN)
-        s += "; " + describeOutput(m_output.Get());
-#elif !defined(Q_OS_MACOS)
-        // Qt's Vulkan hdrInfo() queries the display only on Windows. Elsewhere
-        // it returns the fixed QRhiSwapChain defaults (0 to 1000 cd/m²).
-        s += "; display luminance and HDR state unknown";
-#else
-        const QRhiSwapChainHdrInfo i = m_sc->hdrInfo();
-        if (i.limitsType == QRhiSwapChainHdrInfo::LuminanceInNits) {
-            s += sformat("; display %.4f to %.0f cd/m2", i.limits.luminanceInNits.minLuminance,
-                        i.limits.luminanceInNits.maxLuminance);
-        } else {
-            s += sformat("; EDR headroom %.2f (potential %.2f)",
-                        i.limits.colorComponentValue.maxColorComponentValue,
-                        i.limits.colorComponentValue.maxPotentialColorComponentValue);
-        }
-#endif
         if (patternArea().size() != m_expectedSize) {
             s += "; WARNING: the pattern area differs from the screen size of the reference table";
         }
         return s;
     }
+
+    // The display rejected the swap chain format. No SDR fallback is used.
+    bool formatUnsupported() const { return m_unsupported; }
 
     std::string present(const std::uint8_t *data, std::size_t size, int width, int height,
                         const HdrMetadata &metadata) {
@@ -389,6 +376,7 @@ private:
         const auto format = m_fp16 ? QRhiSwapChain::HDRExtendedSrgbLinear : QRhiSwapChain::HDR10;
         // Without this check QRhi falls back to an SDR swap chain silently.
         if (!m_sc->isFormatSupported(format)) {
+            m_unsupported = true;
             throw std::runtime_error(
                 std::string(m_fp16 ? "FP16 scRGB" : "HDR10") +
                 " swap chain not supported on this display; turn on HDR in the system "
@@ -514,12 +502,13 @@ private:
     // Pattern area size of the reference table, see screenPatternSize().
     QSize m_expectedSize;
     bool m_ready = false;
+    // The swap chain format check failed; see init().
+    bool m_unsupported = false;
     std::string m_error;
     std::function<void()> m_onSettled;
     QByteArray m_pending;
 #if defined(Q_OS_WIN)
     LUID m_adapter{};
-    ComPtr<IDXGIOutput6> m_output;
 #endif
     // Declared first, destroyed last: every QRhi resource needs the QRhi.
     std::unique_ptr<QRhi> m_rhi;
@@ -546,14 +535,36 @@ std::int32_t screenPixelHeight(std::int32_t screen) {
     return screenPatternSize(screenAt(screen)).height();
 }
 
+ScreenIdentity screenIdentity(std::int32_t screen) {
+    QScreen *s = screenAt(screen);
+    ScreenIdentity id{};
+    id.name = rust::String(s->name().toStdString());
+#if defined(Q_OS_WIN)
+    id.gdi_name = rust::String(gdiName(s));
+#elif defined(Q_OS_MACOS)
+    id.display_id = displayIdOf(s);
+#endif
+    return id;
+}
+
 PatternSurface openPatternWindow(std::int32_t screen, bool fp16) {
     QScreen *target = screenAt(screen);
     delete g_window.data();
     auto window = std::make_unique<PatternWindow>(target, fp16);
     window->showFullScreen();
     window->requestActivate();
-    window->waitUntilReady();
-    PatternSurface surface;
+    PatternSurface surface{};
+    try {
+        window->waitUntilReady();
+    } catch (const std::exception &e) {
+        if (!window->formatUnsupported()) {
+            throw;
+        }
+        surface.format_supported = false;
+        surface.description = rust::String(e.what());
+        return surface;
+    }
+    surface.format_supported = true;
     surface.width = window->patternArea().width();
     surface.height = window->patternArea().height();
     surface.description = rust::String(window->describe());

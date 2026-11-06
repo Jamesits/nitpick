@@ -43,6 +43,18 @@ QSize screenSafePixelSize(QScreen *screen) {
     }
 }
 
+std::uint32_t displayIdOf(QScreen *screen) {
+    @autoreleasepool {
+        auto *native = screen->nativeInterface<QNativeInterface::QCocoaScreen>();
+        NSScreen *s = native ? native->nativeScreen() : nil;
+        NSNumber *number = s ? s.deviceDescription[@"NSScreenNumber"] : nil;
+        if (!number) {
+            throw std::runtime_error("screen has no NSScreenNumber");
+        }
+        return number.unsignedIntValue;
+    }
+}
+
 void setMetalHdrMetadata(QWindow *window, const HdrMetadata &md) {
     @autoreleasepool {
         // The NSView layer is a container; the CAMetalLayer is its content
