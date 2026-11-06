@@ -32,7 +32,8 @@ pub mod qobject {
 
         /// Renders the pattern at the pattern area size of a new full-screen
         /// window on `screen` and shows it. `metadata` is a JSON object, see
-        /// `request_from_json`. The result or error goes to `status`.
+        /// `request_from_json`. `status` shows the submission; the result
+        /// or error follows the window's acknowledgement.
         #[qinvokable]
         #[cxx_name = "showPattern"]
         fn show_pattern(
@@ -44,13 +45,16 @@ pub mod qobject {
             metadata: &QString,
         );
     }
+
+    impl cxx_qt::Threading for Launcher {}
 }
 
 use core::pin::Pin;
 
+use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use nitpick_core::driver::{
-    ContentLightLevel, Hdr10Request, OutputLimits, Query, check_frame, check_open,
+    ContentLightLevel, Hdr10Request, OutputError, OutputLimits, Query, check_frame, check_open,
 };
 use nitpick_core::metadata::MasteringPrimaries;
 use nitpick_core::output::{SwapChainFormat, swap_chain_bytes};
@@ -60,10 +64,26 @@ use serde_json::{Value, json};
 
 use crate::display::{self, Backend, ffi};
 use crate::hdr_metadata::{self, BridgeSink, SwapChainMetadata};
+use crate::submission::{self, Registration};
 
 #[derive(Default)]
 pub struct LauncherRust {
     status: QString,
+    /// Completion of the last submitted frame. Dropping it cancels the
+    /// completion.
+    pending: Option<Registration>,
+    /// Counts "Show pattern" requests. A queued status update of an older
+    /// request does not apply.
+    generation: u64,
+}
+
+/// A converted pattern for the open window.
+struct Prepared {
+    pixels: Vec<u8>,
+    width: i32,
+    height: i32,
+    /// Status line after the acknowledgement.
+    status: String,
 }
 
 fn parse(
@@ -120,13 +140,13 @@ fn request_from_json(json: &str) -> Result<Option<Hdr10Request>, String> {
     }))
 }
 
-fn show(
+fn prepare(
     pattern: &QString,
     encoding: &QString,
     depth: &QString,
     screen: i32,
     metadata: &QString,
-) -> Result<String, String> {
+) -> Result<Prepared, String> {
     let (kind, format) = parse(pattern, encoding, depth)?;
     let request = request_from_json(&metadata.to_string())?;
     // Rejects an unavailable path before the window opens and before any
@@ -150,18 +170,22 @@ fn show(
     // The window is new, so its swap chain has no metadata yet.
     let result =
         SwapChainMetadata::default().apply(&mut BridgeSink, Backend::current(), md.as_ref());
-    ffi::present_pattern(&pixels, opened.width, opened.height).map_err(|e| e.to_string())?;
     let warnings = if warnings.is_empty() {
         String::new()
     } else {
         format!(" Warnings: {}.", warnings.join("; "))
     };
-    Ok(format!(
-        "{} ({format}) at {width}x{height}. {}. {}. {result}{warnings} Esc closes the pattern.",
-        kind.label(),
-        surface.description,
-        query.mode.description,
-    ))
+    Ok(Prepared {
+        pixels,
+        width: opened.width,
+        height: opened.height,
+        status: format!(
+            "{} ({format}) at {width}x{height}. {}. {}. {result}{warnings} Esc closes the pattern.",
+            kind.label(),
+            surface.description,
+            query.mode.description,
+        ),
+    })
 }
 
 fn id_labels<T: Copy>(
@@ -225,15 +249,50 @@ impl qobject::Launcher {
     }
 
     pub fn show_pattern(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         pattern: &QString,
         encoding: &QString,
         depth: &QString,
         screen: i32,
         metadata: &QString,
     ) {
-        let status = show(pattern, encoding, depth, screen, metadata)
-            .unwrap_or_else(|e| format!("Error: {e}"));
-        self.set_status(QString::from(&status));
+        // Cancel the earlier completion before its window closes, so that
+        // its `Disconnected` does not reach the status line.
+        let generation = {
+            let mut state = self.as_mut().rust_mut();
+            state.pending = None;
+            state.generation += 1;
+            state.generation
+        };
+        let thread = self.qt_thread();
+        let submitted = prepare(pattern, encoding, depth, screen, metadata).and_then(|p| {
+            let Prepared {
+                pixels,
+                width,
+                height,
+                status,
+            } = p;
+            let done = move |result: Result<(), OutputError>| {
+                let text = match result {
+                    Ok(()) => status,
+                    Err(e) => format!("Error: {e}"),
+                };
+                // The launcher may be gone at exit.
+                let _ = thread.queue(move |mut launcher| {
+                    if launcher.rust().generation == generation {
+                        launcher.as_mut().rust_mut().pending = None;
+                        launcher.set_status(QString::from(&text));
+                    }
+                });
+            };
+            submission::present(&pixels, width, height, done)
+        });
+        match submitted {
+            Ok(registration) => {
+                self.as_mut().rust_mut().pending = Some(registration);
+                self.set_status(QString::from("Submitting pattern"));
+            }
+            Err(e) => self.set_status(QString::from(&format!("Error: {e}"))),
+        }
     }
 }

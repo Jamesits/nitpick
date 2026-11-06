@@ -19,7 +19,7 @@ std::int32_t screenPixelHeight(std::int32_t screen);
 ScreenIdentity screenIdentity(std::int32_t screen);
 PatternSurface openPatternWindow(std::int32_t screen, bool fp16);
 void presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
-                    std::int32_t height);
+                    std::int32_t height, std::uint64_t frame, std::int32_t timeoutMs);
 void setDxgiHdrMetadata(const DxgiHdrMetadata &metadata);
 void setVulkanHdrMetadata(const VulkanHdrMetadata &metadata);
 void setMetalHdrMetadata(const MetalHdrMetadata &metadata);

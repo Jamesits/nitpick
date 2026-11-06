@@ -199,6 +199,10 @@ public:
         setTitle(QStringLiteral("nitpick pattern"));
     }
 
+    // Closing or replacing the window fails a pending frame with
+    // Disconnected.
+    ~PatternWindow() override { nitpick::frameWindowClosed(); }
+
     // Blocks until the swap chain exists and the pattern area has the size of
     // the reference table. GNOME on Wayland first exposes the window at the
     // work-area size and applies the full-screen state later. After the
@@ -244,45 +248,27 @@ public:
     // Empty if QRhi accepted the swap chain format; see init().
     const std::string &fallback() const { return m_fallback; }
 
-    void present(const std::uint8_t *data, std::size_t size, int width, int height) {
+    // Queues the frame and returns; render() uploads it and reports it by
+    // frame ID. A frame queued before the render replaces this one, so
+    // late pixels never upload over a newer request.
+    void present(const std::uint8_t *data, std::size_t size, int width, int height,
+                 std::uint64_t frame, int timeoutMs) {
         if (QSize(width, height) != patternArea().size()) {
             throw std::runtime_error("image size differs from the pattern area size");
         }
-        const auto format = m_fp16 ? QRhiTexture::RGBA16F : QRhiTexture::RGB10A2;
         const std::size_t bytesPerPixel = m_fp16 ? 8 : 4;
         if (size != std::size_t(width) * std::size_t(height) * bytesPerPixel) {
             throw std::runtime_error("pixel buffer does not match the image size");
         }
-        if (!m_rhi->isTextureFormatSupported(format)) {
+        if (!m_rhi->isTextureFormatSupported(textureFormat())) {
             throw std::runtime_error("the GPU cannot sample the pattern texture format");
         }
-        m_ps.reset();
-        m_srb.reset();
-        m_tex.reset(m_rhi->newTexture(format, QSize(width, height)));
-        if (!m_tex->create()) {
-            throw std::runtime_error("cannot create the pattern texture");
-        }
-        m_srb.reset(m_rhi->newShaderResourceBindings());
-        m_srb->setBindings(
-            {QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::FragmentStage,
-                                                      m_area.get()),
-             QRhiShaderResourceBinding::sampledTexture(
-                 1, QRhiShaderResourceBinding::FragmentStage, m_tex.get(), m_sampler.get())});
-        if (!m_srb->create()) {
-            throw std::runtime_error("cannot create the shader resource bindings");
-        }
-        m_ps.reset(m_rhi->newGraphicsPipeline());
-        m_ps->setShaderStages(
-            {{QRhiShaderStage::Vertex, loadShader(kPatternVertQsb, sizeof kPatternVertQsb)},
-             {QRhiShaderStage::Fragment, loadShader(kPatternFragQsb, sizeof kPatternFragQsb)}});
-        m_ps->setVertexInputLayout({});
-        m_ps->setShaderResourceBindings(m_srb.get());
-        m_ps->setRenderPassDescriptor(m_rp.get());
-        if (!m_ps->create()) {
-            throw std::runtime_error("cannot create the graphics pipeline");
-        }
         m_pending = QByteArray(reinterpret_cast<const char *>(data), qsizetype(size));
+        m_pendingSize = QSize(width, height);
         requestUpdate();
+        // The Rust side ignores the timer of a frame that was already
+        // uploaded or replaced.
+        QTimer::singleShot(timeoutMs, this, [frame] { nitpick::frameTimedOut(frame); });
     }
 
     // Each metadata call applies at the next present of the swap chain.
@@ -466,6 +452,41 @@ private:
         }
     }
 
+    QRhiTexture::Format textureFormat() const {
+        return m_fp16 ? QRhiTexture::RGBA16F : QRhiTexture::RGB10A2;
+    }
+
+    // Texture, bindings and pipeline for an image of `size`. Builds new
+    // objects first, so that a failure keeps the previous pattern.
+    void preparePattern(QSize size) {
+        std::unique_ptr<QRhiTexture> tex(m_rhi->newTexture(textureFormat(), size));
+        if (!tex->create()) {
+            throw std::runtime_error("cannot create the pattern texture");
+        }
+        std::unique_ptr<QRhiShaderResourceBindings> srb(m_rhi->newShaderResourceBindings());
+        srb->setBindings(
+            {QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::FragmentStage,
+                                                      m_area.get()),
+             QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                                                       tex.get(), m_sampler.get())});
+        if (!srb->create()) {
+            throw std::runtime_error("cannot create the shader resource bindings");
+        }
+        std::unique_ptr<QRhiGraphicsPipeline> ps(m_rhi->newGraphicsPipeline());
+        ps->setShaderStages(
+            {{QRhiShaderStage::Vertex, loadShader(kPatternVertQsb, sizeof kPatternVertQsb)},
+             {QRhiShaderStage::Fragment, loadShader(kPatternFragQsb, sizeof kPatternFragQsb)}});
+        ps->setVertexInputLayout({});
+        ps->setShaderResourceBindings(srb.get());
+        ps->setRenderPassDescriptor(m_rp.get());
+        if (!ps->create()) {
+            throw std::runtime_error("cannot create the graphics pipeline");
+        }
+        m_ps = std::move(ps);
+        m_srb = std::move(srb);
+        m_tex = std::move(tex);
+    }
+
     void render() {
         if (m_sc->currentPixelSize() != m_sc->surfacePixelSize()) {
             // The pattern texture keeps its size; the shader draws it 1:1
@@ -477,7 +498,17 @@ private:
             m_sc->createOrResize();
             r = m_rhi->beginFrame(m_sc.get());
         }
+        if (r == QRhi::FrameOpSwapChainOutOfDate) {
+            // Transient, for example during a mode change. The queued
+            // frame retries until its timeout.
+            if (!m_pending.isEmpty()) {
+                requestUpdate();
+            }
+            return;
+        }
         if (r != QRhi::FrameOpSuccess) {
+            m_pending.clear();
+            nitpick::frameFailed(frameOpError("beginFrame", r));
             return;
         }
         QRhiResourceUpdateBatch *updates = m_rhi->nextResourceUpdateBatch();
@@ -485,12 +516,21 @@ private:
         const QPoint origin = patternArea().topLeft();
         const std::int32_t area[2] = {origin.x(), origin.y()};
         updates->updateDynamicBuffer(m_area.get(), 0, sizeof area, area);
-        if (!m_pending.isEmpty()) {
-            updates->uploadTexture(
-                m_tex.get(),
-                QRhiTextureUploadEntry(0, 0, QRhiTextureSubresourceUploadDescription(m_pending)));
-            m_pending.clear();
+        // 0 if no frame is queued, or if the queued frame timed out: its
+        // pixels must not appear after the host got the error.
+        const std::uint64_t frame = nitpick::frameTakeUpload();
+        std::string error;
+        if (frame != 0) {
+            try {
+                preparePattern(m_pendingSize);
+                updates->uploadTexture(
+                    m_tex.get(), QRhiTextureUploadEntry(
+                                     0, 0, QRhiTextureSubresourceUploadDescription(m_pending)));
+            } catch (const std::exception &e) {
+                error = e.what();
+            }
         }
+        m_pending.clear();
         QRhiCommandBuffer *cb = m_sc->currentFrameCommandBuffer();
         cb->beginPass(m_sc->currentFrameRenderTarget(), Qt::black, {1.0f, 0}, updates);
         if (m_ps) {
@@ -501,7 +541,24 @@ private:
             cb->draw(3);
         }
         cb->endPass();
-        m_rhi->endFrame(m_sc.get());
+        r = m_rhi->endFrame(m_sc.get());
+        if (frame != 0) {
+            if (error.empty() && r != QRhi::FrameOpSuccess) {
+                error = frameOpError("endFrame", r);
+            }
+            nitpick::frameEnded(frame, error);
+        }
+    }
+
+    static std::string frameOpError(const char *call, QRhi::FrameOpResult r) {
+        switch (r) {
+        case QRhi::FrameOpDeviceLost:
+            return std::string(call) + " failed: graphics device lost";
+        case QRhi::FrameOpSwapChainOutOfDate:
+            return std::string(call) + " failed: swap chain out of date";
+        default:
+            return std::string(call) + " failed";
+        }
     }
 
 #if defined(Q_OS_WIN)
@@ -521,7 +578,9 @@ private:
     std::string m_fallback;
     std::string m_error;
     std::function<void()> m_onSettled;
+    // Pixels of the queued frame; its ID is in the Rust submission state.
     QByteArray m_pending;
+    QSize m_pendingSize;
 #if defined(Q_OS_WIN)
     LUID m_adapter{};
 #endif
@@ -586,8 +645,8 @@ PatternSurface openPatternWindow(std::int32_t screen, bool fp16) {
 }
 
 void presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
-                    std::int32_t height) {
-    openWindow().present(pixels.data(), pixels.size(), width, height);
+                    std::int32_t height, std::uint64_t frame, std::int32_t timeoutMs) {
+    openWindow().present(pixels.data(), pixels.size(), width, height, frame, timeoutMs);
 }
 
 void setDxgiHdrMetadata(const DxgiHdrMetadata &metadata) {

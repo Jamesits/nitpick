@@ -70,7 +70,23 @@ The window checks the swap chain format with `QRhiSwapChain::isFormatSupported`.
 
 If `SetHDRMetaData` fails on Windows, the status line shows that the metadata was not sent. The pattern stays on the screen.
 
-The bridge queues the frame and returns to the Qt event loop. It reports the frame ID after its texture upload and a successful `endFrame`. This callback resolves the `present` future. `requestUpdate()` alone is not an acknowledgement. The bridge does not run a nested event loop. An unrecoverable error or a 10 s timeout from queueing the frame fails the future. Closing the window reports `Disconnected`. Cancellation removes the pending completion callback; late results are discarded by frame ID. This does not confirm physical scanout. The launcher then applies the [measurement delay](overview.md#measurement-delay).
+The bridge queues the frame and returns to the Qt event loop. It reports the frame ID after its texture upload and a successful `endFrame`. This callback resolves the `present` future. `requestUpdate()` alone is not an acknowledgement. The bridge does not run a nested event loop. This does not confirm physical scanout. The launcher then applies the [measurement delay](overview.md#measurement-delay).
+
+`submission.rs` keeps the frame state on the Qt GUI thread. The window keeps one pixel buffer; the render reports its events by frame ID:
+
+| Event | Result |
+|---|---|
+| Render uploads the queued frame, `endFrame` succeeds | Success |
+| `beginFrame` gives an error or device loss | `Platform` error for the queued frame; it does not upload later |
+| `beginFrame` gives an out-of-date swap chain after one resize | The window retries at the next update |
+| Texture or pipeline creation fails, or `endFrame` fails | `Platform` error for the uploaded frame; the previous pattern stays |
+| 10 s from queueing without an upload | `Timeout`; the frame does not upload later |
+| The window closes or is replaced | `Disconnected` for the pending completion |
+| A new frame before the render | The new frame replaces the old pixels; only the new frame uploads |
+
+Cancellation removes the completion. A cancelled frame that is queued can still upload, because the window can show it until a replacement. Late events of other frame IDs do nothing. The timeout timer of a cancelled frame stays in Qt until it expires or the window closes; it then does nothing.
+
+**Status:** the launcher does not use `OutputDriver` yet. It shows "Submitting pattern" and sets the result status from the completion. A new "Show pattern" cancels the earlier completion before it opens the new window.
 
 ## Signalling
 

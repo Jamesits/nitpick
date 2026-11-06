@@ -100,11 +100,20 @@ pub mod ffi {
         #[cxx_name = "openPatternWindow"]
         fn open_pattern_window(screen: i32, fp16: bool) -> Result<PatternSurface>;
 
-        /// Shows `pixels` in the open window: tightly packed rows in the swap
-        /// chain format, `width × height` equal to the pattern area size.
+        /// Queues `pixels` as frame `frame` in the open window and returns:
+        /// tightly packed rows in the swap chain format, `width × height`
+        /// equal to the pattern area size. The window reports the frame
+        /// through the `extern "Rust"` functions below and times it out
+        /// after `timeout_ms`. Use it through `submission::present`.
         #[namespace = "nitpick"]
         #[cxx_name = "presentPattern"]
-        fn present_pattern(pixels: &[u8], width: i32, height: i32) -> Result<()>;
+        fn present_pattern(
+            pixels: &[u8],
+            width: i32,
+            height: i32,
+            frame: u64,
+            timeout_ms: i32,
+        ) -> Result<()>;
 
         /// Set or remove the HDR metadata of the swap chain of the open
         /// window. Each fails on another backend. Use them through
@@ -122,6 +131,51 @@ pub mod ffi {
         #[cxx_name = "clearHdrMetadata"]
         fn clear_hdr_metadata() -> Result<()>;
     }
+
+    // Render events of the pattern window, see `submission.rs`. Called on
+    // the Qt GUI thread.
+    extern "Rust" {
+        /// The frame to upload in this render, or 0.
+        #[namespace = "nitpick"]
+        #[cxx_name = "frameTakeUpload"]
+        fn frame_take_upload() -> u64;
+        /// `endFrame` after the upload of `frame`; `error` is empty on success.
+        #[namespace = "nitpick"]
+        #[cxx_name = "frameEnded"]
+        fn frame_ended(frame: u64, error: &str);
+        /// Unrecoverable render error before the upload of the queued frame.
+        #[namespace = "nitpick"]
+        #[cxx_name = "frameFailed"]
+        fn frame_failed(error: &str);
+        #[namespace = "nitpick"]
+        #[cxx_name = "frameTimedOut"]
+        fn frame_timed_out(frame: u64);
+        #[namespace = "nitpick"]
+        #[cxx_name = "frameWindowClosed"]
+        fn frame_window_closed();
+    }
+}
+
+use crate::submission;
+
+fn frame_take_upload() -> u64 {
+    submission::take_upload()
+}
+
+fn frame_ended(frame: u64, error: &str) {
+    submission::ended(frame, error);
+}
+
+fn frame_failed(error: &str) {
+    submission::failed(error);
+}
+
+fn frame_timed_out(frame: u64) {
+    submission::timed_out(frame);
+}
+
+fn frame_window_closed() {
+    submission::closed();
 }
 
 use nitpick_core::device::{DeviceQuery, Report};

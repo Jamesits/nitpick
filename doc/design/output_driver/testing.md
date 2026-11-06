@@ -166,6 +166,7 @@ The conversion rules stay in [QRhi signalling and conversion](qt.md#signalling).
 | `qrhi_fp16_search` | **Deviation from plain FP16 rounding:** test the documented ±2-neighbour search separately. Chosen values stay in the search range and do not worsen the reference code error. Fixed difficult vectors check the selected bits and tie behaviour. |
 | `qrhi_fp16_limits` | Keep the exhaustive 4096-grey test. Check individual BT.2111 expectations, including residual errors for marked levels. Do not use only a total failure count or the production inverse as the expected result. |
 | `qrhi_capabilities` | Reject unavailable formats before conversion. macOS 12-bit and Windows with HDR off give `available = Unknown` and `exact = No` with the stated reason. A supported 10-bit path remains available. A QRhi swap chain fallback gives a warning; it must not be silent. |
+| `qrhi_submission` | With controlled render events, success needs the upload and a successful `endFrame` of the same frame ID. Test `beginFrame` and `endFrame` failures, timeout, close, cancellation and two rapid replacements. A late event of an old frame ID must not upload or complete a newer frame. |
 | `qrhi_metadata` | Check native metadata structures at the bridge boundary with an injected sink. Verify units, field order, explicit values, automatic values, disabled state and state replacement. No successful API call is treated as wire metadata proof. |
 
 ### Browser output

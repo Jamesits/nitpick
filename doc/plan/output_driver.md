@@ -6,15 +6,6 @@ Only listed prerequisites block an item. Items without a `Requires` line have no
 
 For code changes, run formatting, Clippy and the relevant nextest tests. Put Rust unit tests in separate `<file>_tests.rs` files. Keep device claims unverified until the required device checks pass.
 
-### 13. Acknowledge QRhi submission by frame ID
-
-Requires: 11.
-
-TODO:
-
-- Replace success after `requestUpdate()` with a frame-ID callback after upload and successful `endFrame`. Report frame failures, closure and the queue-based timeout in [the QRhi design](../design/output_driver/qt.md#overview). Remove callback registrations on cancellation.
-- With controlled render events, verify no early success, `beginFrame` and `endFrame` failures, timeout, close and two rapid replacements. Late work must not upload or complete a replacement request. Already submitted output can remain visible until replaced.
-
 ### 14. Implement asynchronous QrhiDriver
 
 Requires: 2, 13.

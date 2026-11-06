@@ -6,6 +6,7 @@ mod hdr_metadata;
 // attributes on the bridge module itself.
 #[allow(clippy::unnecessary_box_returns)]
 mod launcher;
+mod submission;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 
