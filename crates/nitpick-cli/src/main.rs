@@ -14,6 +14,7 @@ use std::thread;
 
 use clap::Parser;
 use nitpick_browser::{BindHost, BrowserDriver, BrowserService, ServiceConfig};
+use nitpick_core::driver::DEFAULT_DELAY_MS;
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, Encoding, Format};
 use tokio::sync::mpsc;
@@ -45,6 +46,9 @@ struct Args {
     /// 10 or 12.
     #[arg(long, default_value = "10")]
     depth: BitDepth,
+    /// Measurement delay after the driver acknowledgement, in ms.
+    #[arg(long, default_value_t = DEFAULT_DELAY_MS, value_parser = command::parse_delay)]
+    delay: u32,
 }
 
 fn main() -> ExitCode {
@@ -57,6 +61,7 @@ fn main() -> ExitCode {
     let settings = Settings {
         pattern: args.pattern,
         format: Format::new(args.encoding, args.depth),
+        delay_ms: args.delay,
     };
     let (service, mut events) = match BrowserService::start(&config) {
         Ok(started) => started,
@@ -77,7 +82,10 @@ fn main() -> ExitCode {
     });
 
     // The host executor; the service has its own runtime thread.
-    let runtime = match tokio::runtime::Builder::new_current_thread().build() {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(e) => {
             eprintln!("nitpick-cli: cannot start the executor: {e}");
@@ -99,3 +107,7 @@ fn main() -> ExitCode {
         Exit::Stopped(Some(_)) => ExitCode::FAILURE,
     }
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;

@@ -219,6 +219,11 @@ impl fmt::Display for OutputError {
 
 impl std::error::Error for OutputError {}
 
+/// Default measurement delay of each host, in ms. The host waits this long
+/// after `present` succeeds; the driver timeout excludes it.
+/// **Unverified:** sufficient for a particular display or probe.
+pub const DEFAULT_DELAY_MS: u32 = 1000;
+
 /// Resolves to a status line after driver acknowledgement.
 ///
 /// No `Send` bound: `QRhi` must stay on the Qt GUI thread. Dropping the future

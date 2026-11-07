@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use nitpick_browser::{ClientState, ServiceEvent, ServiceEvents};
 use nitpick_core::driver::{DisplayId, Frame, OutputDriver, OutputError, OutputLimits, Surface};
@@ -16,6 +17,7 @@ use nitpick_core::image::Image;
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::Format;
 use tokio::sync::mpsc;
+use tokio::time::Sleep;
 
 use crate::command::{self, Command};
 
@@ -63,6 +65,8 @@ impl Output for mpsc::UnboundedSender<String> {
 pub struct Settings {
     pub pattern: PatternKind,
     pub format: Format,
+    /// Measurement delay after the acknowledgement, in ms.
+    pub delay_ms: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +78,25 @@ pub enum Exit {
 }
 
 type Presenting<'d> = Pin<Box<dyn Future<Output = Result<String, OutputError>> + 'd>>;
+
+/// The frame between `show` and readiness. Dropping it cancels the
+/// presentation or the timer, so a timer cannot mark a later frame ready.
+enum Pending<'d> {
+    Presenting {
+        future: Presenting<'d>,
+        delay_ms: u32,
+    },
+    /// After acknowledgement. `ready` is the status line of this frame.
+    Delay {
+        timer: Pin<Box<Sleep>>,
+        ready: String,
+    },
+}
+
+enum Step {
+    Presented(Result<String, OutputError>, u32),
+    Elapsed(String),
+}
 
 /// Runs until `quit`, the end of `console` or the end of the service.
 /// Then it drops a pending frame and closes the surface; the caller stops
@@ -116,15 +139,17 @@ pub async fn run<D: OutputDriver>(
                     break exit;
                 }
             }
-            result = async { host.pending.as_mut().expect("guarded").as_mut().await },
-                if host.pending.is_some() =>
-            {
-                host.pending = None;
-                match result {
-                    Ok(status) => host.say(&format!("status: {status}")),
-                    Err(e) => host.say(&format!("error: presentation failed: {e}")),
+            step = async {
+                match host.pending.as_mut().expect("guarded") {
+                    Pending::Presenting { future, delay_ms } => {
+                        Step::Presented(future.as_mut().await, *delay_ms)
+                    }
+                    Pending::Delay { timer, ready } => {
+                        timer.as_mut().await;
+                        Step::Elapsed(std::mem::take(ready))
+                    }
                 }
-            }
+            }, if host.pending.is_some() => host.on_step(step),
         }
     };
     host.close_surface();
@@ -140,8 +165,8 @@ struct Host<'d, D, O> {
     /// The surface stays open after `present`, so that the client keeps
     /// the current frame until replacement, `close` or exit.
     opened: Option<DisplayId>,
-    /// Invariant: no other borrow of `driver` while `Some`.
-    pending: Option<Presenting<'d>>,
+    /// Invariant: no other borrow of `driver` while `Presenting`.
+    pending: Option<Pending<'d>>,
     /// The open surface became stale: show again at the next `Ready` of
     /// the selected client.
     reshow: bool,
@@ -153,8 +178,31 @@ impl<D: OutputDriver, O: Output> Host<'_, D, O> {
     }
 
     fn cancel(&mut self) {
-        if self.pending.take().is_some() {
-            self.say("status: presentation cancelled");
+        match self.pending.take() {
+            Some(Pending::Presenting { .. }) => self.say("status: presentation cancelled"),
+            Some(Pending::Delay { .. }) => self.say("status: measurement delay cancelled"),
+            None => {}
+        }
+    }
+
+    /// A failed `present` starts no timer. A zero delay adds no wait.
+    fn on_step(&mut self, step: Step) {
+        self.pending = None;
+        match step {
+            Step::Presented(Ok(status), delay_ms) => {
+                let ready = format!("status: ready after delay: {delay_ms} ms. {status}");
+                if delay_ms == 0 {
+                    self.say(&ready);
+                    return;
+                }
+                self.say(&format!(
+                    "status: waiting for measurement delay: {delay_ms} ms. {status}"
+                ));
+                let timer = Box::pin(tokio::time::sleep(Duration::from_millis(delay_ms.into())));
+                self.pending = Some(Pending::Delay { timer, ready });
+            }
+            Step::Presented(Err(e), _) => self.say(&format!("error: presentation failed: {e}")),
+            Step::Elapsed(ready) => self.say(&ready),
         }
     }
 
@@ -242,6 +290,10 @@ impl<D: OutputDriver, O: Output> Host<'_, D, O> {
                 self.settings.format = Format::new(encoding, depth);
                 self.say(&format!("format: {}", self.settings.format));
             }
+            Command::Delay(ms) => {
+                self.settings.delay_ms = ms;
+                self.say(&format!("delay: {ms} ms"));
+            }
             Command::Show => self.show(),
             Command::Table => self.table(),
             Command::Close => {
@@ -294,7 +346,9 @@ impl<D: OutputDriver, O: Output> Host<'_, D, O> {
             self.say("error: no client selected; type `select <display id>`");
             return;
         };
-        let Settings { pattern, format } = self.settings;
+        let Settings {
+            pattern, format, ..
+        } = self.settings;
         if !pattern.encodings().contains(&format.encoding) {
             self.say(&format!(
                 "error: {} does not support {}",
@@ -338,7 +392,10 @@ impl<D: OutputDriver, O: Output> Host<'_, D, O> {
         };
         self.say(&format!("surface: {}", surface.description));
         self.say("status: submitting pattern");
-        self.pending = Some(Box::pin(present(self.driver, surface, image, format)));
+        self.pending = Some(Pending::Presenting {
+            future: Box::pin(present(self.driver, surface, image, format)),
+            delay_ms: self.settings.delay_ms,
+        });
     }
 
     fn table(&mut self) {
@@ -366,7 +423,9 @@ impl<D: OutputDriver, O: Output> Host<'_, D, O> {
                 return;
             }
         };
-        let Settings { pattern, format } = self.settings;
+        let Settings {
+            pattern, format, ..
+        } = self.settings;
         match pattern.reference_table(format, size, &limits) {
             Ok(table) => self.say(table.trim_end()),
             Err(e) => self.say(&format!("error: {e}")),

@@ -13,6 +13,7 @@ use super::*;
 const SETTINGS: Settings = Settings {
     pattern: PatternKind::ColourBars,
     format: Format::new(Encoding::PqNarrow, BitDepth::Ten),
+    delay_ms: 0,
 };
 
 /// State shared by the presenting driver, the viewer and the test.
@@ -190,6 +191,8 @@ struct Harness {
     events: mpsc::UnboundedSender<ServiceEvent>,
     console: mpsc::UnboundedSender<String>,
     out: mpsc::UnboundedReceiver<String>,
+    /// Every output line read so far.
+    seen: Vec<String>,
 }
 
 impl Harness {
@@ -206,10 +209,13 @@ impl Harness {
     }
 
     /// The next output line that starts with `prefix`. Skips other lines.
+    /// On a paused clock, the timeout lets earlier host timers expire
+    /// first.
     async fn expect(&mut self, prefix: &str) -> String {
         let wait = async {
             loop {
                 let line = self.out.recv().await.expect("host output open");
+                self.seen.push(line.clone());
                 if line.starts_with(prefix) {
                     return line;
                 }
@@ -218,6 +224,25 @@ impl Harness {
         tokio::time::timeout(Duration::from_secs(5), wait)
             .await
             .unwrap_or_else(|_| panic!("no output line starting with `{prefix}`"))
+    }
+
+    /// Advances the paused clock by `ms` and gives the output lines of
+    /// that interval.
+    async fn advance(&mut self, ms: u64) -> Vec<String> {
+        tokio::time::advance(Duration::from_millis(ms)).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        let mut lines = Vec::new();
+        while let Ok(line) = self.out.try_recv() {
+            self.seen.push(line.clone());
+            lines.push(line);
+        }
+        lines
+    }
+
+    fn saw(&self, prefix: &str) -> bool {
+        self.seen.iter().any(|l| l.starts_with(prefix))
     }
 
     /// Lets the host run until `done` holds.
@@ -264,6 +289,14 @@ impl Harness {
 /// Runs the host against `script`. The console closes when the script
 /// returns.
 async fn session(log: Shared, script: impl AsyncFnOnce(&mut Harness)) -> (Exit, Harness) {
+    session_with(log, SETTINGS, script).await
+}
+
+async fn session_with(
+    log: Shared,
+    settings: Settings,
+    script: impl AsyncFnOnce(&mut Harness),
+) -> (Exit, Harness) {
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let (console_tx, mut console) = mpsc::unbounded_channel();
     let (out_tx, out) = mpsc::unbounded_channel();
@@ -272,6 +305,7 @@ async fn session(log: Shared, script: impl AsyncFnOnce(&mut Harness)) -> (Exit, 
         events: events_tx,
         console: console_tx,
         out,
+        seen: Vec::new(),
     };
     let driver = RefCell::new(Mock(Rc::clone(&log)));
     let host = run(
@@ -279,7 +313,7 @@ async fn session(log: Shared, script: impl AsyncFnOnce(&mut Harness)) -> (Exit, 
         Mock(Rc::clone(&log)),
         &mut events,
         &mut console,
-        SETTINGS,
+        settings,
         out_tx,
     );
     let script = async {
@@ -336,7 +370,8 @@ async fn selects_by_display_id_and_renders_at_the_surface_size() {
             ]
         );
         h.reply(0, Ok("frame 1 applied".into())).await;
-        h.expect("status: frame 1 applied").await;
+        h.expect("status: ready after delay: 0 ms. frame 1 applied")
+            .await;
         // The current frame stays until replacement or exit.
         assert!(!h.calls().iter().any(|c| c.starts_with("close")));
     })
@@ -416,7 +451,7 @@ async fn replacement_cancels_the_pending_frame() {
         let first = h.log.borrow_mut().replies.remove(0);
         assert!(first.send(Ok("late".into())).is_err());
         h.reply(0, Ok("second".into())).await;
-        h.expect("status: second").await;
+        h.expect("status: ready after delay: 0 ms. second").await;
         assert_eq!(
             h.calls(),
             [
@@ -445,7 +480,7 @@ async fn handles_console_and_events_while_pending() {
         h.expect("BT.2111-3 HDR colour bars").await;
         assert_eq!(h.log.borrow().live, 1);
         h.reply(0, Ok("applied".into())).await;
-        h.expect("status: applied").await;
+        h.expect("status: ready after delay: 0 ms. applied").await;
     })
     .await;
 }
@@ -532,5 +567,155 @@ async fn service_stop_ends_the_session() {
     })
     .await;
     assert_eq!(exit, Exit::Stopped(Some("boom".into())));
+    assert_eq!(h.calls().last().unwrap(), "close mock:client-1");
+}
+
+const DELAYED: Settings = Settings {
+    delay_ms: 1000,
+    ..SETTINGS
+};
+
+/// Shows a frame and acknowledges it; the delay of `settings` starts.
+async fn acknowledged(h: &mut Harness, n: usize, status: &str) {
+    h.show().await;
+    h.reply(n, Ok(status.into())).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn readiness_follows_the_delay_with_the_driver_status() {
+    session_with(shared((1280, 720)), DELAYED, async |h| {
+        acknowledged(h, 0, "frame 1 applied. Warnings: mock warning.").await;
+        let start = tokio::time::Instant::now();
+        h.expect("status: waiting for measurement delay: 1000 ms. frame 1 applied. Warnings: mock warning.")
+            .await;
+        assert!(!h.saw("status: ready"));
+        // The host keeps processing the console during the delay.
+        h.type_line("displays");
+        h.expect("display: mock:client-1").await;
+        assert!(h.advance(999).await.iter().all(|l| !l.starts_with("status:")));
+        h.expect("status: ready after delay: 1000 ms. frame 1 applied. Warnings: mock warning.")
+            .await;
+        assert_eq!(start.elapsed(), Duration::from_millis(1000));
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn zero_delay_reports_readiness_at_once() {
+    session(shared((1280, 720)), async |h| {
+        acknowledged(h, 0, "applied").await;
+        let start = tokio::time::Instant::now();
+        h.expect("status: ready after delay: 0 ms. applied").await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert!(!h.saw("status: waiting"));
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn delay_command_sets_the_delay_of_later_frames() {
+    session(shared((1280, 720)), async |h| {
+        h.show().await;
+        h.type_line("delay -1");
+        h.expect("error: the measurement delay must be an integer >= 0 ms, not `-1`")
+            .await;
+        h.type_line("delay 250");
+        h.expect("delay: 250 ms").await;
+        // The pending frame keeps the delay of its `show`.
+        h.reply(0, Ok("first".into())).await;
+        h.expect("status: ready after delay: 0 ms. first").await;
+        acknowledged(h, 1, "second").await;
+        h.expect("status: waiting for measurement delay: 250 ms. second")
+            .await;
+        h.expect("status: ready after delay: 250 ms. second").await;
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_presentation_starts_no_timer() {
+    session_with(shared((1280, 720)), DELAYED, async |h| {
+        h.show().await;
+        h.reply(0, Err(OutputError::Disconnected)).await;
+        h.expect("error: presentation failed").await;
+        h.advance(5000).await;
+        assert!(!h.saw("status: waiting"));
+        assert!(!h.saw("status: ready"));
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacement_during_the_delay_starts_a_new_timer() {
+    session_with(shared((1280, 720)), DELAYED, async |h| {
+        acknowledged(h, 0, "first").await;
+        h.expect("status: waiting for measurement delay: 1000 ms. first")
+            .await;
+        h.advance(600).await;
+        h.type_line("show");
+        h.expect("status: measurement delay cancelled").await;
+        h.expect("status: submitting pattern").await;
+        h.reply(1, Ok("second".into())).await;
+        h.expect("status: waiting for measurement delay: 1000 ms. second")
+            .await;
+        let start = tokio::time::Instant::now();
+        // The expiry time of the first timer passes without readiness.
+        assert_eq!(h.advance(999).await, Vec::<String>::new());
+        h.expect("status: ready after delay: 1000 ms. second").await;
+        assert_eq!(start.elapsed(), Duration::from_millis(1000));
+        assert!(!h.saw("status: ready after delay: 1000 ms. first"));
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn viewport_change_during_the_delay_shows_again() {
+    session_with(shared((1280, 720)), DELAYED, async |h| {
+        acknowledged(h, 0, "first").await;
+        h.expect("status: waiting for measurement delay").await;
+        h.log.borrow_mut().displays = vec![client((1920, 1080))];
+        h.event(ServiceEvent::Client(ClientState::ViewportChanged(id())));
+        h.expect("status: measurement delay cancelled").await;
+        h.advance(2000).await;
+        assert!(!h.saw("status: ready"));
+        h.ready();
+        h.expect("status: submitting pattern").await;
+        h.reply(1, Ok("second".into())).await;
+        h.expect("status: ready after delay: 1000 ms. second").await;
+        assert!(h.calls().contains(&"present 1920x1080".to_string()));
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn disconnect_during_the_delay_cancels_readiness() {
+    let (_, h) = session_with(shared((1280, 720)), DELAYED, async |h| {
+        acknowledged(h, 0, "first").await;
+        h.expect("status: waiting for measurement delay").await;
+        h.event(ServiceEvent::Client(ClientState::Disconnected(
+            "gone".into(),
+        )));
+        h.expect("status: measurement delay cancelled").await;
+        h.advance(2000).await;
+    })
+    .await;
+    assert!(!h.saw("status: ready"));
+    assert_eq!(
+        h.calls().iter().filter(|c| c.starts_with("close")).count(),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn quit_during_the_delay_cancels_it_and_closes() {
+    let (exit, h) = session_with(shared((1280, 720)), DELAYED, async |h| {
+        acknowledged(h, 0, "first").await;
+        h.expect("status: waiting for measurement delay").await;
+        h.type_line("quit");
+        h.expect("status: measurement delay cancelled").await;
+    })
+    .await;
+    assert_eq!(exit, Exit::Quit);
+    assert!(!h.saw("status: ready"));
     assert_eq!(h.calls().last().unwrap(), "close mock:client-1");
 }

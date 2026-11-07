@@ -23,13 +23,6 @@ TODO:
 
 - In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
-### 27. Add command-line measurement timing
-
-TODO:
-
-- Add the delay option and executor timer using the shared [measurement-delay contract](../design/output_driver/overview.md#measurement-delay). Print readiness with the driver warnings. Add the option to the command-line usage in [browser.md](../design/output_driver/browser.md#usage).
-- Run the controlled-clock host checks for default, zero and invalid delay, failed presentation, replacement, viewport change, disconnect and exit. A stale timer must not report readiness for a new frame.
-
 ### 28. Verify the browser session without a window system
 
 Requires: 27.

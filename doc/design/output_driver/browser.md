@@ -291,20 +291,21 @@ cargo run -p nitpick-cli -- --host 192.168.1.10 --port 8080 --pattern bt2111 --e
 | `--pattern` | `bt2111` or `pq-grayscale` | `bt2111` |
 | `--encoding` | `pq-narrow`, `pq-full` or `hlg-narrow` | `pq-narrow` |
 | `--depth` | `10` or `12` | `10` |
+| `--delay` | [measurement delay](overview.md#measurement-delay) in ms after the client acknowledgement; an integer >= 0 | `1000` |
 
-The host prints one event per line: `url:`, `pairing code:`, `client:` (connected, authenticated, ready with the name, size and mode, viewport changed, disconnected), `output:` and `warning:` (the [output limits](overview.md#interface) before each frame), `surface:`, `status:` and `error:`. It reads one command per stdin line:
+The host prints one event per line: `url:`, `pairing code:`, `client:` (connected, authenticated, ready with the name, size and mode, viewport changed, disconnected), `output:` and `warning:` (the [output limits](overview.md#interface) before each frame), `surface:`, `status:` and `error:`. After the acknowledgement, `status: waiting for measurement delay: N ms.` and then `status: ready after delay: N ms.` follow, each with the driver status and its warnings. With a zero delay, only the ready line follows. It reads one command per stdin line:
 
 | Command | Action |
 |---|---|
 | `displays` | list the clients with a valid `hello` |
 | `select <display id>` | select a client, for example `browser:client-1`; a different client closes the current surface |
-| `pattern <id>`, `format <encoding> <depth>` | change the settings for the next `show` |
+| `pattern <id>`, `format <encoding> <depth>`, `delay <ms>` | change the settings for the next `show`; a pending frame keeps its delay |
 | `show` | query, open, render at the surface size and present; replaces a pending or current frame |
 | `table` | print the reference table for the selected client |
 | `close` | cancel the pending frame and close the surface |
 | `help`, `quit` | list the commands; close the surface and stop the service |
 
-A viewport change of the shown client cancels the pending frame; the host shows the pattern again at the next `Ready`. The end of stdin is the same as `quit`. The exit status is 0 after `quit`, 1 if the service stopped with an error, and 2 if the service or executor cannot start. The measurement-delay option is not implemented yet.
+A viewport change of the shown client cancels the pending frame or delay; the host shows the pattern again at the next `Ready`. Each delay cancellation in [Measurement delay](overview.md#measurement-delay) prints `status: measurement delay cancelled`. The end of stdin is the same as `quit`. The exit status is 0 after `quit`, 1 if the service stopped with an error, and 2 if the service or executor cannot start.
 
 Headless use can use the random code printed in the console. Automated tests can configure the server and client with the same fixed string. See [Authentication](#authentication). Close the current client before connecting a different client or selecting a different screen.
 

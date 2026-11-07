@@ -14,6 +14,8 @@ pub enum Command {
     Select(String),
     Pattern(PatternKind),
     Format(Encoding, BitDepth),
+    /// Measurement delay of the next frames, in ms.
+    Delay(u32),
     /// Query, open, render and present with the current settings.
     Show,
     /// Print the reference table for the selected client.
@@ -28,6 +30,7 @@ pub const HELP: &str = "commands:
   select <display id>          select a client, for example browser:client-1
   pattern <id>                 bt2111 or pq-grayscale
   format <encoding> <depth>    encoding pq-narrow, pq-full or hlg-narrow; depth 10 or 12
+  delay <ms>                   measurement delay after the acknowledgement, >= 0 ms
   show                         show the pattern on the selected client
   table                        print the reference table of the selected client
   close                        cancel the pending frame and close the surface
@@ -48,18 +51,28 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         ("select", [id]) => Command::Select((*id).into()),
         ("pattern", [id]) => Command::Pattern(id.parse()?),
         ("format", [encoding, depth]) => Command::Format(encoding.parse()?, depth.parse()?),
+        ("delay", [ms]) => Command::Delay(parse_delay(ms)?),
         ("show", []) => Command::Show,
         ("table", []) => Command::Table,
         ("close", []) => Command::Close,
         ("quit", []) => Command::Quit,
         (
-            "help" | "displays" | "select" | "pattern" | "format" | "show" | "table" | "close"
-            | "quit",
+            "help" | "displays" | "select" | "pattern" | "format" | "delay" | "show" | "table"
+            | "close" | "quit",
             _,
         ) => return Err(format!("wrong arguments for `{name}`; type `help`")),
         _ => return Err(format!("unknown command `{name}`; type `help`")),
     };
     Ok(Some(command))
+}
+
+/// Measurement delay of the `--delay` option and the `delay` command.
+///
+/// # Errors
+/// `text` is not an integer in `0..=u32::MAX`.
+pub fn parse_delay(text: &str) -> Result<u32, String> {
+    text.parse()
+        .map_err(|_| format!("the measurement delay must be an integer >= 0 ms, not `{text}`"))
 }
 
 #[cfg(test)]

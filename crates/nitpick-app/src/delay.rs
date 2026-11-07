@@ -25,9 +25,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use futures_channel::oneshot;
-
-/// **Unverified:** sufficient for a particular display or probe.
-pub const DEFAULT_DELAY_MS: u32 = 1000;
+pub use nitpick_core::driver::DEFAULT_DELAY_MS;
 
 /// Starts measurement delay timers. Tests inject a controlled clock.
 pub trait DelayTimer {

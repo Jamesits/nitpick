@@ -10,7 +10,7 @@ The compatibility API is one Rust trait, `OutputDriver`, in `nitpick-core` (modu
 
 Native display enumeration, capability queries and ICC profile assignment use the separate [`DisplayDeviceControl` trait](../display_device.md) in `nitpick-core::device`. The `nitpick-display` crate implements native device operations on Windows, macOS and Linux. QRhi combines device reports with its output-path limits. Hosts coordinate device changes with presentation; `OutputDriver` does not change OS profile associations.
 
-`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries. `nitpick-browser` has the browser service, the PNG encoder and the browser driver. `nitpick-cli` is the command-line host of the browser driver. **Not implemented:** ICC profile assignment and the measurement delay of the command-line host. The core library has no Qt dependency. Only `nitpick-app` needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
+`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries. `nitpick-browser` has the browser service, the PNG encoder and the browser driver. `nitpick-cli` is the command-line host of the browser driver. **Not implemented:** ICC profile assignment. The core library has no Qt dependency. Only `nitpick-app` needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
 
 ```mermaid
 graph LR
@@ -191,7 +191,7 @@ The host reports "Submitting pattern" until the future resolves. It continues to
 
 `present` confirms driver acknowledgement only. QRhi acknowledges a successful submission of the frame. The browser acknowledges client decode and layout. Neither reports physical scanout or stable display light.
 
-The host owns the measurement delay. It accepts a non-negative integer in milliseconds. The default is 1000 ms. The Qt launcher saves its "Measurement delay (ms)" setting. The command-line host accepts the same setting as an option. **Unverified:** this default is sufficient for a particular display or probe.
+The host owns the measurement delay. It accepts a non-negative integer in milliseconds. The default is 1000 ms (`nitpick_core::driver::DEFAULT_DELAY_MS`). The Qt launcher saves its "Measurement delay (ms)" setting. The command-line host accepts the same setting as the `--delay` option and the `delay` command; see [browser usage](browser.md#usage). **Unverified:** this default is sufficient for a particular display or probe.
 
 After the `present` future succeeds, the host starts the delay and reports "Waiting for measurement delay". The Qt launcher uses a Qt timer; the command-line host uses an executor timer, such as `tokio::time::sleep`. Both continue to process events. When the timer expires, the status is "Ready after delay: N ms", with the driver warnings. A zero delay adds no wait. The driver acknowledgement timeout excludes this delay. The core types and browser driver do not depend on the Qt timer.
 
