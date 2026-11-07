@@ -49,6 +49,10 @@ class Host:
         )
         self._lines = queue.Queue()
         self.seen = []
+        # Called while `wait` has no event. The sync Playwright API runs route
+        # and event handlers only inside its own calls; a test with routes
+        # sets a page call here.
+        self.pump = None
         threading.Thread(target=self._read, daemon=True).start()
         self.url = self.wait("listening")["url"]
 
@@ -64,8 +68,10 @@ class Host:
             if remaining <= 0:
                 raise AssertionError(f"no {event} {fields}; events: {self.seen}")
             try:
-                item = self._lines.get(timeout=remaining)
+                item = self._lines.get(timeout=min(remaining, 0.02) if self.pump else remaining)
             except queue.Empty:
+                if self.pump:
+                    self.pump()
                 continue
             self.seen.append(item)
             if item["event"] == event and all(item.get(k) == v for k, v in fields.items()):
@@ -82,6 +88,11 @@ class Host:
                 break
         self.seen.extend(items)
         return items
+
+    def send(self, **command):
+        """One stdin command; see the `page_host` module documentation."""
+        self.proc.stdin.write(json.dumps(command) + "\n")
+        self.proc.stdin.flush()
 
     def close(self):
         self.proc.stdin.close()
@@ -121,3 +132,71 @@ def browser(playwright_instance):
 @pytest.fixture
 def is_chromium():
     return os.environ.get("NITPICK_BROWSER", "chromium") == "chromium"
+
+
+REJECTED = "The server rejected the connection"
+VIEWPORT = {"width": 800, "height": 600}
+
+
+class Client:
+    """One page and the WebSocket messages that it sent."""
+
+    def __init__(self, browser, url, dpr=1, viewport=VIEWPORT, init_script=None):
+        self.context = browser.new_context(device_scale_factor=dpr, viewport=viewport)
+        if init_script:
+            self.context.add_init_script(init_script)
+        self.page = self.context.new_page()
+        self.sent = []
+        self.page.on("websocket", lambda ws: ws.on("framesent", self._sent))
+        self.page.goto(url)
+
+    def _sent(self, payload):
+        self.sent.append(json.loads(payload))
+
+    def hellos(self):
+        return [m for m in self.sent if m["type"] == "hello"]
+
+    def status(self):
+        return self.page.locator("#status").inner_text()
+
+    def wait_status(self, text):
+        self.page.locator("#status", has_text=text).wait_for(timeout=TIMEOUT_S * 1000)
+
+    def authenticate(self, code=CODE):
+        self.wait_status("Enter the code")
+        self.page.fill("#code", code)
+        self.page.click("#submit")
+
+    def wait_hello(self, count):
+        """The `count`-th `hello` of the page."""
+        deadline = time.monotonic() + TIMEOUT_S
+        while len(self.hellos()) < count:
+            assert time.monotonic() < deadline, f"no hello {count}; sent: {self.sent}"
+            self.page.wait_for_timeout(20)
+        return self.hellos()[count - 1]
+
+    def cdp(self, method, params):
+        return self.context.new_cdp_session(self.page).send(method, params)
+
+    def close(self):
+        self.context.close()
+
+
+@pytest.fixture
+def client_factory(browser, host):
+    clients = []
+
+    def make(**kwargs):
+        c = Client(browser, host.url, **kwargs)
+        clients.append(c)
+        return c
+
+    yield make
+    for c in clients:
+        c.close()
+
+
+def ready_client(host):
+    """The `ready` event and the driver view that follows it."""
+    ready = host.wait("ready")
+    return host.wait("client", display=ready["display"])

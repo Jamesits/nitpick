@@ -5,76 +5,10 @@ DevTools calls change the pixel ratio, pinch zoom and media features at run time
 """
 
 import json
-import time
 
 import pytest
 
-from conftest import CODE, TIMEOUT_S, launch
-
-VIEWPORT = {"width": 800, "height": 600}
-REJECTED = "The server rejected the connection"
-
-
-class Client:
-    """One page and the WebSocket messages that it sent."""
-
-    def __init__(self, browser, url, dpr=1, viewport=VIEWPORT):
-        self.context = browser.new_context(device_scale_factor=dpr, viewport=viewport)
-        self.page = self.context.new_page()
-        self.sent = []
-        self.page.on("websocket", lambda ws: ws.on("framesent", self._sent))
-        self.page.goto(url)
-
-    def _sent(self, payload):
-        self.sent.append(json.loads(payload))
-
-    def hellos(self):
-        return [m for m in self.sent if m["type"] == "hello"]
-
-    def status(self):
-        return self.page.locator("#status").inner_text()
-
-    def wait_status(self, text):
-        self.page.locator("#status", has_text=text).wait_for(timeout=TIMEOUT_S * 1000)
-
-    def authenticate(self, code=CODE):
-        self.wait_status("Enter the code")
-        self.page.fill("#code", code)
-        self.page.click("#submit")
-
-    def wait_hello(self, count):
-        """The `count`-th `hello` of the page."""
-        deadline = time.monotonic() + TIMEOUT_S
-        while len(self.hellos()) < count:
-            assert time.monotonic() < deadline, f"no hello {count}; sent: {self.sent}"
-            self.page.wait_for_timeout(20)
-        return self.hellos()[count - 1]
-
-    def cdp(self, method, params):
-        return self.context.new_cdp_session(self.page).send(method, params)
-
-    def close(self):
-        self.context.close()
-
-
-@pytest.fixture
-def client_factory(browser, host):
-    clients = []
-
-    def make(**kwargs):
-        c = Client(browser, host.url, **kwargs)
-        clients.append(c)
-        return c
-
-    yield make
-    for c in clients:
-        c.close()
-
-
-def ready_client(host):
-    """The `ready` event and the driver view that follows it."""
-    ready = host.wait("ready")
-    return host.wait("client", display=ready["display"])
+from conftest import CODE, REJECTED, TIMEOUT_S, VIEWPORT, Client, launch, ready_client
 
 
 @pytest.mark.parametrize(

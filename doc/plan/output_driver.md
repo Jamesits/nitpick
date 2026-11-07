@@ -23,15 +23,6 @@ TODO:
 
 - In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
-### 25. Add browser image application and acknowledgement
-
-Requires: 23, 24.
-
-TODO:
-
-- Fetch PNGs with the bearer header. Manage blob URLs, decode, image layout and acknowledgement as defined by [Image requests and presentation](../design/output_driver/browser.md#image-requests-and-presentation). Apply the specified CSS pixel mapping.
-- Test natural and layout sizes, HTTP and decode errors, object-URL release, and replacement during fetch or decode. A slow old frame must not replace a new image or the black close page. Verify that `applied` follows decode, DOM update and the required animation callbacks.
-
 ### 26. Add the command-line session host
 
 Requires: 15, 23.

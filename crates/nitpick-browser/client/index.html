@@ -15,9 +15,17 @@ body.hidden-panel { cursor: none; }
 #panel[hidden], #panel [hidden] { display: none; }
 #panel button, #panel input { font: inherit; margin: 4px 8px 4px 0; }
 #code { width: 8em; }
+/* "Pixel mapping" in doc/design/output_driver/browser.md. A transform or
+   an opacity below 1 can clamp HDR to SDR (reported for WebKit). */
+img.frame {
+  position: fixed; left: 0; top: 0; margin: 0; border: 0; padding: 0;
+  image-rendering: pixelated; transform: none; opacity: 1;
+  dynamic-range-limit: no-limit;
+}
 </style>
 </head>
 <body>
+<div id="stage"></div>
 <div id="panel">
   <p id="status">Connecting…</p>
   <form id="auth" hidden>
@@ -40,6 +48,7 @@ body.hidden-panel { cursor: none; }
   const connectButton = $("connect");
   const fullscreenButton = $("fullscreen");
   const hideButton = $("hide");
+  const stage = $("stage");
 
   // The shell `nitpick-webview` adds this query parameter. It only
   // changes the display name in the host.
@@ -59,6 +68,14 @@ body.hidden-panel { cursor: none; }
   // `null`: the panel follows the state. `false`: the user selected
   // "Hide". `true`: the user clicked the page to show the panel.
   let panelShown = null;
+
+  // Latest requested frame ID; `null` after `close` or the end of the
+  // session. A request that finds another value here is stale: it must
+  // not change the DOM or send `applied`.
+  let wanted = null;
+  let fetchAbort = null;
+  // The `<img>` on the page; its source is the object URL of its blob.
+  let shown = null;
 
   const CLOSE_TEXT = {
     4001: "Wrong code.",
@@ -166,6 +183,95 @@ body.hidden-panel { cursor: none; }
     }
   }
 
+  // Shows the black page and releases the current image.
+  function clearImage() {
+    if (shown === null) return;
+    shown.remove();
+    URL.revokeObjectURL(shown.src);
+    shown = null;
+  }
+
+  // Invalidates the pending request, so that a slow fetch or decode
+  // cannot replace a newer image or the black page.
+  function cancelRequest() {
+    wanted = null;
+    fetchAbort?.abort();
+    fetchAbort = null;
+  }
+
+  function animationFrames(count) {
+    return new Promise((resolve) => {
+      const step = () => (--count === 0 ? resolve() : requestAnimationFrame(step));
+      requestAnimationFrame(step);
+    });
+  }
+
+  // "Image requests and presentation" in the design.
+  async function showFrame(ws, id) {
+    cancelRequest();
+    wanted = id;
+    const abort = new AbortController();
+    fetchAbort = abort;
+    const current = () => wanted === id && ws === socket;
+    let url = null;
+    try {
+      const response = await fetch(`/api/v1/frame/${id}.png`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+        signal: abort.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status} for the frame`);
+      const blob = await response.blob();
+      if (!current()) return;
+      url = URL.createObjectURL(blob);
+      // Decoded off the page: the previous image stays until the swap.
+      const img = new Image();
+      img.className = "frame";
+      img.alt = "";
+      img.src = url;
+      try {
+        await img.decode();
+      } catch (e) {
+        throw new Error(`decode failed: ${e.message}`);
+      }
+      if (!current()) return;
+      // One image pixel per display pixel at the current ratio. A ratio
+      // change gives a `hello`, and the host sends a new frame.
+      const r = window.devicePixelRatio;
+      img.style.width = `${img.naturalWidth / r}px`;
+      img.style.height = `${img.naturalHeight / r}px`;
+      if (shown === null) {
+        stage.append(img);
+      } else {
+        shown.replaceWith(img);
+        URL.revokeObjectURL(shown.src);
+      }
+      shown = img;
+      url = null;
+      // The first callback runs before the next paint, the second one
+      // after it.
+      await animationFrames(2);
+      if (!current()) return;
+      const box = img.getBoundingClientRect();
+      ws.send(JSON.stringify({
+        type: "applied",
+        id,
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+        layoutWidth: box.width * window.devicePixelRatio,
+        layoutHeight: box.height * window.devicePixelRatio,
+      }));
+    } catch (e) {
+      if (!current() || e.name === "AbortError") return;
+      // A failed frame must not leave the previous pattern on the page.
+      clearImage();
+      ws.send(JSON.stringify({ type: "error", id, message: e.message }));
+    } finally {
+      if (url !== null) URL.revokeObjectURL(url);
+      if (fetchAbort === abort) fetchAbort = null;
+    }
+  }
+
   function connect() {
     connectButton.hidden = true;
     authForm.hidden = true;
@@ -205,13 +311,11 @@ body.hidden-panel { cursor: none; }
           sendHello();
           break;
         case "show":
-          // Image display is not in this page yet. A fast `error` lets
-          // the host fail at once instead of after its timeout.
-          ws.send(JSON.stringify({
-            type: "error", id: message.id, message: "this page cannot show images",
-          }));
+          showFrame(ws, message.id);
           break;
         case "close":
+          cancelRequest();
+          clearImage();
           break;
         default:
           ws.close(4003, "unknown message");
@@ -220,6 +324,8 @@ body.hidden-panel { cursor: none; }
     ws.addEventListener("close", (event) => {
       if (ws !== socket) return;
       socket = null;
+      cancelRequest();
+      clearImage();
       const wasAuthenticated = token !== null;
       token = null;
       lastHello = null;
