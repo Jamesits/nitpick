@@ -10,7 +10,7 @@ The compatibility API is one Rust trait, `OutputDriver`, in `nitpick-core` (modu
 
 Native display enumeration, capability queries and ICC profile assignment use the separate [`DisplayDeviceControl` trait](../display_device.md) in `nitpick-core::device`. The `nitpick-display` crate implements native device operations on Windows, macOS and Linux. QRhi combines device reports with its output-path limits. Hosts coordinate device changes with presentation; `OutputDriver` does not change OS profile associations.
 
-`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries. `nitpick-browser` has the browser service, the PNG encoder and the browser driver's `displays`, `query` and `open`. **Not implemented:** ICC profile assignment, browser presentation and the command-line host. The existing core library has no Qt dependency. The only current executable, `nitpick-app`, needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
+`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries. `nitpick-browser` has the browser service, the PNG encoder and the browser driver. `nitpick-cli` is the command-line host of the browser driver. **Not implemented:** ICC profile assignment and the measurement delay of the command-line host. The core library has no Qt dependency. Only `nitpick-app` needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
 
 ```mermaid
 graph LR
@@ -34,7 +34,7 @@ graph LR
 | `nitpick-core` | patterns, reference values, pixel calculations, output and device traits | Rust data and arithmetic; no GUI, server or executor |
 | `nitpick-display` | native device and capability enumeration, ICC assignment and restoration | `nitpick-core`, native OS bindings; no Qt, Tauri or Little CMS |
 | `nitpick-browser` | browser driver, PNG encoder, HTTP and WebSocket service | `nitpick-core`, Rust server and image libraries; no Qt or Tauri |
-| `nitpick-cli` (planned) | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, a Rust executor; optional `nitpick-display`; no `nitpick-app` |
+| `nitpick-cli` | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, a Rust executor; optional `nitpick-display`; no `nitpick-app` |
 | `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, `nitpick-display`, Qt and its C++ bridge |
 | `nitpick-webview` (planned) | optional local display process | Tauri; connects to the server by URL |
 
@@ -235,6 +235,8 @@ All native fields come through `DisplayDeviceControl`. Fields remain `None` wher
 ## Testing
 
 The shared test design is in [Output verification](testing.md). It defines the [host contract](testing.md#shared-host-contract), [cross-platform run matrix](testing.md#run-matrix), and the limits of each capture boundary.
+
+Command-line host unit tests (`nitpick-cli`, `host_tests.rs`) run the host on a Tokio current-thread runtime with a mock driver and a channel in place of the service. They cover startup output, selection by `DisplayId`, query before open, rendering at the surface size, rejected depths, encodings and sizes, a failed presentation, replacement, console commands and service events while a frame is pending, a viewport change with reopening at the new size, disconnect, `close`, `quit` and a service stop. The mock fails if `close` runs while a `present` future exists. `command_tests.rs` covers the console command parser.
 
 ## Future enhancements
 

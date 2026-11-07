@@ -132,7 +132,7 @@ Convert XYZ to BT.2020 linear RGB, then encode the requested input codes. A red 
 
 ### Host boundary
 
-Add a test-only control interface over standard input and output, with one JSON object per line. This avoids a Windows named-pipe dependency. A QRhi test host runs the real adapter on the Qt GUI thread. The browser host uses the planned command-line host without Qt. Both share fixture IDs and event formats.
+Add a test-only control interface over standard input and output, with one JSON object per line. This avoids a Windows named-pipe dependency. A QRhi test host runs the real adapter on the Qt GUI thread. The browser host uses the command-line host without Qt. Both share fixture IDs and event formats.
 
 Proposed requests are `query`, `open`, `show`, `capture` and `close`. `show` selects a fixture and supplies a monotonically increasing frame ID. Events include `submitted`, `ready`, `captured`, `error` and a surface-generation change. These names describe a proposed test protocol, not existing CLI flags.
 

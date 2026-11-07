@@ -277,7 +277,34 @@ Qt launcher, remote display (iPad):
 2. Open the URL in Safari on the iPad. Enter the code shown by the launcher. After authentication, tap "Full screen".
 3. Select the iPad in the display list. Then select the pattern and "Show pattern".
 
-Command-line host (planned): follow [Host and dependency boundary](overview.md#host-and-dependency-boundary). The host supplies bind address, port, pattern, format and measurement-delay options, and prints status events. Bind to loopback for a local browser, or an explicit LAN address for a remote browser. Qt, Tauri and a local screen are not required. The command name and flags are not implemented yet.
+Command-line host: follow [Host and dependency boundary](overview.md#host-and-dependency-boundary). Qt, Tauri and a local screen are not required. Build and run by package:
+
+```sh
+cargo run -p nitpick-cli -- --host 192.168.1.10 --port 8080 --pattern bt2111 --encoding pq-narrow --depth 10
+```
+
+| Flag | Value | Default |
+|---|---|---|
+| `--host` | interface address for a remote browser; it must be a specific address | `127.0.0.1` |
+| `--port` | TCP port; 0 lets the OS select one | 0 |
+| `--code` | fixed pairing code, see [Authentication](#authentication) | a random code for each connection |
+| `--pattern` | `bt2111` or `pq-grayscale` | `bt2111` |
+| `--encoding` | `pq-narrow`, `pq-full` or `hlg-narrow` | `pq-narrow` |
+| `--depth` | `10` or `12` | `10` |
+
+The host prints one event per line: `url:`, `pairing code:`, `client:` (connected, authenticated, ready with the name, size and mode, viewport changed, disconnected), `output:` and `warning:` (the [output limits](overview.md#interface) before each frame), `surface:`, `status:` and `error:`. It reads one command per stdin line:
+
+| Command | Action |
+|---|---|
+| `displays` | list the clients with a valid `hello` |
+| `select <display id>` | select a client, for example `browser:client-1`; a different client closes the current surface |
+| `pattern <id>`, `format <encoding> <depth>` | change the settings for the next `show` |
+| `show` | query, open, render at the surface size and present; replaces a pending or current frame |
+| `table` | print the reference table for the selected client |
+| `close` | cancel the pending frame and close the surface |
+| `help`, `quit` | list the commands; close the surface and stop the service |
+
+A viewport change of the shown client cancels the pending frame; the host shows the pattern again at the next `Ready`. The end of stdin is the same as `quit`. The exit status is 0 after `quit`, 1 if the service stopped with an error, and 2 if the service or executor cannot start. The measurement-delay option is not implemented yet.
 
 Headless use can use the random code printed in the console. Automated tests can configure the server and client with the same fixed string. See [Authentication](#authentication). Close the current client before connecting a different client or selecting a different screen.
 

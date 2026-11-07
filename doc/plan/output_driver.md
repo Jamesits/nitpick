@@ -23,22 +23,11 @@ TODO:
 
 - In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
 
-### 26. Add the command-line session host
-
-Requires: 15, 23.
-
-TODO:
-
-- Add `nitpick-cli` with server, pattern and format options. Print URL, pairing codes, client state, output limits and status. Select clients by `DisplayId`, query before open, and render at the returned size. Await the borrowed future on a local Rust executor.
-- With a mock driver and service, verify startup, selection, unsupported requests, replacement and exit. Process console input and service events while presentation is pending. Close only after releasing the future; keep the service and current frame alive until replacement or exit.
-
 ### 27. Add command-line measurement timing
 
-Requires: 26.
-
 TODO:
 
-- Add the delay option and executor timer using the shared [measurement-delay contract](../design/output_driver/overview.md#measurement-delay). Print readiness with the driver warnings.
+- Add the delay option and executor timer using the shared [measurement-delay contract](../design/output_driver/overview.md#measurement-delay). Print readiness with the driver warnings. Add the option to the command-line usage in [browser.md](../design/output_driver/browser.md#usage).
 - Run the controlled-clock host checks for default, zero and invalid delay, failed presentation, replacement, viewport change, disconnect and exit. A stale timer must not report readiness for a new frame.
 
 ### 28. Verify the browser session without a window system
@@ -48,7 +37,7 @@ Requires: 27.
 TODO:
 
 - Run a real server and CLI with an authenticated mock client. Render with the core, fetch and independently decode the PNG, send `applied`, check readiness, replace the frame and shut down.
-- Verify timeouts and disconnects during presentation and delay. Build by package without Qt, Tauri or a window system; check the dependency graph. Document the implemented CLI commands and flags in the design usage section.
+- Verify timeouts and disconnects during presentation and delay. Build by package without Qt, Tauri or a window system; check the dependency graph.
 
 ### 29. Connect browser output to the Qt launcher
 
