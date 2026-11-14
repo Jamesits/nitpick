@@ -13,8 +13,11 @@ use nitpick_core::driver::Gamut;
 
 use crate::common::{Field, NativeFailure, resolve, topology_revision, unsupported};
 
+mod profile;
 #[cfg(windows)]
 mod system;
+
+pub use profile::{DisplayAddress, INSTALLED_PREFIX, WindowsProfileNative};
 
 pub const BACKEND: &str = "windows";
 
@@ -24,7 +27,7 @@ const DXGI_DESC1: &str = "DXGI_OUTPUT_DESC1";
 const SDR_WHITE: &str = "DISPLAYCONFIG_SDR_WHITE_LEVEL";
 const TARGET_MODE: &str = "DISPLAYCONFIG_TARGET_MODE";
 
-const NO_PROFILE_CONTROL: &str = "Windows ICC profile assignment is not implemented";
+const MSCMS: &str = "mscms.dll ColorProfile functions";
 
 /// `DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO` bit fields (`wingdi.h`).
 pub mod info_flags {
@@ -90,6 +93,9 @@ pub struct AdvancedColorInfo2 {
 pub struct PathReport {
     /// `(HighPart << 32) | LowPart`. Changes after a restart.
     pub adapter_luid: i64,
+    /// `targetInfo.adapterId`; the profile calls take it. Usually equal to
+    /// `adapter_luid`.
+    pub target_adapter_luid: i64,
     pub source_id: u32,
     pub target_id: u32,
     /// GDI name, for example `\\.\DISPLAY1`.
@@ -211,6 +217,7 @@ impl<N: WindowsNative> WindowsDisplay<N> {
     }
 }
 
+#[derive(Clone)]
 struct Entry {
     info: DeviceInfo,
     path: PathReport,
@@ -338,7 +345,11 @@ fn active(path: &PathReport, desc1: Result<&OutputDesc1, &str>) -> Active {
     Active { hdr_on, kind }
 }
 
-fn capabilities(path: &PathReport, active: &Active) -> DeviceCapabilities {
+fn capabilities(
+    path: &PathReport,
+    active: &Active,
+    icc_profiles: Report<bool>,
+) -> DeviceCapabilities {
     let (hdr, sdr_wcg) = match (&path.color_info_2, &path.color_info) {
         (Ok(i), _) => (
             known(i.flags & info_2_flags::HDR_SUPPORTED != 0, INFO_2),
@@ -366,7 +377,7 @@ fn capabilities(path: &PathReport, active: &Active) -> DeviceCapabilities {
         hdr,
         sdr_wcg,
         wire_depths: unknown("Windows reports the active wire depth only"),
-        icc_profiles: unknown(NO_PROFILE_CONTROL),
+        icc_profiles,
     }
 }
 
@@ -470,7 +481,7 @@ fn find_desc1<'a>(
     output.desc1.as_ref().map_err(ToString::to_string)
 }
 
-impl<N: WindowsNative> DisplayDeviceControl for WindowsDisplay<N> {
+impl<N: WindowsNative + WindowsProfileNative> DisplayDeviceControl for WindowsDisplay<N> {
     fn devices(&mut self) -> Result<Vec<DeviceInfo>, DeviceError> {
         Ok(self
             .snapshot()?
@@ -486,9 +497,14 @@ impl<N: WindowsNative> DisplayDeviceControl for WindowsDisplay<N> {
         let desc1 = find_desc1(&entry.path, &snapshot.dxgi);
         let desc1 = desc1.as_ref().copied().map_err(String::as_str);
         let active = active(&entry.path, desc1);
+        let icc_profiles = match self.native.profile_api() {
+            Ok(()) => known(true, MSCMS),
+            Err(DeviceError::Unsupported { .. }) => known(false, MSCMS),
+            Err(e) => unknown(e.to_string()),
+        };
         Ok(DeviceQuery {
             device: entry.info.clone(),
-            capabilities: capabilities(&entry.path, &active),
+            capabilities: capabilities(&entry.path, &active, icc_profiles),
             mode: mode(&entry.path, desc1, active),
             topology_revision: snapshot.revision,
         })
@@ -496,28 +512,36 @@ impl<N: WindowsNative> DisplayDeviceControl for WindowsDisplay<N> {
 
     fn profile_targets(&mut self, device: &DeviceId) -> Result<Vec<ProfileTarget>, DeviceError> {
         let snapshot = self.snapshot()?;
-        resolve(&snapshot.entries, device, |e| &e.info)?;
-        Ok(Vec::new())
+        let info = resolve(&snapshot.entries, device, |e| &e.info)?
+            .info
+            .clone();
+        Ok(self.profile_targets_of(&info))
     }
 
-    fn profile_state(&mut self, _: &ProfileTarget) -> Result<ProfileState, DeviceError> {
-        Err(unsupported("profile state", NO_PROFILE_CONTROL))
+    fn profile_state(&mut self, target: &ProfileTarget) -> Result<ProfileState, DeviceError> {
+        self.profile_state_of(target)
     }
 
     fn prepare_icc_profile(
         &mut self,
-        _: &ProfileTarget,
-        _: &IccProfile,
+        target: &ProfileTarget,
+        profile: &IccProfile,
     ) -> Result<PreparedProfileChange, DeviceError> {
-        Err(unsupported("profile preparation", NO_PROFILE_CONTROL))
+        self.prepare_of(target, profile)
     }
 
-    fn set_icc_profile(&mut self, _: &PreparedProfileChange) -> Result<ProfileState, DeviceError> {
-        Err(unsupported("profile assignment", NO_PROFILE_CONTROL))
+    fn set_icc_profile(
+        &mut self,
+        change: &PreparedProfileChange,
+    ) -> Result<ProfileState, DeviceError> {
+        self.set_of(change)
     }
 
-    fn restore_profile(&mut self, _: &PreparedProfileChange) -> Result<ProfileState, DeviceError> {
-        Err(unsupported("profile restoration", NO_PROFILE_CONTROL))
+    fn restore_profile(
+        &mut self,
+        change: &PreparedProfileChange,
+    ) -> Result<ProfileState, DeviceError> {
+        self.restore_of(change)
     }
 }
 

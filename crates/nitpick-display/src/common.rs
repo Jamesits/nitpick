@@ -75,8 +75,6 @@ pub fn resolve<'a, T>(
 /// records, so it must not change between builds or runs.
 #[must_use]
 pub fn topology_revision(devices: &[DeviceInfo]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut parts: Vec<String> = devices
         .iter()
         .map(|d| {
@@ -92,10 +90,19 @@ pub fn topology_revision(devices: &[DeviceInfo]) -> u64 {
         .collect();
     // Native enumeration order can change without a topology change.
     parts.sort_unstable();
+    fnv1a64(&parts)
+}
+
+/// FNV-1a 64 over `parts` in order. Stable across builds and runs, so
+/// recovery records can store it.
+#[must_use]
+pub fn fnv1a64<S: AsRef<str>>(parts: &[S]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash = OFFSET;
-    for part in &parts {
+    for part in parts {
         // 0xff separates parts; it cannot occur in UTF-8.
-        for &b in part.as_bytes().iter().chain(&[0xff]) {
+        for &b in part.as_ref().as_bytes().iter().chain(&[0xff]) {
             hash ^= u64::from(b);
             hash = hash.wrapping_mul(PRIME);
         }

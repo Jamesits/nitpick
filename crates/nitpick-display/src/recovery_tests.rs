@@ -55,6 +55,10 @@ fn change(selection: ProfileSelection) -> PreparedProfileChange {
                 "ColorProfileGetDisplayList",
             ),
             selection,
+            applied_scope: Some(ProfileScope {
+                user: UserScope::Current,
+                host: None,
+            }),
             revision: 7,
         },
         profile: IccProfile::new(icc_bytes(1)).unwrap(),

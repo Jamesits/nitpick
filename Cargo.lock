@@ -2477,6 +2477,7 @@ dependencies = [
  "drm",
  "md-5",
  "nitpick-core",
+ "nitpick-fixtures",
  "objc2",
  "objc2-app-kit",
  "objc2-color-sync",

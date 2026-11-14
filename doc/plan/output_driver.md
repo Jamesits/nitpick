@@ -190,13 +190,11 @@ Requires: 5.
 
 Open questions:
 
-- Does Windows accept `ordinary_p3_gamma22` in the Advanced Color role? Its D50 red colorant has $Z = -0.00105$, as in the Apple Display P3 profile. MHC2Gen states that SDR auto colour management fails for MHC profiles with negative colorants. **Unverified** for profiles without `MHC2`.
+- Does SDR automatic colour management use `ordinary_p3_gamma22` in the Advanced Color role? Its D50 red colorant has $Z = -0.00105$, as in the Apple Display P3 profile. MHC2Gen states that SDR auto colour management fails for MHC profiles with negative colorants. Windows 11 build 26200 accepted the association and its readback; that does not show that the compositor uses the profile. **Unverified** for profiles without `MHC2`.
 
 TODO:
 
-- Implement profile target discovery, preparation, assignment, readback and restoration in `nitpick-display`. Use native installation and association APIs with explicit scope and ordinary or Advanced Color role.
-- Inject failure after each native write. Verify restoration, permission errors, no prior override, existing shared profiles and device replacement. On a selected test display, assign a known fixture and restore its original state. Verify OS assignment separately from MHC2 activation.
-- With each profile of the `mhc2` fixture set assigned, check that Windows accepts it as an MHC profile: the Advanced Color luminance reports (for example `DXGI_OUTPUT_DESC1`) must give the fixture's MHC2 minimum, MHC2 peak and `lumi` values. The values differ, so a swapped field shows. `IsColorProfileValid` does not read `MHC2`; it is not this check.
+- With each profile of the `mhc2` fixture set assigned, check that Windows accepts it as an MHC profile: the Advanced Color luminance reports (for example `DXGI_OUTPUT_DESC1`) must give the fixture's MHC2 minimum, MHC2 peak and `lumi` values. The values differ, so a swapped field shows. `IsColorProfileValid` does not read `MHC2`; it is not this check. Run it on a dedicated test display with `profile_roundtrip` or an equivalent runner: the design allows MHC2 fixtures only in the Windows calibration tests, and the example accepts only `ordinary` fixtures. It has not run; the only checked display belongs to a developer.
 
 ### 45. Implement macOS ICC profile assignment
 
@@ -245,6 +243,25 @@ Open questions:
 - Is a check of black-point compensation with a nonzero black point necessary? No fixture curve has one, so the setting has no effect on the [transform cases](../design/output_driver/testing.md#conventional-icc-transforms). Little CMS finds a black point through a 16-bit transform, so an independent expected value needs a stated tolerance.
 - Are out-of-gamut values necessary? The generator does not accept a negative linear value at a gamma 2.2 profile. The Little CMS result for that input is not pinned.
 - Must tests pin the Little CMS identity rules (0.002 for the absolute-intent conversion matrix, $10^{-5}$ for joined matrices)? No current case depends on them; a case with almost equal profiles or absolute intent to the PCS endpoint does.
+
+### 59. Qualify the remaining Windows profile assignment cases
+
+Requires: 44.
+
+The current-user scope passed in both roles with HDR on, on one display without prior associations; see [Windows profile assignment](../design/display_device.md#windows-profile-assignment).
+
+TODO:
+
+- With `profile_roundtrip` and the `ordinary` fixtures, check the ordinary role with HDR off and in SDR WCG, and a display with existing associations in both roles. Check that the readback and restoration keep the user's associations and default.
+- As an administrator, check the system-wide scope. Confirm that `ICMProfileAC` in the monitor driver key holds the system-wide Advanced Color list; until then that list source is unverified.
+- With a system-wide list that is not empty, turn on the per-user switch through a current-user assignment. Check whether Windows copies the system-wide list into the current-user list, as the legacy `AssociateColorProfileWithDevice` reference states. A copy makes restoration fail with `StateConflict`; handle it if it occurs.
+- Check the legacy device name lookup with two monitors on one GDI source (clone mode).
+
+Open questions:
+
+- Must restoration remove the current-user registry key `...\ICM\ProfileAssociations\Display\{class}\<n>` when the change created it? After restoration it holds empty lists and the per-user switch off, and the Windows functions report the original state. The real-device check removed it by hand to get a byte-equal registry.
+- As a standard user, system-wide association calls returned success without a change, and the assignment failed at readback with `StateConflict`. Must the backend report `PermissionDenied` instead, for example by checking the process token before a system-wide write?
+- `ColorProfileGetDisplayList` returned no profile while associations existed, so the backend reads undocumented registry values. Is there a documented read of both lists, or a Windows build where the function works?
 
 ### 50. Add the explicit HDR display model
 

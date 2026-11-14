@@ -256,7 +256,14 @@ pub struct ProfileState {
     pub target: ProfileTarget,
     /// Profiles associated with the device at this target.
     pub associations: Report<Vec<ProfileRef>>,
+    /// Stored at this target. The OS applies it only if `applied_scope` is
+    /// this target's scope.
     pub selection: ProfileSelection,
+    /// Scope whose associations the OS applies to this device, where an OS
+    /// setting chooses it: the Windows per-user switch ("Use my settings
+    /// for this device"). `None` if the OS has no such setting. A change
+    /// can alter it, so restoration restores it too.
+    pub applied_scope: Option<ProfileScope>,
     /// Changes with each observed state change. Opaque; compare for
     /// equality only.
     pub revision: u64,

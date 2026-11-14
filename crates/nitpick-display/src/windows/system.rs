@@ -25,6 +25,8 @@ use super::{
 };
 use crate::common::{Field, NativeFailure};
 
+mod profile;
+
 /// `DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2`. Not in the
 /// `windows` crate metadata yet.
 const GET_ADVANCED_COLOR_INFO_2: DISPLAYCONFIG_DEVICE_INFO_TYPE =
@@ -230,6 +232,7 @@ fn path_report(path: &DISPLAYCONFIG_PATH_INFO, modes: &[DISPLAYCONFIG_MODE_INFO]
         });
     PathReport {
         adapter_luid: luid(source.adapterId),
+        target_adapter_luid: luid(target.adapterId),
         source_id: source.id,
         target_id: target.id,
         source_name,

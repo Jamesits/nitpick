@@ -4,7 +4,7 @@
 
 `DisplayDeviceControl` in `nitpick-core::device` enumerates local display devices, reads their capabilities and current state, and controls their OS settings. The first write operation is ICC profile assignment, including the state needed to restore the previous assignment. `nitpick-display` implements this trait for Windows, macOS and Linux. Both the Qt host and the command-line host can use it.
 
-**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows, macOS and Linux device and capability queries and the recovery-record format. ICC assignment is not implemented; it returns `Unsupported`. The remaining work is in [the output driver plan](../plan/output_driver.md).
+**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows, macOS and Linux device and capability queries and the recovery-record format. Windows has ICC assignment, readback and restoration; see [Windows profile assignment](#windows-profile-assignment). On macOS and Linux, ICC assignment returns `Unsupported`. The remaining work is in [the output driver plan](../plan/output_driver.md).
 
 The host coordinates three separate interfaces:
 
@@ -50,7 +50,7 @@ The following types are owned Rust data. Native values use `Report<T>`: a known 
 | `DeviceMode` | Current HDR state, gamut, wire depth, luminance limits, SDR white, native pixel size and macOS EDR headroom where readable. Unknown values remain unknown. |
 | `DeviceQuery` | Capabilities, mode, identity/topology revision and the source of each native report. |
 | `ProfileTarget` | Device, native profile role and scope, including user and host scope where applicable. The backend lists the targets it can address. |
-| `ProfileState` | Observed associations and selected default or override. Distinguish no override, inherited state and an unreadable value. Include a state revision for change detection. |
+| `ProfileState` | Observed associations and selected default or override. Distinguish no override, inherited state and an unreadable value. Include the scope that the OS applies where an OS setting selects it (the Windows per-user switch), and a state revision for change detection. |
 | `IccProfile` | Owned profile bytes and their SHA-256 content hash. A caller's path is not the profile identity. Construction checks only the ICC header size and `acsp` signature. |
 | `PreparedProfileChange` | Versioned device identity, target, original state, desired profile and planned resources owned by this change. It can be saved for recovery before any mutation. |
 | `DeviceError` | Unsupported operation or scope, permission denied, invalid profile, device disconnected, ambiguous identity, state conflict, timeout or native error. Retain the native reason. |
@@ -129,6 +129,53 @@ The device key is the monitor device interface path from `DISPLAYCONFIG_TARGET_D
 
 **Unverified:** whether DXGI substitutes OS default luminance for an EDID without HDR static metadata, whether the legacy wide-colour bit is set only for SDR WCG, and the wire gamut of SDR WCG. A check on Windows 11 build 26200 with one HDR display read every field above, with HDR on at 8 bits per channel.
 
+`icc_profiles` is `Yes` when `mscms.dll` exports the `ColorProfile*` functions (Windows build 20348 and later), and `No` otherwise.
+
+### Windows profile assignment
+
+`nitpick_display::windows` uses the [display association functions](https://learn.microsoft.com/en-us/windows/win32/api/icm/nf-icm-colorprofileadddisplayassociation) of `mscms.dll`. They address a display by the adapter LUID and source ID, which the backend re-resolves from the device key before each call. The backend loads every `mscms.dll` function at run time.
+
+Each device has four targets: the ordinary and the Advanced Color role, each in the current-user and the system-wide scope. Windows has no host scope; a target with a host scope is `Unsupported`.
+
+Native model. Items marked "observed" come from a check on Windows 11 build 26200 and are not in the Microsoft reference:
+- Each scope and role has an association list and a default.
+- A per-user switch ("Use my settings for this device") selects the scope that Windows applies. `ColorProfileGetDisplayUserScope` reads it. The only setter is the legacy `WcsSetUsePerUserProfiles`, which takes the legacy device name `MONITOR\<id>\{class}\<n>` from `EnumDisplayDevicesW`. Observed: a current-user association does not set the switch.
+- Observed: the first association of an empty list becomes its default without `setAsDefault`. Removing the only association leaves no default.
+- Observed: `ColorProfileGetDisplayDefault` returns `ERROR_FILE_NOT_FOUND` when there is no default. The current-user default reads back while the switch is off. **Unverified:** whether a current-user read without a current-user default falls back to the system-wide default; the mapping assumes it does not.
+- Observed: as a standard user, system-wide association and default calls returned success without a change. The readback then fails with `StateConflict`.
+
+| `ProfileState` field | Source | Rule |
+|---|---|---|
+| `associations` | Registry value `ICMProfile` (ordinary) or `ICMProfileAC` (Advanced Color) | Current user: `HKCU\Software\Microsoft\Windows NT\CurrentVersion\ICM\ProfileAssociations\Display\{class}\<n>`. System-wide: the monitor driver key `HKLM\SYSTEM\CurrentControlSet\Control\Class\{class}\<n>`. A missing key or value is an empty list. |
+| `selection` | `ColorProfileGetDisplayDefault` with `CPST_STANDARD_DISPLAY_COLOR_MODE` or `CPST_EXTENDED_DISPLAY_COLOR_MODE` | `Override` if the target scope has a default. For a current-user target without one, `Inherited` from the system-wide default when the switch is off; otherwise `NoOverride`. |
+| `applied_scope` | `ColorProfileGetDisplayUserScope` | A read failure makes the selection unreadable. |
+| Profile hash | File in the colour directory | Unknown if the file is missing. |
+
+**Deviation:** the lists come from undocumented registry values. `ColorProfileGetDisplayList` returned no profile in either scope while both roles had current-user associations, with the switch on and off. The current-user values are observed. `ICMProfile` in a monitor driver key was observed for another monitor; `ICMProfileAC` there is **unverified**.
+
+`prepare_icc_profile` selects the profile file in this order:
+1. An association of the target with the same content. The change only selects it. If the target has no selection, preparation fails, because restoration would need to remove the user's association.
+2. A file with the same content in the colour directory, except files with the `nitpick-` prefix. The change adds an association.
+3. A new file `nitpick-<profile hash>-<target hash>.icc`. The change installs it and adds an association. If the file already exists, preparation fails with `StateConflict`: an earlier change did not finish.
+
+The planned resources name the file. Restoration removes only a file with the `nitpick-` prefix that the record plans.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Checked: identity, topology and state equal the record
+    Checked --> Installed: InstallColorProfileW (new file only)
+    Installed --> PerUser: WcsSetUsePerUserProfiles(on) (current-user target with the switch off)
+    PerUser --> Associated: ColorProfileAddDisplayAssociation (new association only)
+    Associated --> Selected: ColorProfileSetDisplayDefaultAssociation
+    Selected --> [*]: readback has the selection, the association and the applied scope
+```
+
+`restore_profile` rechecks the device identity, but not the topology. It accepts only a current state that a prefix of these steps gives from the original state; another state is `StateConflict`. It then removes the planned association, restores a previous default, restores the per-user switch and uninstalls the planned file if no display lists or selects it. The readback must equal the original state. Association order is not compared: Windows does not document its meaning.
+
+**Deviation:** restoration leaves the current-user registry key with empty lists and the switch off when the key did not exist before. The Windows functions then report the original state. **Open:** whether restoration must remove this key.
+
+A check on Windows 11 build 26200 with one HDR display (HDR on, per-user switch off, no prior association) assigned `ordinary_srgb` in both roles and `ordinary_p3_gamma22` in the Advanced Color role, in the current-user scope, read back each assignment and restored the original state. The functions accepted `ordinary_p3_gamma22`. This shows only the association; it does not show that SDR colour management uses the profile. The system-wide target failed at readback as a standard user and was restored. **Unverified:** the ordinary role with HDR off and in SDR WCG, a system-wide assignment as an administrator, a display with existing associations, a system-wide list that is not empty when the switch changes, and the legacy device name with more than one monitor on a GDI source.
+
 ### macOS reports
 
 The device key is the ColorSync display device UUID from `CGDisplayCreateUUIDFromDisplayID`. ColorSync profile assignment uses this UUID with the display device class. The `CGDirectDisplayID` changes after a reconnect; it only links the Core Graphics, ColorSync and `NSScreen` reports in one query. Without a UUID, the key is the display ID. The identity evidence is the vendor and model numbers, the EDID serial number and the built-in flag.
@@ -204,6 +251,10 @@ The crate must build on all three operating systems. Missing APIs, services, rol
 | Linux Qt screen mapping | Qt manufacturer and model; kernel connector name; EDID MD5 | Connector name, with the GNOME form of `HDMI-A`, on Wayland and Xwayland; EDID MD5 on other X servers. Wayland gives no EDID and no serial number to clients, and the manufacturer and model formats differ between compositors. X driver output names can differ from the kernel names, but a real X server gives the EDID. |
 | Linux profile-service mapping | Connector name; colord device ID; EDID MD5 | EDID MD5 in the colord device metadata. Connector names differ between the kernel and compositors. The colord device ID is made by the session daemon and does not name the connector. |
 | Topology revision | std hasher; fixed hash | FNV-1a 64 over sorted identity fields. Recovery records store the value, so it must not change between builds or runs. |
+| Applied scope in the profile state | Restore lists and defaults only; add a field | Field `applied_scope`. A current-user assignment must set the Windows per-user switch, or Windows ignores it. Without the field, restoration cannot return the switch, and "no override" with the switch on equals "no override" with it off. |
+| Windows association lists | `ColorProfileGetDisplayList`; registry values; no list (role unsupported) | Registry values. The list function returned no profile while associations existed, so restoration could not detect or remove an association. Cost: undocumented storage; a changed layout gives wrong lists, which the readback detects as a mismatch. |
+| Windows `mscms.dll` binding | Static import; run-time loading | Run-time loading. A static import of the `ColorProfile*` functions stops the process from loading before Windows build 20348. |
+| Windows installed profile file | Use the caller's name; content hash; content hash and target | Content hash and target, with the `nitpick-` prefix. The name is unique per target, so two changes never share a file, and restoration cannot remove a user's file. |
 
 ## Usage
 
@@ -217,7 +268,15 @@ Run the same trait contract against a fake backend and each native backend. To p
 
 Inject failure after installation, association and default selection. Verify recovery after each step, timeout, cancellation and process restart. Test concurrent external changes, shared pre-existing profiles and repeated restoration. A completed assignment must have matching readback. Failed restoration fails the run.
 
-Native integration tests use a selected test display and the `ordinary` [profile fixtures](output_driver/testing.md#profile-fixtures). Run assignment, readback and restoration on each supported OS. Apply MHC2 fixtures only in the Windows calibration tests. Confirm calibration activation and light output at their own boundaries in [Output verification](output_driver/testing.md).
+Native integration tests use a selected test display and the `ordinary` [profile fixtures](output_driver/testing.md#profile-fixtures). Run assignment, readback and restoration on each supported OS. The example below selects the one device whose key contains `<key part>`, saves the recovery record before the first write, assigns, restores and prints each state. It accepts only `ordinary` fixtures. After a failed restoration it keeps the record; `restore` retries from it:
+
+```text
+cargo run -p nitpick-display --example profile_roundtrip -- state <key part>
+cargo run -p nitpick-display --example profile_roundtrip -- assign <key part> <standard|advanced> <user|system> <fixture id> <record file>
+cargo run -p nitpick-display --example profile_roundtrip -- restore <record file>
+```
+
+Apply MHC2 fixtures only in the Windows calibration tests. Confirm calibration activation and light output at their own boundaries in [Output verification](output_driver/testing.md).
 
 ## Future enhancements
 

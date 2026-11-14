@@ -37,6 +37,7 @@ fn no_override(target: ProfileTarget) -> ProfileState {
         target,
         associations: Report::known(vec![], SOURCE),
         selection: ProfileSelection::NoOverride,
+        applied_scope: None,
         revision: 0,
     }
 }

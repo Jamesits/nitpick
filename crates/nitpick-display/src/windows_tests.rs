@@ -8,8 +8,9 @@ use nitpick_core::device::{
 use nitpick_core::driver::{Gamut, Support};
 
 use super::{
-    AdvancedColorInfo, AdvancedColorInfo2, DxgiOutput, OutputDesc1, PathReport, TargetName,
-    WindowsDisplay, WindowsNative, color_mode, dxgi_color_space, info_2_flags, info_flags,
+    AdvancedColorInfo, AdvancedColorInfo2, DisplayAddress, DxgiOutput, OutputDesc1, PathReport,
+    TargetName, WindowsDisplay, WindowsNative, WindowsProfileNative, color_mode, dxgi_color_space,
+    info_2_flags, info_flags,
 };
 use crate::common::{Field, NativeFailure};
 
@@ -45,6 +46,84 @@ impl WindowsNative for Fake {
     }
 }
 
+const NO_API: &str = "fake without mscms.dll";
+
+fn no_api<T>() -> Result<T, DeviceError> {
+    Err(DeviceError::Unsupported {
+        operation: "ICC profile control".into(),
+        reason: NO_API.into(),
+    })
+}
+
+/// A system without the `ColorProfile*` functions. The profile mapping
+/// has its own fake in `windows/profile_tests.rs`.
+impl WindowsProfileNative for Fake {
+    fn profile_api(&mut self) -> Result<(), DeviceError> {
+        no_api()
+    }
+    fn applied_scope(&mut self, _: &DisplayAddress) -> Result<UserScope, DeviceError> {
+        no_api()
+    }
+    fn set_per_user(&mut self, _: &DisplayAddress, _: bool) -> Result<(), DeviceError> {
+        no_api()
+    }
+    fn association_list(
+        &mut self,
+        _: &DisplayAddress,
+        _: UserScope,
+        _: ProfileRole,
+    ) -> Result<(Vec<String>, &'static str), DeviceError> {
+        no_api()
+    }
+    fn default_profile(
+        &mut self,
+        _: &DisplayAddress,
+        _: UserScope,
+        _: ProfileRole,
+    ) -> Result<Option<String>, DeviceError> {
+        no_api()
+    }
+    fn add_association(
+        &mut self,
+        _: &DisplayAddress,
+        _: UserScope,
+        _: ProfileRole,
+        _: &str,
+    ) -> Result<(), DeviceError> {
+        no_api()
+    }
+    fn remove_association(
+        &mut self,
+        _: &DisplayAddress,
+        _: UserScope,
+        _: ProfileRole,
+        _: &str,
+    ) -> Result<(), DeviceError> {
+        no_api()
+    }
+    fn set_default(
+        &mut self,
+        _: &DisplayAddress,
+        _: UserScope,
+        _: ProfileRole,
+        _: &str,
+    ) -> Result<(), DeviceError> {
+        no_api()
+    }
+    fn installed_profiles(&mut self) -> Result<Vec<String>, DeviceError> {
+        no_api()
+    }
+    fn read_installed(&mut self, _: &str) -> Result<Option<Vec<u8>>, DeviceError> {
+        no_api()
+    }
+    fn install(&mut self, _: &str, _: &[u8]) -> Result<(), DeviceError> {
+        no_api()
+    }
+    fn uninstall(&mut self, _: &str) -> Result<(), DeviceError> {
+        no_api()
+    }
+}
+
 impl Fake {
     fn set(&self, paths: Vec<PathReport>, outputs: Vec<DxgiOutput>) {
         let mut s = self.0.borrow_mut();
@@ -61,6 +140,7 @@ impl Fake {
 fn hdr_path(n: u32, name: &str) -> PathReport {
     PathReport {
         adapter_luid: 0x1_0000_2000,
+        target_adapter_luid: 0x1_0000_2000,
         source_id: n,
         target_id: 100 + n,
         source_name: Ok(format!(r"\\.\DISPLAY{n}")),
@@ -299,6 +379,7 @@ fn zero_minimum_with_peak_is_known() {
 fn every_failed_field_is_unknown_with_reason() {
     let path = PathReport {
         adapter_luid: 0x2a,
+        target_adapter_luid: 0x2a,
         source_id: 0,
         target_id: 7,
         source_name: Err(fail("GET_SOURCE_NAME")),
@@ -322,7 +403,7 @@ fn every_failed_field_is_unknown_with_reason() {
     assert!(reason(&caps.hdr).contains("GET_ADVANCED_COLOR_INFO_2"));
     assert!(reason(&caps.sdr_wcg).contains("GET_ADVANCED_COLOR_INFO failed"));
     assert!(reason(&caps.wire_depths).contains("active wire depth only"));
-    assert!(reason(&caps.icc_profiles).contains("not implemented"));
+    assert!(matches!(caps.icc_profiles.support(), Support::No(_)));
     let m = &q.mode;
     assert!(reason(&m.hdr_on).contains("CreateDXGIFactory1"));
     assert!(reason(&m.gamut).contains("GET_ADVANCED_COLOR_INFO"));
@@ -447,12 +528,16 @@ fn query_display_config_failure_is_an_error() {
     ));
 }
 
+/// Before Windows build 20348, `mscms.dll` lacks the `ColorProfile*`
+/// functions.
 #[test]
-fn profile_control_is_explicitly_unsupported() {
+fn profile_control_without_the_api_is_explicitly_unsupported() {
     let fake = Fake::default();
     fake.set(vec![hdr_path(1, "Monitor")], vec![pq(1)]);
     let mut b = fake.backend();
     let id = b.devices().unwrap().remove(0).id;
+    let caps = b.query_device(&id).unwrap().capabilities;
+    assert!(matches!(caps.icc_profiles.support(), Support::No(_)));
     assert_eq!(b.profile_targets(&id).unwrap(), vec![]);
     let target = ProfileTarget {
         device: id,
@@ -464,7 +549,7 @@ fn profile_control_is_explicitly_unsupported() {
     };
     assert!(matches!(
         b.profile_state(&target),
-        Err(DeviceError::Unsupported { reason, .. }) if reason.contains("not implemented")
+        Err(DeviceError::Unsupported { reason, .. }) if reason == NO_API
     ));
 }
 
