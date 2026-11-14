@@ -13,7 +13,12 @@ Requires: 15.
 TODO:
 
 - Build and run the macOS screen mapping on a Mac. On GNOME 50, map both screens with the Wayland and xcb Qt platforms; on xcb, check that the RandR read gives the Xwayland source. These run outside unit tests, which use injected device lists.
-- In the running launcher on each OS, verify that Qt timers and controls remain active during the device read, conversion and submission. Change the selected display and add or remove a screen while a presentation is pending: the status must show the cancellation, and a late result must not change it.
+- In the running launcher on macOS and on GNOME 50 (Wayland and xcb), verify that Qt timers and controls remain active during the device read, conversion and submission. Change the selected display and add or remove a screen while a presentation is pending: the status must show the cancellation, and a late result must not change it. Windows passed; use the method in [Running launcher checks](../design/output_driver/qt.md#running-launcher-checks).
+- On GNOME 50 on Wayland, `open` waits 0.3 to 0.5 s in its nested event loop. Add or remove a screen during this wait: the launcher must post the refresh again, and the status must show the cancellation. This did not occur on Windows, where `open` is shorter.
+
+Open questions:
+
+- Is a separate running check of a slow device read necessary? On Windows, the device read, `open` and render took less than 0.1 s together, so the check could not hold the read open. The `session.rs` unit tests use a held reader.
 
 ### 17. Add the Qt measurement delay
 
@@ -21,7 +26,7 @@ Requires: 16.
 
 TODO:
 
-- In the running launcher, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart.
+- In the running launcher on macOS and on GNOME 50, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart in the OS configuration directory. Windows passed; see [Running launcher checks](../design/output_driver/qt.md#running-launcher-checks).
 
 ### 28. Verify the browser session without a window system
 

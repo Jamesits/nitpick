@@ -142,7 +142,7 @@ Dropping the future drops both receivers and the submission registration. It doe
 
 The session keeps the driver in `Rc<RefCell<…>>`. The task holds the driver borrow from `open` until `present` completes. A new request drops the earlier task before it borrows the driver, so the earlier `Disconnected` does not reach the status line. See [Host lifecycle](#host-lifecycle). `query` and `open` stay synchronous. `open` still runs a nested event loop without user input for up to 5 s, see above.
 
-**Unverified:** that Qt timers and controls stay active during the device read, conversion and submission in the real Qt event loop. The unit tests of `qrhi_driver.rs` and `session.rs` use a simulated event loop with controlled workers.
+The unit tests of `qrhi_driver.rs` and `session.rs` use a simulated event loop with controlled workers. The real Qt event loop was checked on Windows only, see [Running launcher checks](#running-launcher-checks). **Unverified:** that Qt timers and controls stay active during the device read, conversion and submission on macOS and Linux.
 
 ## Signalling
 
@@ -241,7 +241,33 @@ Settings before a measurement:
 
 Tests and pass criteria are in [Output verification](testing.md): [QRhi unit tests](testing.md#qrhi-output), [GPU readback](testing.md#qrhi-readback), and [physical output criteria](testing.md#pass-criteria). See [the measurement plan](../../plan/test_patterns.md) for pending device work.
 
-**Not done:** hardware verification of code preservation, metadata effects and the measurement delay.
+**Not done:** hardware verification of code preservation, metadata effects and the sufficiency of the measurement delay.
+
+### Running launcher checks
+
+These checks run the real launcher in the Qt event loop. They are manual. A script controls the launcher through Windows UI Automation and reads the status line every 5 ms. Method:
+- Event loop: a second thread sends `WM_NULL` to the launcher window with `SendMessageTimeout` every 10 ms and records the round-trip time. The Qt GUI thread dispatches this message, its Windows timers and user input in the same message loop. During the conversion, the script also toggles a check box through UI Automation and reads its state back.
+- Delay: set the delay in the spin box, show the pattern and measure the time from "Waiting for measurement delay" to "Ready after delay". During the delay, send Esc to the pattern window, click "Show pattern" again or change the display.
+- Display changes: select the other display in the list, or add and remove a screen with `SetDisplayConfig` (extend topology, then the saved one-screen topology). Each change occurs while the presentation or the delay is pending. After the cancellation, the status line must not change for 6 s.
+- Persistence: set the delay, close and start the launcher, then read the spin box and `launcher.json`.
+
+Results on Windows 11 (build 26200), Qt 6.12.0, D3D11, debug build. Test display: one 3840×2160 HDR screen; a second screen was added for the display changes.
+
+| Check | Result |
+|---|---|
+| Event loop during conversion and submission (12-bit, 1.4 to 1.5 s) | Largest `WM_NULL` round trip 6 ms. The check box toggle took 14 ms. |
+| Event loop during the device read, `open` and render (0.08 to 0.1 s together) | Largest `WM_NULL` round trip 72 ms. `open` and the render are synchronous on the GUI thread. The device read was too short to measure separately. |
+| Delay 3000 ms and 500 ms | "Ready after delay" 2.999 to 3.001 s and 0.500 to 0.501 s after "Waiting" |
+| Delay 0 ms | No "Waiting" status |
+| Esc during the delay | "Cancelled: the pattern window closed" after 24 to 26 ms; no later status |
+| A second "Show pattern" 1 s into a 3000 ms delay | One "Ready after delay", 3.0 s after the second "Waiting" |
+| Display selection, screen added or screen removed during the presentation or the delay | "Cancelled: display changed"; no later status |
+| The screen of the pattern window removed during the delay | "Cancelled: display changed"; the pattern window closes |
+| Delay persistence | After a restart, the launcher shows the saved value |
+
+Counter-intuitive: a Windows topology change blocks the Qt GUI thread for 0.7 to 1.2 s while Qt updates its screens. A "Show pattern" request in this time runs after the refresh, so the screen change does not cancel it.
+
+**Unverified:** these checks on macOS and Linux. A screen change during the nested event loop of `open`, which makes the launcher post the refresh again; on Windows, `open` was too short for this.
 
 ## Future enhancements
 
