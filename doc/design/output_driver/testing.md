@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** design only. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures) and their reader exist; no production code is tested against them yet. The common driver interface, browser driver, test host, capture adapters and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The test-host protocol, capture adapters and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -217,7 +217,7 @@ Exercise `beginFrame`/`endFrame` failures, out-of-date surfaces, device loss, cl
 
 ### Browser integration
 
-Run a real server with an authenticated mock client on a host without a window system. Render with the real core, fetch and independently decode the PNG, send `applied`, and check delay and shutdown. Build by package and check that the command-line dependency graph contains no Qt, Tauri or `nitpick-app` dependency.
+Run a real server with an authenticated mock client on a host without a window system. Render with the real core, fetch and independently decode the PNG, send `applied`, and check delay and shutdown. Build by package and check that the command-line dependency graph contains no Qt, Tauri or `nitpick-app` dependency. Status: implemented as the command-line process tests in [Browser output driver testing](browser.md#testing); they pass on Windows only.
 
 Run the real page in each supported browser engine and optional webview. Check authenticated fetch, blob URL lifetime, decode, natural size, layout size, `applied` and cancellation during fetch or decode. Test device pixel ratios 1 and 2, fractional scale, zoom, resize and full-screen changes. A screenshot can check geometry; a normal WebDriver or browser screenshot is not an HDR numeric reference.
 

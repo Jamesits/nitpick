@@ -28,15 +28,6 @@ TODO:
 
 - In the running launcher on macOS and on GNOME 50, verify that the Qt timer gives "Ready after delay" after the set time, and that Esc, a new frame and a display change during the delay cancel it. Verify that the delay value persists across a launcher restart in the OS configuration directory. Windows passed; see [Running launcher checks](../design/output_driver/qt.md#running-launcher-checks).
 
-### 28. Verify the browser session without a window system
-
-Requires: 27.
-
-TODO:
-
-- Run a real server and CLI with an authenticated mock client. Render with the core, fetch and independently decode the PNG, send `applied`, check readiness, replace the frame and shut down.
-- Verify timeouts and disconnects during presentation and delay. Build by package without Qt, Tauri or a window system; check the dependency graph.
-
 ### 29. Connect browser output to the Qt launcher
 
 Requires: 17, 25, 28.
@@ -76,6 +67,10 @@ TODO:
 ### 33. Add the shared test-host protocol
 
 Requires: 17, 28.
+
+Open questions:
+
+- In the command-line host, a disconnect during presentation prints either `error: presentation failed: display disconnected` or `status: presentation cancelled`. The service sends the driver reply before the disconnect event, but the host can handle either first. Must the protocol give one fixed event for this case, or accept both?
 
 TODO:
 
@@ -313,7 +308,7 @@ Requires: 28, 33, 36, 43, 48, 49, 50. Add device jobs after their qualification 
 
 TODO:
 
-- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display.
+- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display. Include the `nitpick-cli` process and dependency-graph tests on Linux and macOS without a display server or a window session; they passed only on Windows in a desktop session.
 - Run native device query and profile contract tests with injected calls on each target OS. Keep actual profile mutations in selected-device integration jobs. Verify routing and result aggregation with injected pass, fail and unavailable results. A required device losing qualification must fail; an optional unavailable device must not count as HDR coverage. Record conversion, encoding, acknowledgement, capture and settle times separately. Fail bounded-wait and queue-growth checks independently of pixel results.
 
 ### 57. Record physical output qualification
