@@ -226,7 +226,7 @@ impl fmt::Display for ContentHash {
 }
 
 /// An installed or registered profile as the OS names it: a file name on
-/// Windows, a profile URL on macOS or a colord object ID.
+/// Windows, a profile file path on macOS or a colord object ID.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProfileRef {

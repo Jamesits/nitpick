@@ -196,14 +196,25 @@ TODO:
 
 - With each profile of the `mhc2` fixture set assigned, check that Windows accepts it as an MHC profile: the Advanced Color luminance reports (for example `DXGI_OUTPUT_DESC1`) must give the fixture's MHC2 minimum, MHC2 peak and `lumi` values. The values differ, so a swapped field shows. `IsColorProfileValid` does not read `MHC2`; it is not this check. Run it on a dedicated test display with `profile_roundtrip` or an equivalent runner: the design allows MHC2 fixtures only in the Windows calibration tests, and the example accepts only `ordinary` fixtures. It has not run; the only checked display belongs to a developer.
 
-### 45. Implement macOS ICC profile assignment
+### 45. Qualify the macOS ICC profile assignment
 
 Requires: 6.
 
+The backend and its injected-call tests are in `nitpick_display::macos`; see [macOS profile assignment](../design/display_device.md#macos-profile-assignment). Clippy passed for `aarch64-apple-darwin` on Windows, and the injected-call tests passed on Windows. Nothing has run on a Mac.
+
 TODO:
 
-- Implement the same trait operations through ColorSync device UUIDs and profile IDs. Preserve user and host scope. Restore either the previous custom profile or the absence of an override.
-- Test rejected profiles, permission errors, partial failure and recovery with injected calls. Verify assignment and restoration on a selected Mac with ordinary ICC fixtures. A successful assignment must not claim MHC2 execution or measured HDR luminance.
+- On a selected Mac, run `cargo nextest run -p nitpick-display`. Then run `profile_roundtrip` with the `ordinary` fixtures in the current-user scope, with both host parts. Record the macOS version and the display. Check assignment, readback and restoration. Compare the output of `defaults read -g com.apple.ColorSync.Devices` and `defaults -currentHost read -g com.apple.ColorSync.Devices` before the assignment and after the restoration.
+- Verify the undocumented storage that `scoped_custom_profiles` reads: the entry name `Device.mntr.<UUID>` with the UUID case, the `CustomProfiles` key, the profile ID as key, and the file path as value (not a URL). If it is different, correct the read and the design.
+- Check that `kCFNull` removes the entry of the scope, so that a wider entry applies again. Set entries at two scopes and check the resolution order against `ColorSyncDeviceCopyDeviceInfo`.
+- As root, check the any-user scope. Without root, record what an any-user call does: it returns false, or it returns true without a change.
+- Record the registration scope of a built-in and an external display, and the targets that the backend lists.
+- Check that `ColorSyncProfileVerify` accepts each `ordinary` fixture and rejects a damaged profile with a valid header.
+
+Open questions:
+
+- Must the backend use an identical profile file in a profile folder? The design says "Use an existing identical profile when possible". The macOS backend always installs a new file, because a planned resource holds one value and the record must name the file and the profile ID. A core change, for example a profile ID in the resource or the target, would allow reuse.
+- Does ColorSync resolve each device entry separately, or the whole `com.apple.ColorSync.Devices` value of a scope, as `CFPreferences` resolves a key? In the second case, an entry of another device at a narrower scope hides the wider entries of this device. The check against the resolved value then makes the state unreadable, and the device has no usable target.
 
 ### 46. Implement Linux ICC profile assignment
 

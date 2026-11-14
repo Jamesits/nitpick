@@ -1,20 +1,24 @@
 //! macOS backend. Core Graphics gives the active displays and their modes;
 //! `ColorSync` gives the device identity; `AppKit` gives the name, EDR
-//! headroom and P3 support.
+//! headroom and P3 support. `ColorSync` custom profiles give the ICC
+//! profile assignment; see `profile`.
 //!
 //! The mapping is portable. Native calls are in `system`, which builds on
 //! macOS only.
 
 use nitpick_core::device::{
     DeviceCapabilities, DeviceError, DeviceId, DeviceInfo, DeviceMode, DeviceQuery,
-    DisplayDeviceControl, EdrHeadroom, IccProfile, PreparedProfileChange, ProfileState,
-    ProfileTarget, Report,
+    DisplayDeviceControl, EdrHeadroom, HostScope, IccProfile, PreparedProfileChange, ProfileState,
+    ProfileTarget, Report, UserScope,
 };
 
 use crate::common::{Field, resolve, topology_revision, unsupported};
 
+mod profile;
 #[cfg(target_os = "macos")]
 mod system;
+
+pub use profile::{INSTALLED_PREFIX, MacProfileNative, MacScope, PRECEDENCE};
 
 pub const BACKEND: &str = "macos";
 
@@ -23,7 +27,6 @@ const MODES: &str = "CGDisplayCopyAllDisplayModes";
 const EDR: &str = "NSScreen EDR component values";
 const GAMUT: &str = "NSScreen.canRepresentDisplayGamut";
 
-const NO_PROFILE_CONTROL: &str = "macOS ICC profile assignment is not implemented";
 const NO_HDR_REPORT: &str = "macOS has no public HDR report; EDR headroom does not establish HDR";
 const NO_WIRE_DEPTH: &str = "macOS does not report the wire depth";
 const NO_LUMINANCE: &str = "macOS reports EDR headroom relative to SDR white, not luminance";
@@ -45,8 +48,18 @@ pub struct ModeReport {
 pub struct ColorSyncDevice {
     /// `kColorSyncDeviceDescription`.
     pub description: Option<String>,
-    /// `kColorSyncDeviceDefaultProfileID`.
+    /// `kColorSyncDeviceDefaultProfileID` in the factory profiles.
     pub default_profile_id: Option<String>,
+    /// The other keys of `kColorSyncFactoryProfiles`, sorted.
+    pub factory_profile_ids: Vec<String>,
+    /// `kColorSyncCustomProfiles`, resolved for the current user and host:
+    /// profile ID and file path. `None` for `kCFNull`.
+    pub custom_profiles: Vec<(String, Option<String>)>,
+    /// `kColorSyncDeviceUserScope`, the registration scope; `None` if
+    /// missing or not a `kCFPreferences` user value.
+    pub user_scope: Option<UserScope>,
+    /// `kColorSyncDeviceHostScope`; as `user_scope`.
+    pub host_scope: Option<HostScope>,
 }
 
 /// One active Core Graphics display.
@@ -119,6 +132,7 @@ impl Default for MacDisplay<system::System> {
     }
 }
 
+#[derive(Clone)]
 struct Entry {
     info: DeviceInfo,
     display: DisplayReport,
@@ -156,8 +170,20 @@ impl<N: MacNative> MacDisplay<N> {
     }
 
     fn snapshot(&mut self) -> Result<Snapshot, DeviceError> {
+        self.snapshot_with(true)
+    }
+
+    /// Without `screens`, the `AppKit` fields are unknown and the name
+    /// falls back. Profile operations skip the screens: they need no
+    /// `AppKit` field, and without a main run loop each read waits for the
+    /// main-thread timeout.
+    fn snapshot_with(&mut self, screens: bool) -> Result<Snapshot, DeviceError> {
         let displays = self.native.displays()?;
-        let screens = self.native.screens();
+        let screens = if screens {
+            self.native.screens()
+        } else {
+            Err("NSScreen not read for a profile operation".to_owned())
+        };
         let entries: Vec<Entry> = displays
             .into_iter()
             .map(|display| {
@@ -242,7 +268,10 @@ fn capabilities(entry: &Entry) -> DeviceCapabilities {
     let icc_profiles = match (&entry.display.uuid, &entry.display.colorsync) {
         (Err(e), _) => unknown(format!("no ColorSync device ID: {e}")),
         (Ok(_), None) => known(false, COLORSYNC_INFO),
-        (Ok(_), Some(_)) => unknown(NO_PROFILE_CONTROL),
+        (Ok(_), Some(device)) => match profile::profile_id(device) {
+            Ok(_) => known(true, COLORSYNC_INFO),
+            Err(reason) => unknown(format!("{COLORSYNC_INFO}: {reason}")),
+        },
     };
     DeviceCapabilities {
         hdr: unknown(NO_HDR_REPORT),
@@ -317,7 +346,7 @@ fn edr(s: &ScreenReport) -> Report<EdrHeadroom> {
     )
 }
 
-impl<N: MacNative> DisplayDeviceControl for MacDisplay<N> {
+impl<N: MacNative + MacProfileNative> DisplayDeviceControl for MacDisplay<N> {
     fn devices(&mut self) -> Result<Vec<DeviceInfo>, DeviceError> {
         Ok(self
             .snapshot()?
@@ -339,29 +368,35 @@ impl<N: MacNative> DisplayDeviceControl for MacDisplay<N> {
     }
 
     fn profile_targets(&mut self, device: &DeviceId) -> Result<Vec<ProfileTarget>, DeviceError> {
-        let snapshot = self.snapshot()?;
-        resolve(&snapshot.entries, device, |e| &e.info)?;
-        Ok(Vec::new())
+        let snapshot = self.snapshot_with(false)?;
+        let entry = resolve(&snapshot.entries, device, |e| &e.info)?;
+        Ok(profile::targets(entry))
     }
 
-    fn profile_state(&mut self, _: &ProfileTarget) -> Result<ProfileState, DeviceError> {
-        Err(unsupported("profile state", NO_PROFILE_CONTROL))
+    fn profile_state(&mut self, target: &ProfileTarget) -> Result<ProfileState, DeviceError> {
+        self.profile_state_of(target)
     }
 
     fn prepare_icc_profile(
         &mut self,
-        _: &ProfileTarget,
-        _: &IccProfile,
+        target: &ProfileTarget,
+        profile: &IccProfile,
     ) -> Result<PreparedProfileChange, DeviceError> {
-        Err(unsupported("profile preparation", NO_PROFILE_CONTROL))
+        self.prepare_of(target, profile)
     }
 
-    fn set_icc_profile(&mut self, _: &PreparedProfileChange) -> Result<ProfileState, DeviceError> {
-        Err(unsupported("profile assignment", NO_PROFILE_CONTROL))
+    fn set_icc_profile(
+        &mut self,
+        change: &PreparedProfileChange,
+    ) -> Result<ProfileState, DeviceError> {
+        self.set_of(change)
     }
 
-    fn restore_profile(&mut self, _: &PreparedProfileChange) -> Result<ProfileState, DeviceError> {
-        Err(unsupported("profile restoration", NO_PROFILE_CONTROL))
+    fn restore_profile(
+        &mut self,
+        change: &PreparedProfileChange,
+    ) -> Result<ProfileState, DeviceError> {
+        self.restore_of(change)
     }
 }
 

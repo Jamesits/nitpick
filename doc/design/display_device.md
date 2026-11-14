@@ -4,7 +4,7 @@
 
 `DisplayDeviceControl` in `nitpick-core::device` enumerates local display devices, reads their capabilities and current state, and controls their OS settings. The first write operation is ICC profile assignment, including the state needed to restore the previous assignment. `nitpick-display` implements this trait for Windows, macOS and Linux. Both the Qt host and the command-line host can use it.
 
-**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows, macOS and Linux device and capability queries and the recovery-record format. Windows has ICC assignment, readback and restoration; see [Windows profile assignment](#windows-profile-assignment). On macOS and Linux, ICC assignment returns `Unsupported`. The remaining work is in [the output driver plan](../plan/output_driver.md).
+**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows, macOS and Linux device and capability queries and the recovery-record format. Windows has ICC assignment, readback and restoration; see [Windows profile assignment](#windows-profile-assignment). macOS has the same operations; see [macOS profile assignment](#macos-profile-assignment). They have not run on a Mac. On Linux, ICC assignment returns `Unsupported`. The remaining work is in [the output driver plan](../plan/output_driver.md).
 
 The host coordinates three separate interfaces:
 
@@ -190,11 +190,55 @@ The device key is the ColorSync display device UUID from `CGDisplayCreateUUIDFro
 | Luminance, `sdr_white_nits` | none | Unknown. EDR headroom does not fill these fields. |
 | `native_size` | Pixel size of the mode with `kDisplayModeNativeFlag`, from `CGDisplayCopyAllDisplayModes` with the duplicate low-resolution modes | Not the current mode: a scaled mode has a framebuffer of another size. No flagged mode or more than one flagged size is unknown. |
 | `edr` | Current, potential and reference EDR component values of the `NSScreen` | A ratio to SDR white = 1.0, not a luminance. A value below 1 or not finite is unknown. A reference value of 0 means no reference preset. |
-| `icc_profiles` | `ColorSyncDeviceCopyDeviceInfo` | No if ColorSync has no device for the UUID; otherwise unknown until assignment exists. |
+| `icc_profiles` | `ColorSyncDeviceCopyDeviceInfo` | No if ColorSync has no device for the UUID. Yes if the device has one profile ID for assignment; see [macOS profile assignment](#macos-profile-assignment). Otherwise unknown. |
 
 Core Graphics and ColorSync calls run on the calling worker. `NSScreen` is main-thread only. A call on another thread goes to the main dispatch queue and waits at most 2 s. The main queue runs only when the main thread runs a run loop, as in the Qt host. Without it, or after `dispatch_main`, the name falls back and the `NSScreen` fields are unknown with the reason. The other fields remain.
 
 **Unverified:** that the UUID survives a restart, whether two identical monitors without EDID serial numbers get the same UUID (the backend then reports an ambiguous identity), whether every panel flags its native mode, whether the P3 report follows the panel or the assigned profile, and whether `NSScreen` updates after a topology change in a process without `NSApplication`. A check on macOS 27.0.1 with a MacBook Pro (M1 Max) built-in XDR display read every field above. It reported P3 support, native size 3024 × 1964, EDR headroom 1.2 current and 16 potential, no reference preset, and ColorSync default profile ID 1. No external display was checked.
+
+### macOS profile assignment
+
+`nitpick_display::macos` uses [`ColorSyncDeviceSetCustomProfiles`](https://developer.apple.com/documentation/colorsync/colorsyncdevicesetcustomprofiles(_:_:_:)) with the display device class and the device UUID. ColorSync keeps one custom profile file for each device profile ID and preference scope. A scope has a user part (current user or any user) and a host part (current host or any host). ColorSync has no Advanced Color role, so each target has the `Standard` role and a host scope.
+
+The profile ID is the default profile ID of the factory profiles, or the only factory profile ID. `ColorSyncDevice.h` makes the default ID optional for a device with one profile. Without one profile ID, the device has no targets. The device has one target for each scope that is not wider than its registration scope (`kColorSyncDeviceUserScope` and `kColorSyncDeviceHostScope`). `ColorSyncDevice.h` states that a custom profile scope cannot be wider than the device scope. A missing registration value is the current user or the current host, the `ColorSyncRegisterDevice` default.
+
+Native model:
+- The scopes resolve in the `CFPreferences` search order: current user and current host, current user and any host, any user and current host, any user and any host. The first scope with an entry applies. **Unverified** for ColorSync; the state read rejects a state that does not agree with this order.
+- `kCFNull` in place of the file URL reverts the scope to the factory profile (`ColorSyncDevice.h`). **Unverified:** whether this removes the entry, so that a wider entry applies again. The restoration readback detects the other result.
+- The any-user scope needs root, as the `customdisplayprofiles` administrator tool states. The backend returns `PermissionDenied` before a write without root. **Unverified:** what a call without root does.
+
+| `ProfileState` field | Source | Rule |
+|---|---|---|
+| `associations` | `CFPreferencesCopyValue` of the target scope: global domain, key `com.apple.ColorSync.Devices`, entry `Device.mntr.<UUID>`, dictionary `CustomProfiles` | The entry of the profile ID: zero or one file path. A missing key is no entry. |
+| `selection` | The same entries of all four scopes, and `kColorSyncCustomProfiles` of `ColorSyncDeviceCopyDeviceInfo` | `Override` if the target scope has an entry. Otherwise `Inherited` from the first wider scope with an entry, or `NoOverride`. `Unreadable` if the first entry in resolution order is not the `ColorSyncDeviceCopyDeviceInfo` value. |
+| `applied_scope` | none | Always `None`: no macOS setting selects the scope. |
+| Profile hash | The file | Unknown if the file is missing. |
+| `revision` | All four scopes and the resolved value | A change at a narrower scope also changes it. |
+
+**Deviation:** the entries of each scope come from undocumented preference storage. `ColorSyncDeviceCopyDeviceInfo` gives only the value resolved for the current user and host. The storage layout is from administrator reports for older macOS versions; it is **unverified** on current macOS. If the layout is different, the state is unreadable and preparation fails; the state cannot be wrong without detection.
+
+`prepare_icc_profile` reads the state without a change, and then:
+1. It rejects a target when a narrower scope has an entry, because the assignment would not apply.
+2. It checks root for the any-user scope.
+3. `ColorSyncProfileCreate` and `ColorSyncProfileVerify` must accept the profile. Otherwise it returns `InvalidProfile`.
+4. If the target entry has the same content, the change has no resources and writes nothing.
+5. Otherwise it plans a new file `nitpick-<profile hash>-<target hash>.icc` in `~/Library/ColorSync/Profiles` (current user) or `/Library/ColorSync/Profiles` (any user), and an entry for the profile ID. The planned resources are the file path (`InstalledProfile`) and the profile ID (`Association`). If the file exists, preparation fails with `StateConflict`.
+
+**Deviation:** the backend does not use an identical file in another location, as the Windows backend does. See [Technical decisions](#technical-decisions).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Checked: identity, topology, profile ID and state equal the record; root for any user
+    Checked --> Installed: create the planned file
+    Installed --> Set: ColorSyncDeviceSetCustomProfiles(file URL)
+    Set --> [*]: readback has the file at the target, with the profile hash, and no narrower entry
+```
+
+`restore_profile` rechecks the device identity, but not the topology. It uses the profile ID of the record, also if the device now has another ID. It accepts only a state in which the target holds the original entry or the planned file, and the wider entries are the same as in the original state; another state is `StateConflict`. It then sets the original entry, or `kCFNull` if there was none. It removes the planned file if no entry of a current display names it. It cannot read the current-user entries of other users. The readback must have the original associations and selection.
+
+Profile operations do not read `NSScreen`. The device name in their records is the ColorSync description.
+
+**Unverified:** all of this section on a Mac. A successful assignment shows only the ColorSync state. It does not show that the compositor uses the profile, MHC2 execution or HDR luminance.
 
 ### Linux reports
 
@@ -255,6 +299,8 @@ The crate must build on all three operating systems. Missing APIs, services, rol
 | Windows association lists | `ColorProfileGetDisplayList`; registry values; no list (role unsupported) | Registry values. The list function returned no profile while associations existed, so restoration could not detect or remove an association. Cost: undocumented storage; a changed layout gives wrong lists, which the readback detects as a mismatch. |
 | Windows `mscms.dll` binding | Static import; run-time loading | Run-time loading. A static import of the `ColorProfile*` functions stops the process from loading before Windows build 20348. |
 | Windows installed profile file | Use the caller's name; content hash; content hash and target | Content hash and target, with the `nitpick-` prefix. The name is unique per target, so two changes never share a file, and restoration cannot remove a user's file. |
+| macOS custom profile scopes | Only the resolved `ColorSyncDeviceCopyDeviceInfo` value, with one target; undocumented preference read of each scope, checked against the resolved value | Preference read with the check. The resolved value cannot show if an entry is at the target or at a wider scope, so restoration could add or remove the wrong entry. Cost: undocumented storage; a wrong read makes the state unreadable, not wrong. |
+| macOS profile file | Use an identical file in a profile folder; always install a new file | A new file with the Windows name rule, unless the target entry already has the same content. A planned resource holds one value, and the record must name both the file and the profile ID. A new file also makes the cleanup the same for each change. |
 
 ## Usage
 
@@ -268,11 +314,11 @@ Run the same trait contract against a fake backend and each native backend. To p
 
 Inject failure after installation, association and default selection. Verify recovery after each step, timeout, cancellation and process restart. Test concurrent external changes, shared pre-existing profiles and repeated restoration. A completed assignment must have matching readback. Failed restoration fails the run.
 
-Native integration tests use a selected test display and the `ordinary` [profile fixtures](output_driver/testing.md#profile-fixtures). Run assignment, readback and restoration on each supported OS. The example below selects the one device whose key contains `<key part>`, saves the recovery record before the first write, assigns, restores and prints each state. It accepts only `ordinary` fixtures. After a failed restoration it keeps the record; `restore` retries from it:
+Native integration tests use a selected test display and the `ordinary` [profile fixtures](output_driver/testing.md#profile-fixtures). Run assignment, readback and restoration on each supported OS. The example below selects the one device whose key contains `<key part>`, saves the recovery record before the first write, assigns, restores and prints each state. It accepts only `ordinary` fixtures. A macOS target needs the host part of the scope; a Windows target must not have it. After a failed restoration it keeps the record; `restore` retries from it:
 
 ```text
 cargo run -p nitpick-display --example profile_roundtrip -- state <key part>
-cargo run -p nitpick-display --example profile_roundtrip -- assign <key part> <standard|advanced> <user|system> <fixture id> <record file>
+cargo run -p nitpick-display --example profile_roundtrip -- assign <key part> <standard|advanced> <user|system>[/<this-host|any-host>] <fixture id> <record file>
 cargo run -p nitpick-display --example profile_roundtrip -- restore <record file>
 ```
 

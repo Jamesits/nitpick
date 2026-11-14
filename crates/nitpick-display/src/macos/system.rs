@@ -5,20 +5,29 @@
 //! is sent to the main dispatch queue and waits a bounded time, because a
 //! host without a main run loop never drains that queue.
 
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use dispatch2::DispatchQueue;
-use nitpick_core::device::DeviceError;
+use nitpick_core::device::{DeviceError, HostScope, UserScope};
 use objc2::MainThreadMarker;
 use objc2::rc::autoreleasepool;
 use objc2_app_kit::{NSDisplayGamut, NSScreen};
 use objc2_color_sync::{
-    ColorSyncDeviceCopyDeviceInfo, kColorSyncDeviceDefaultProfileID, kColorSyncDeviceDescription,
-    kColorSyncDisplayDeviceClass, kColorSyncFactoryProfiles,
+    ColorSyncDeviceCopyDeviceInfo, ColorSyncDeviceSetCustomProfiles, ColorSyncProfile,
+    kColorSyncCustomProfiles, kColorSyncDeviceDefaultProfileID, kColorSyncDeviceDescription,
+    kColorSyncDeviceHostScope, kColorSyncDeviceUserScope, kColorSyncDisplayDeviceClass,
+    kColorSyncFactoryProfiles, kColorSyncProfileHostScope, kColorSyncProfileUserScope,
 };
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFString, CFType, CFUUID};
+use objc2_core_foundation::{
+    CFBoolean, CFData, CFDictionary, CFError, CFNumber, CFPreferencesCopyValue,
+    CFPreferencesSynchronize, CFRetained, CFString, CFType, CFURL, CFUUID, kCFNull,
+    kCFPreferencesAnyApplication, kCFPreferencesAnyHost, kCFPreferencesAnyUser,
+    kCFPreferencesCurrentHost, kCFPreferencesCurrentUser,
+};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayCopyAllDisplayModes, CGDisplayIsBuiltin, CGDisplayMode,
     CGDisplayModelNumber, CGDisplaySerialNumber, CGDisplayVendorNumber, CGError,
@@ -26,8 +35,16 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{NSNumber, ns_string};
 
-use super::{ColorSyncDevice, DisplayReport, MacNative, ModeReport, ScreenReport};
+use super::{
+    ColorSyncDevice, DisplayReport, MacNative, MacProfileNative, MacScope, ModeReport, ScreenReport,
+};
 use crate::common::{Field, NativeFailure};
+
+/// Global-domain key of the per-device `ColorSync` settings. Undocumented.
+const DEVICES_KEY: &str = "com.apple.ColorSync.Devices";
+/// Key of the custom profile dictionary in a device entry. Undocumented;
+/// equal to the `kColorSyncCustomProfiles` value in observed dumps.
+const CUSTOM_PROFILES_KEY: &str = "CustomProfiles";
 
 /// Bound on the wait for the main thread, for a busy GUI thread. Not
 /// measured.
@@ -66,12 +83,12 @@ fn active_displays() -> Result<Vec<CGDirectDisplayID>, DeviceError> {
     Ok(ids)
 }
 
-fn uuid(display: CGDirectDisplayID) -> Field<objc2_core_foundation::CFRetained<CFUUID>> {
+fn uuid(display: CGDirectDisplayID) -> Field<CFRetained<CFUUID>> {
     // SAFETY: any display ID is valid input; an unknown ID gives NULL.
     let uuid = unsafe { CGDisplayCreateUUIDFromDisplayID(display) };
     uuid.map(|p| {
         // SAFETY: a "Create" function returns a +1 reference.
-        unsafe { objc2_core_foundation::CFRetained::from_raw(p) }
+        unsafe { CFRetained::from_raw(p) }
     })
     .ok_or(NativeFailure {
         api: "CGDisplayCreateUUIDFromDisplayID",
@@ -111,31 +128,105 @@ fn text(value: &CFType) -> Option<String> {
         .map(|n| n.to_string())
 }
 
+/// A dictionary with string keys and property-list or CF values.
+fn string_dict(value: CFRetained<CFType>) -> Option<CFRetained<CFDictionary<CFString, CFType>>> {
+    let dict = value.downcast::<CFDictionary>().ok()?;
+    // SAFETY: ColorSync device info and preference dictionaries have
+    // string keys; values are checked by downcasts.
+    Some(unsafe { CFRetained::cast_unchecked(dict) })
+}
+
+/// A file URL or a path string as a path; other URLs as their text.
+fn profile_path(value: &CFType) -> Option<String> {
+    if let Some(url) = value.downcast_ref::<CFURL>() {
+        return Some(
+            url.to_file_path()
+                .map_or_else(|| url.string().to_string(), |p| p.display().to_string()),
+        );
+    }
+    let s = value.downcast_ref::<CFString>()?.to_string();
+    match CFURL::from_string(None, &CFString::from_str(&s), None) {
+        Some(url) if s.starts_with("file:") => url.to_file_path().map(|p| p.display().to_string()),
+        _ => Some(s),
+    }
+}
+
+fn user_scope(value: &CFType) -> Option<UserScope> {
+    let s = value.downcast_ref::<CFString>()?;
+    // SAFETY: CFPreferences constants.
+    let (current, any) = unsafe { (kCFPreferencesCurrentUser, kCFPreferencesAnyUser) };
+    if s == current {
+        Some(UserScope::Current)
+    } else if s == any {
+        Some(UserScope::All)
+    } else {
+        None
+    }
+}
+
+fn host_scope(value: &CFType) -> Option<HostScope> {
+    let s = value.downcast_ref::<CFString>()?;
+    // SAFETY: CFPreferences constants.
+    let (current, any) = unsafe { (kCFPreferencesCurrentHost, kCFPreferencesAnyHost) };
+    if s == current {
+        Some(HostScope::Current)
+    } else if s == any {
+        Some(HostScope::Any)
+    } else {
+        None
+    }
+}
+
 fn colorsync(uuid: &CFUUID) -> Option<ColorSyncDevice> {
     // SAFETY: the class is a ColorSync constant and the UUID is valid.
     let info = unsafe { ColorSyncDeviceCopyDeviceInfo(kColorSyncDisplayDeviceClass, uuid) }?;
-    // SAFETY: device info has string keys and property-list values.
-    let info = unsafe { info.cast_unchecked::<CFString, CFType>() };
+    let info = string_dict(info.into())?;
     // SAFETY: ColorSync key constants.
-    let (description, factory, default_id) = unsafe {
+    let (description, factory, default_id, custom, user_key, host_key) = unsafe {
         (
             kColorSyncDeviceDescription,
             kColorSyncFactoryProfiles,
             kColorSyncDeviceDefaultProfileID,
+            kColorSyncCustomProfiles,
+            kColorSyncDeviceUserScope,
+            kColorSyncDeviceHostScope,
         )
     };
-    // The default profile ID is inside the factory profile dictionary.
-    let default_profile_id = info
-        .get(factory)
-        .and_then(|f| f.downcast::<CFDictionary>().ok())
-        .and_then(|f| {
-            // SAFETY: as above.
-            let f = unsafe { f.cast_unchecked::<CFString, CFType>() };
-            f.get(default_id).as_deref().and_then(text)
-        });
+    // The default profile ID is a key of the factory profile dictionary,
+    // next to the profile IDs.
+    let factory = info.get(factory).and_then(string_dict);
+    let default_profile_id = factory
+        .as_ref()
+        .and_then(|f| f.get(default_id).as_deref().and_then(text));
+    let mut factory_profile_ids: Vec<String> = factory
+        .map(|f| {
+            let (keys, _) = f.to_vecs();
+            keys.iter()
+                .filter(|k| ***k != *default_id)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    factory_profile_ids.sort_unstable();
+    let mut custom_profiles: Vec<(String, Option<String>)> = info
+        .get(custom)
+        .and_then(string_dict)
+        .map(|c| {
+            let (keys, values) = c.to_vecs();
+            keys.iter()
+                .zip(values)
+                .map(|(k, v)| (k.to_string(), profile_path(&v)))
+                .collect()
+        })
+        .unwrap_or_default();
+    custom_profiles.sort_unstable();
     Some(ColorSyncDevice {
         description: info.get(description).as_deref().and_then(text),
         default_profile_id,
+        factory_profile_ids,
+        custom_profiles,
+        user_scope: info.get(user_key).as_deref().and_then(user_scope),
+        host_scope: info.get(host_key).as_deref().and_then(host_scope),
     })
 }
 
@@ -210,5 +301,240 @@ impl MacNative for System {
                 MAIN_THREAD_WAIT.as_secs()
             ))
         })
+    }
+}
+
+fn cf_uuid(uuid: &str) -> Result<CFRetained<CFUUID>, DeviceError> {
+    CFUUID::from_string(None, Some(&CFString::from_str(uuid))).ok_or_else(|| {
+        DeviceError::Unsupported {
+            operation: "profile target".into(),
+            reason: format!("{uuid} is not a ColorSync device UUID"),
+        }
+    })
+}
+
+fn preference_scope(scope: MacScope) -> (&'static CFString, &'static CFString) {
+    // SAFETY: CFPreferences constants.
+    unsafe {
+        (
+            match scope.user {
+                UserScope::Current => kCFPreferencesCurrentUser,
+                UserScope::All => kCFPreferencesAnyUser,
+            },
+            match scope.host {
+                HostScope::Current => kCFPreferencesCurrentHost,
+                HostScope::Any => kCFPreferencesAnyHost,
+            },
+        )
+    }
+}
+
+fn unexpected(what: &str) -> DeviceError {
+    DeviceError::Native {
+        api: "CFPreferencesCopyValue".into(),
+        code: None,
+        message: format!("{what} has an unexpected type"),
+    }
+}
+
+fn io_error(api: &str, path: &Path, e: &std::io::Error) -> DeviceError {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            DeviceError::PermissionDenied(format!("{api} {}: {e}", path.display()))
+        }
+        std::io::ErrorKind::AlreadyExists => {
+            DeviceError::StateConflict(format!("{} exists", path.display()))
+        }
+        _ => DeviceError::Native {
+            api: api.into(),
+            code: e.raw_os_error().map(i64::from),
+            message: format!("{}: {e}", path.display()),
+        },
+    }
+}
+
+/// Takes ownership of an error out-parameter.
+fn take_error(e: *mut CFError) -> Option<String> {
+    let e = NonNull::new(e)?;
+    // SAFETY: ColorSync returns a +1 reference in an error out-parameter.
+    let e = unsafe { CFRetained::from_raw(e) };
+    Some(
+        e.description()
+            .map_or_else(|| format!("CFError {}", e.code()), |d| d.to_string()),
+    )
+}
+
+impl MacProfileNative for System {
+    fn device_info(&mut self, uuid: &str) -> Result<Option<ColorSyncDevice>, DeviceError> {
+        let id = cf_uuid(uuid)?;
+        Ok(autoreleasepool(|_| colorsync(&id)))
+    }
+
+    fn scoped_custom_profiles(
+        &mut self,
+        uuid: &str,
+        scope: MacScope,
+    ) -> Result<Vec<(String, String)>, DeviceError> {
+        let (user, host) = preference_scope(scope);
+        // SAFETY: CFPreferences constant.
+        let app = unsafe { kCFPreferencesAnyApplication };
+        // Reloads values that ColorSync wrote. The result reports only a
+        // failed write of pending changes, and this process has none.
+        let _ = CFPreferencesSynchronize(app, user, host);
+        let Some(devices) =
+            CFPreferencesCopyValue(&CFString::from_static_str(DEVICES_KEY), app, user, host)
+        else {
+            return Ok(Vec::new());
+        };
+        let devices = string_dict(devices).ok_or_else(|| unexpected(DEVICES_KEY))?;
+        // SAFETY: ColorSync constant.
+        let class = unsafe { kColorSyncDisplayDeviceClass };
+        // Unverified: the case of the UUID in the key. `CFUUIDCreateString`
+        // gives upper case, as in the reported dumps.
+        let key = CFString::from_str(&format!("Device.{class}.{uuid}"));
+        let Some(device) = devices.get(&key) else {
+            return Ok(Vec::new());
+        };
+        let device = string_dict(device).ok_or_else(|| unexpected("device entry"))?;
+        let Some(custom) = device.get(&CFString::from_static_str(CUSTOM_PROFILES_KEY)) else {
+            return Ok(Vec::new());
+        };
+        let custom = string_dict(custom).ok_or_else(|| unexpected(CUSTOM_PROFILES_KEY))?;
+        let (keys, values) = custom.to_vecs();
+        let mut out = Vec::with_capacity(keys.len());
+        for (k, v) in keys.iter().zip(values) {
+            let path = profile_path(&v).ok_or_else(|| unexpected("custom profile value"))?;
+            out.push((k.to_string(), path));
+        }
+        out.sort_unstable();
+        Ok(out)
+    }
+
+    fn set_custom_profile(
+        &mut self,
+        uuid: &str,
+        scope: MacScope,
+        profile_id: &str,
+        path: Option<&str>,
+    ) -> Result<(), DeviceError> {
+        let native = |message: String| DeviceError::Native {
+            api: "ColorSyncDeviceSetCustomProfiles".into(),
+            code: None,
+            message,
+        };
+        let id = cf_uuid(uuid)?;
+        let (user, host) = preference_scope(scope);
+        // SAFETY: ColorSync and CoreFoundation constants.
+        let (class, user_key, host_key, null) = unsafe {
+            (
+                kColorSyncDisplayDeviceClass,
+                kColorSyncProfileUserScope,
+                kColorSyncProfileHostScope,
+                kCFNull,
+            )
+        };
+        let url = match path {
+            Some(p) => Some(
+                CFURL::from_file_path(p).ok_or_else(|| native(format!("no file URL for {p}")))?,
+            ),
+            None => None,
+        };
+        let value: &CFType = match (&url, null) {
+            (Some(url), _) => url,
+            (None, Some(null)) => null,
+            (None, None) => return Err(native("kCFNull is not available".into())),
+        };
+        let id_key = CFString::from_str(profile_id);
+        let keys: [&CFString; 3] = [&id_key, user_key, host_key];
+        let values: [&CFType; 3] = [value, user, host];
+        let info = CFDictionary::<CFString, CFType>::from_slices(&keys, &values);
+        // SAFETY: the profile ID maps to a URL or kCFNull, and the scope
+        // keys map to CFPreferences constants, as `ColorSyncDevice.h`
+        // states.
+        let ok = autoreleasepool(|_| unsafe {
+            ColorSyncDeviceSetCustomProfiles(class, &id, info.as_opaque())
+        });
+        if ok {
+            Ok(())
+        } else {
+            Err(native("returned false".into()))
+        }
+    }
+
+    fn verify_profile(&mut self, bytes: &[u8]) -> Result<(), DeviceError> {
+        let data = CFData::from_bytes(bytes);
+        let mut error: *mut CFError = std::ptr::null_mut();
+        // SAFETY: the out-parameter is valid and null.
+        let Some(profile) = (unsafe { ColorSyncProfile::new(&data, &raw mut error) }) else {
+            let reason = take_error(error).unwrap_or_else(|| "no reason".into());
+            return Err(DeviceError::InvalidProfile(format!(
+                "ColorSyncProfileCreate: {reason}"
+            )));
+        };
+        let mut errors: *mut CFError = std::ptr::null_mut();
+        let mut warnings: *mut CFError = std::ptr::null_mut();
+        // SAFETY: the out-parameters are valid and null.
+        let ok = unsafe { profile.verify(&raw mut errors, &raw mut warnings) };
+        let errors = take_error(errors);
+        drop(take_error(warnings));
+        if ok {
+            Ok(())
+        } else {
+            Err(DeviceError::InvalidProfile(format!(
+                "ColorSyncProfileVerify: {}",
+                errors.unwrap_or_else(|| "no reason".into())
+            )))
+        }
+    }
+
+    fn is_root(&mut self) -> bool {
+        rustix::process::geteuid().is_root()
+    }
+
+    fn profile_dir(&mut self, user: UserScope) -> Result<String, DeviceError> {
+        let base = match user {
+            UserScope::Current => std::env::home_dir().ok_or_else(|| DeviceError::Native {
+                api: "home_dir".into(),
+                code: None,
+                message: "no home directory".into(),
+            })?,
+            UserScope::All => PathBuf::from("/"),
+        };
+        Ok(base
+            .join("Library/ColorSync/Profiles")
+            .display()
+            .to_string())
+    }
+
+    fn read_file(&mut self, path: &str) -> Result<Option<Vec<u8>>, DeviceError> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_error("read", Path::new(path), &e)),
+        }
+    }
+
+    fn create_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), DeviceError> {
+        let path = Path::new(path);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| io_error("mkdir", dir, &e))?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| io_error("open", path, &e))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| io_error("write", path, &e))
+    }
+
+    fn remove_file(&mut self, path: &str) -> Result<(), DeviceError> {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(io_error("unlink", Path::new(path), &e))
+            }
+            _ => Ok(()),
+        }
     }
 }

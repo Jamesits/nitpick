@@ -4,10 +4,11 @@
 //!
 //! ```text
 //! cargo run -p nitpick-display --example profile_roundtrip -- state <device key part>
-//! cargo run -p nitpick-display --example profile_roundtrip -- assign <device key part> <standard|advanced> <user|system> <fixture id> <record file>
+//! cargo run -p nitpick-display --example profile_roundtrip -- assign <device key part> <standard|advanced> <user|system>[/<this-host|any-host>] <fixture id> <record file>
 //! cargo run -p nitpick-display --example profile_roundtrip -- restore <record file>
 //! ```
 //!
+//! The host part of the scope is for macOS; Windows has no host scope.
 //! `assign` writes the record before the first change and restores at the
 //! end, also after a failure. It keeps the record if restoration fails;
 //! `restore` retries from it.
@@ -16,7 +17,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use nitpick_core::device::{
-    DeviceError, DeviceId, DisplayDeviceControl, IccProfile, ProfileRole, ProfileScope,
+    DeviceError, DeviceId, DisplayDeviceControl, HostScope, IccProfile, ProfileRole, ProfileScope,
     ProfileState, ProfileTarget, UserScope,
 };
 use nitpick_display::recovery;
@@ -85,10 +86,19 @@ fn assign(args: &[String]) -> Result<(), String> {
         "advanced" => ProfileRole::AdvancedColor,
         other => return Err(format!("unknown role {other}")),
     };
-    let user = match scope.as_str() {
+    let (user, host) = scope
+        .split_once('/')
+        .map_or((scope.as_str(), None), |(u, h)| (u, Some(h)));
+    let user = match user {
         "user" => UserScope::Current,
         "system" => UserScope::All,
-        other => return Err(format!("unknown scope {other}")),
+        other => return Err(format!("unknown user scope {other}")),
+    };
+    let host = match host {
+        None => None,
+        Some("this-host") => Some(HostScope::Current),
+        Some("any-host") => Some(HostScope::Any),
+        Some(other) => return Err(format!("unknown host scope {other}")),
     };
     let profile = ordinary_fixture(fixture)?;
     let record = Path::new(record);
@@ -103,7 +113,7 @@ fn assign(args: &[String]) -> Result<(), String> {
     let target = ProfileTarget {
         device: id,
         role,
-        scope: ProfileScope { user, host: None },
+        scope: ProfileScope { user, host },
     };
     let change = backend
         .prepare_icc_profile(&target, &profile)

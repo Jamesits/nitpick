@@ -8,8 +8,8 @@ use nitpick_core::device::{
 use nitpick_core::driver::Support;
 
 use super::{
-    ColorSyncDevice, DisplayReport, MODE_NATIVE_FLAG, MacDisplay, MacNative, ModeReport,
-    ScreenReport,
+    ColorSyncDevice, DisplayReport, MODE_NATIVE_FLAG, MacDisplay, MacNative, MacProfileNative,
+    MacScope, ModeReport, ScreenReport,
 };
 use crate::common::NativeFailure;
 
@@ -26,6 +26,7 @@ fn fail(api: &'static str) -> NativeFailure {
 struct State {
     displays: Option<Vec<DisplayReport>>,
     screens: Option<Result<Vec<ScreenReport>, String>>,
+    screens_read: usize,
 }
 
 #[derive(Clone, Default)]
@@ -41,7 +42,58 @@ impl MacNative for Fake {
     }
 
     fn screens(&mut self) -> Result<Vec<ScreenReport>, String> {
-        self.0.borrow().screens.clone().unwrap_or(Ok(Vec::new()))
+        let mut s = self.0.borrow_mut();
+        s.screens_read += 1;
+        s.screens.clone().unwrap_or(Ok(Vec::new()))
+    }
+}
+
+/// Query tests only; `macos/profile_tests.rs` models the profile calls.
+impl MacProfileNative for Fake {
+    fn device_info(&mut self, _: &str) -> Result<Option<ColorSyncDevice>, DeviceError> {
+        unreachable!("query tests do not read profile state")
+    }
+
+    fn scoped_custom_profiles(
+        &mut self,
+        _: &str,
+        _: MacScope,
+    ) -> Result<Vec<(String, String)>, DeviceError> {
+        unreachable!("query tests do not read profile state")
+    }
+
+    fn set_custom_profile(
+        &mut self,
+        _: &str,
+        _: MacScope,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<(), DeviceError> {
+        unreachable!("query tests do not write")
+    }
+
+    fn verify_profile(&mut self, _: &[u8]) -> Result<(), DeviceError> {
+        unreachable!("query tests do not write")
+    }
+
+    fn is_root(&mut self) -> bool {
+        false
+    }
+
+    fn profile_dir(&mut self, _: UserScope) -> Result<String, DeviceError> {
+        unreachable!("query tests do not write")
+    }
+
+    fn read_file(&mut self, _: &str) -> Result<Option<Vec<u8>>, DeviceError> {
+        unreachable!("query tests do not read profiles")
+    }
+
+    fn create_file(&mut self, _: &str, _: &[u8]) -> Result<(), DeviceError> {
+        unreachable!("query tests do not write")
+    }
+
+    fn remove_file(&mut self, _: &str) -> Result<(), DeviceError> {
+        unreachable!("query tests do not write")
     }
 }
 
@@ -84,6 +136,10 @@ fn display(n: u32) -> DisplayReport {
         colorsync: Some(ColorSyncDevice {
             description: Some("ColorSync name".into()),
             default_profile_id: Some("1".into()),
+            factory_profile_ids: vec!["1".into()],
+            custom_profiles: Vec::new(),
+            user_scope: None,
+            host_scope: None,
         }),
     }
 }
@@ -155,7 +211,11 @@ fn readable_fields() {
     );
     assert_eq!(value(&q.mode.native_size), Some((3840, 2160)));
     assert_eq!(source(&q.mode.native_size), "CGDisplayCopyAllDisplayModes");
-    assert!(reason(&q.capabilities.icc_profiles).contains("not implemented"));
+    assert_eq!(q.capabilities.icc_profiles.support(), Support::Yes);
+    assert_eq!(
+        source(&q.capabilities.icc_profiles),
+        "ColorSyncDeviceCopyDeviceInfo"
+    );
 }
 
 /// EDR headroom is a ratio to an SDR white of unknown luminance. It must
@@ -391,25 +451,56 @@ fn display_list_failure_is_an_error() {
     ));
 }
 
+/// The profile ID is the default ID, or the only factory ID. Without one,
+/// profile control is unknown and the device has no targets.
 #[test]
-fn profile_control_is_explicitly_unsupported() {
+fn profile_control_needs_one_profile_id() {
+    let mut d = display(1);
+    let q = query_one(d.clone(), vec![]);
+    assert_eq!(q.capabilities.icc_profiles.support(), Support::Yes);
+
+    let cs = d.colorsync.as_mut().unwrap();
+    cs.default_profile_id = None;
+    let q = query_one(d.clone(), vec![]);
+    assert_eq!(q.capabilities.icc_profiles.support(), Support::Yes);
+
+    d.colorsync.as_mut().unwrap().factory_profile_ids = vec!["1".into(), "2".into()];
+    let q = query_one(d.clone(), vec![]);
+    assert!(reason(&q.capabilities.icc_profiles).contains("2 factory profile IDs"));
     let fake = Fake::default();
-    fake.set(vec![display(1)], vec![]);
+    fake.set(vec![d.clone()], vec![]);
     let mut b = fake.backend();
     let id = b.devices().unwrap().remove(0).id;
     assert_eq!(b.profile_targets(&id).unwrap(), vec![]);
-    let target = ProfileTarget {
-        device: id,
-        role: ProfileRole::Standard,
-        scope: ProfileScope {
-            user: UserScope::Current,
-            host: Some(HostScope::Current),
-        },
-    };
-    assert!(matches!(
-        b.profile_state(&target),
-        Err(DeviceError::Unsupported { reason, .. }) if reason.contains("not implemented")
-    ));
+
+    d.colorsync.as_mut().unwrap().default_profile_id = Some("3".into());
+    let q = query_one(d, vec![]);
+    assert!(reason(&q.capabilities.icc_profiles).contains("not a factory profile ID"));
+}
+
+/// Profile operations do not read `NSScreen`, so they do not wait for the
+/// main thread.
+#[test]
+fn profile_targets_skip_appkit() {
+    let fake = Fake::default();
+    fake.set(vec![display(1)], vec![]);
+    fake.0.borrow_mut().screens = None;
+    let mut b = fake.backend();
+    let id = b.devices().unwrap().remove(0).id;
+    fake.0.borrow_mut().screens_read = 0;
+    let targets = b.profile_targets(&id).unwrap();
+    assert_eq!(fake.0.borrow().screens_read, 0);
+    assert_eq!(
+        targets,
+        vec![ProfileTarget {
+            device: id,
+            role: ProfileRole::Standard,
+            scope: ProfileScope {
+                user: UserScope::Current,
+                host: Some(HostScope::Current),
+            },
+        }]
+    );
 }
 
 #[test]
