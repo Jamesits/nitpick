@@ -9,17 +9,24 @@ use std::time::Duration;
 
 use drm::control::{Device as _, connector, property};
 use nitpick_core::device::DeviceError;
-use zbus::OwnedObjectPath;
 use zbus::proxy::CacheProperties;
+use zbus::{Connection, OwnedObjectPath};
 
 use super::{ColordDevice, ColordReport, ConnectorReport, KmsConnector, LinuxNative, Property};
 use crate::common::{Field, NativeFailure, unsupported};
 
+mod profile;
+
 const SYSFS_DRM: &str = "/sys/class/drm";
 const COLORD: &str = "org.freedesktop.ColorManager";
+const MANAGER_PATH: &str = "/org/freedesktop/ColorManager";
+const DEVICE_INTERFACE: &str = "org.freedesktop.ColorManager.Device";
+const PROFILE_INTERFACE: &str = "org.freedesktop.ColorManager.Profile";
 
 /// Bound on each colord call, for a service that does not answer. Not
-/// measured; equal to the macOS main-thread wait.
+/// measured; equal to the macOS main-thread wait. A polkit password
+/// prompt takes longer, so a write that needs one fails with
+/// [`DeviceError::Timeout`] and can still take effect later.
 const COLORD_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct System;
@@ -168,32 +175,51 @@ fn kms_connector(card: &Card, handle: connector::Handle) -> KmsConnector {
     }
 }
 
-async fn colord_report() -> zbus::Result<Result<ColordReport, String>> {
-    let conn = zbus::connection::Builder::system()
+async fn connect() -> zbus::Result<Connection> {
+    zbus::connection::Builder::system()
         .method_timeout(COLORD_TIMEOUT)
         .build()
-        .await?;
+        .await
+}
+
+async fn proxy<'a>(
+    conn: &Connection,
+    path: &'a str,
+    interface: &'a str,
+) -> zbus::Result<zbus::Proxy<'a>> {
+    zbus::proxy::Builder::<zbus::Proxy<'_>>::new(conn)
+        .destination(COLORD)
+        .path(path)
+        .interface(interface)
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await
+}
+
+async fn manager(conn: &Connection) -> zbus::Result<zbus::Proxy<'static>> {
+    proxy(conn, MANAGER_PATH, COLORD).await
+}
+
+async fn colord_report() -> zbus::Result<Result<ColordReport, String>> {
+    let conn = connect().await?;
     // Calling colord when it is not running would start it.
     let bus = zbus::fdo::DBusProxy::new(&conn).await?;
     if !bus.name_has_owner(COLORD.try_into()?).await? {
         return Ok(Err("colord is not running".into()));
     }
-    let manager = zbus::Proxy::new(&conn, COLORD, "/org/freedesktop/ColorManager", COLORD).await?;
+    let manager = manager(&conn).await?;
     let paths: Vec<OwnedObjectPath> = manager.call("GetDevicesByKind", &("display",)).await?;
     let mut devices = Vec::with_capacity(paths.len());
     for path in paths {
-        let device = zbus::proxy::Builder::<zbus::Proxy<'_>>::new(&conn)
-            .destination(COLORD)
-            .path(path)
-            .interface("org.freedesktop.ColorManager.Device")
-            .cache_properties(CacheProperties::No)
-            .build()
-            .await?;
+        let device = proxy(&conn, path.as_str(), DEVICE_INTERFACE).await?;
         let metadata: HashMap<String, String> = device.get_property("Metadata").await?;
+        let profiles: Vec<OwnedObjectPath> = device.get_property("Profiles").await?;
         devices.push(ColordDevice {
+            path: device.path().to_string(),
             id: device.get_property("DeviceId").await?,
             owner: device.get_property("Owner").await?,
             metadata: metadata.into_iter().collect::<BTreeMap<_, _>>(),
+            profiles: profiles.iter().map(ToString::to_string).collect(),
         });
     }
     Ok(Ok(ColordReport {

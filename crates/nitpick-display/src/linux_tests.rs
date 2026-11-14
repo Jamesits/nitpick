@@ -2,15 +2,13 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use nitpick_core::device::{
-    DeviceError, DeviceId, DeviceQuery, DisplayDeviceControl, ProfileRole, ProfileScope,
-    ProfileTarget, Report, UserScope,
-};
+use nitpick_core::device::{DeviceError, DeviceId, DeviceQuery, DisplayDeviceControl, Report};
 use nitpick_core::driver::{Gamut, Support};
 
 use super::{
-    COLORD_EDID_MD5, ColordDevice, ColordReport, ConnectorReport, KmsConnector, LinuxDisplay,
-    LinuxNative, LinuxScreen, Property, ScreenSource, screen_device,
+    COLORD_EDID_MD5, ColordDevice, ColordProfile, ColordReport, ConnectorReport, KmsConnector,
+    LinuxDisplay, LinuxNative, LinuxProfileNative, LinuxScreen, Property, Relation, ScreenSource,
+    screen_device,
 };
 use crate::common::{Field, NativeFailure};
 use crate::edid::md5_hex;
@@ -60,6 +58,54 @@ impl LinuxNative for Fake {
     }
 }
 
+/// Profile calls are tested in `profile_tests`. Here the colord devices
+/// have no profiles, and no write is expected.
+impl LinuxProfileNative for Fake {
+    fn device_profiles(&mut self, _: &str) -> Result<Vec<(ColordProfile, Relation)>, DeviceError> {
+        Ok(Vec::new())
+    }
+
+    fn find_profile(&mut self, _: &str) -> Result<Option<ColordProfile>, DeviceError> {
+        Ok(None)
+    }
+
+    fn create_profile(&mut self, _: &str, _: &str) -> Result<String, DeviceError> {
+        unreachable!("no profile writes in display query tests")
+    }
+
+    fn add_profile(&mut self, _: &str, _: &str) -> Result<(), DeviceError> {
+        unreachable!("no profile writes in display query tests")
+    }
+
+    fn make_profile_default(&mut self, _: &str, _: &str) -> Result<(), DeviceError> {
+        unreachable!("no profile writes in display query tests")
+    }
+
+    fn remove_profile(&mut self, _: &str, _: &str) -> Result<(), DeviceError> {
+        unreachable!("no profile writes in display query tests")
+    }
+
+    fn delete_profile(&mut self, _: &str) -> Result<(), DeviceError> {
+        unreachable!("no profile writes in display query tests")
+    }
+
+    fn profile_dir(&mut self) -> Result<String, DeviceError> {
+        Ok("/home/test/.local/share/nitpick/icc".into())
+    }
+
+    fn read_file(&mut self, _: &str) -> Result<Option<Vec<u8>>, DeviceError> {
+        Ok(None)
+    }
+
+    fn create_file(&mut self, _: &str, _: &[u8]) -> Result<(), DeviceError> {
+        unreachable!("no profile writes in display query tests")
+    }
+
+    fn remove_file(&mut self, _: &str) -> Result<(), DeviceError> {
+        unreachable!("no profile writes in display query tests")
+    }
+}
+
 impl Fake {
     /// Connectors, KMS state of `card1` and colord devices for every EDID.
     fn set(&self, connectors: Vec<ConnectorReport>, kms: Vec<KmsConnector>) {
@@ -81,9 +127,11 @@ impl Fake {
 
 fn colord_device(edid: &[u8], owner: u32) -> ColordDevice {
     ColordDevice {
+        path: format!("/org/freedesktop/ColorManager/devices/xrandr_{owner}"),
         id: format!("xrandr-{}", md5_hex(edid)),
         owner,
         metadata: BTreeMap::from([(COLORD_EDID_MD5.to_owned(), md5_hex(edid))]),
+        profiles: Vec::new(),
     }
 }
 
@@ -197,9 +245,8 @@ fn readable_fields() {
     assert_eq!(source(&m.peak_nits), "EDID HDR static metadata");
     assert_eq!(value(&m.native_size), Some((3840, 2160)));
     assert_eq!(source(&m.native_size), "KMS CRTC mode");
-    let icc = reason(&c.icc_profiles);
-    assert!(icc.contains("not implemented"));
-    assert!(icc.contains(&format!("colord device xrandr-{}", md5_hex(&edid))));
+    assert_eq!(c.icc_profiles.support(), Support::Yes);
+    assert_eq!(source(&c.icc_profiles), "colord GetDevicesByKind");
 }
 
 /// Fields without a Linux report stay unknown; no display value is
@@ -227,20 +274,21 @@ fn only_connected_connectors_are_devices() {
     assert!(devices[0].id.key.contains("/DP-1/"));
 }
 
-/// Listing reads sysfs only. A query opens only the device's card and
-/// reads colord once.
+/// Listing reads sysfs only. Profile targets also read colord, but open no
+/// card. A query opens only the device's card and reads colord once.
 #[test]
 fn listing_opens_no_device_node() {
     let fake = Fake::default();
     fake.set(vec![connector(1, sdr_edid())], vec![kms(1)]);
     let mut b = fake.backend();
     let id = b.devices().unwrap().remove(0).id;
+    assert_eq!(fake.0.borrow().colord_calls, 0);
     b.profile_targets(&id).unwrap();
     assert_eq!(fake.0.borrow().kms_calls, Vec::<String>::new());
-    assert_eq!(fake.0.borrow().colord_calls, 0);
+    assert_eq!(fake.0.borrow().colord_calls, 1);
     b.query_device(&id).unwrap();
     assert_eq!(fake.0.borrow().kms_calls, ["card1"]);
-    assert_eq!(fake.0.borrow().colord_calls, 1);
+    assert_eq!(fake.0.borrow().colord_calls, 2);
 }
 
 #[test]
@@ -522,7 +570,7 @@ fn colord_device_matching() {
     assert!(reason(&foreign).contains("has owner 1001"));
 
     let mixed = icc(vec![colord_device(&edid, 1001), colord_device(&edid, UID)]);
-    assert!(reason(&mixed).contains("not implemented"));
+    assert_eq!(mixed.support(), Support::Yes);
 }
 
 /// Without the profile service, the other fields remain.
@@ -545,27 +593,6 @@ fn enumeration_failure_is_an_error() {
     let mut b = Fake::default().backend();
     let err = b.devices().unwrap_err();
     assert!(matches!(err, DeviceError::Native { api, .. } if api == "read_dir /sys/class/drm"));
-}
-
-#[test]
-fn profile_operations_are_unsupported() {
-    let fake = Fake::default();
-    fake.set(vec![connector(1, sdr_edid())], vec![kms(1)]);
-    let mut b = fake.backend();
-    let id = b.devices().unwrap().remove(0).id;
-    assert_eq!(b.profile_targets(&id).unwrap(), Vec::new());
-    let target = ProfileTarget {
-        device: id,
-        role: ProfileRole::Standard,
-        scope: ProfileScope {
-            user: UserScope::Current,
-            host: None,
-        },
-    };
-    assert!(matches!(
-        b.profile_state(&target),
-        Err(DeviceError::Unsupported { reason, .. }) if reason.contains("not implemented")
-    ));
 }
 
 fn named(card: &str, bus: &str, name: &str, edid: Vec<u8>) -> ConnectorReport {

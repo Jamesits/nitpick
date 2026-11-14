@@ -9,6 +9,7 @@
 //! ```
 //!
 //! The host part of the scope is for macOS; Windows has no host scope.
+//! Linux has only the target `standard user`.
 //! `assign` writes the record before the first change and restores at the
 //! end, also after a failure. It keeps the record if restoration fails;
 //! `restore` retries from it.

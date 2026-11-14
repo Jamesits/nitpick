@@ -216,14 +216,32 @@ Open questions:
 - Must the backend use an identical profile file in a profile folder? The design says "Use an existing identical profile when possible". The macOS backend always installs a new file, because a planned resource holds one value and the record must name the file and the profile ID. A core change, for example a profile ID in the resource or the target, would allow reuse.
 - Does ColorSync resolve each device entry separately, or the whole `com.apple.ColorSync.Devices` value of a scope, as `CFPreferences` resolves a key? In the second case, an entry of another device at a narrower scope hides the wider entries of this device. The check against the resolved value then makes the state unreadable, and the device has no usable target.
 
-### 46. Implement Linux ICC profile assignment
+### 46. Qualify the Linux ICC profile assignment
 
 Requires: 7.
 
+The backend and its injected-call tests are in `nitpick_display::linux`; see [Linux profile assignment](../design/display_device.md#linux-profile-assignment). The tests cover a missing service, authorization failure, ambiguous mapping, shared profiles and partial failure. The native model comes from the colord 1.4.9 source. Clippy passed for `x86_64-unknown-linux-gnu` on Windows, and the injected-call tests passed on Windows. Nothing has run on Linux.
+
 TODO:
 
-- Implement profile registration, device association, default selection and restoration through colord. Use the verified output-to-device mapping and preserve the original association state.
-- Test a missing service, authorization failure, ambiguous mapping, shared profiles and partial failure. Verify readback and restoration on the selected desktop. Report compositor use of the profile separately; unavailable profile control must not break device enumeration.
+- On the selected desktop (the Ubuntu 26.04 system of the Linux reports check, with colord 1.4.8), run `cargo nextest run -p nitpick-display`. Then run `profile_roundtrip` with the `ordinary` fixtures and the target `standard user`. Check assignment, readback and restoration. Compare the output of `colormgr get-devices-by-kind display` and `colormgr get-profiles` before the assignment and after the restoration.
+- Check the native model on colord 1.4.8: the list order after `AddProfile` and `MakeProfileDefault`, the row with timestamp 0 after `RemoveProfile` (as root: `sqlite3 /var/lib/colord/mapping.db 'select * from mappings_v2'`), and that `DeleteProfile` removes the profile from the device. If it is different, correct the backend and the design.
+- Run an assignment from an SSH session. Record whether colord returns `FailedToAuthenticate` (`PermissionDenied`), or polkit prompts and the call fails with `Timeout`.
+- Stop colord. Check that the device list and the query work, that the device has no targets, and that no call starts colord.
+- Restart colord after an assignment. Check that restoration removes the file and gives the original state.
+- Report separately whether the compositor applies the assigned profile: GNOME, and KWin if available. For example, assign a profile with a visible tone change and capture or measure a pattern.
+
+### 60. Decide the open colord assignment questions
+
+Requires: 46.
+
+Open questions:
+
+- Must restoration remove the mapping database row of the change? colord has no call for it. The row has timestamp 0 and colord ignores it, but it remains in `/var/lib/colord/mapping.db`.
+- Must the backend handle the colord defect in which a failed `CreateProfileWithFd` leaves a profile without a D-Bus object (see [Linux profile assignment](../design/display_device.md#linux-profile-assignment))? Restoration then fails until colord restarts. To treat an object that does not answer as absent would also hide other failures.
+- Must the target scope be all users? colord stores the relation by device ID, so the session of another user with the same device ID can get it.
+- Must the backend read the colord device property `Enabled`? A disabled device keeps its profile list. Whether a compositor then applies the default profile is unknown.
+- Must colord writes have a longer timeout than the 2 s read timeout? A polkit password prompt takes longer, so the write fails with `Timeout` and can take effect later.
 
 ### 47. Add display-state restoration and crash recovery
 

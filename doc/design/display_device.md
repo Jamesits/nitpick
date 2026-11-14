@@ -4,7 +4,7 @@
 
 `DisplayDeviceControl` in `nitpick-core::device` enumerates local display devices, reads their capabilities and current state, and controls their OS settings. The first write operation is ICC profile assignment, including the state needed to restore the previous assignment. `nitpick-display` implements this trait for Windows, macOS and Linux. Both the Qt host and the command-line host can use it.
 
-**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows, macOS and Linux device and capability queries and the recovery-record format. Windows has ICC assignment, readback and restoration; see [Windows profile assignment](#windows-profile-assignment). macOS has the same operations; see [macOS profile assignment](#macos-profile-assignment). They have not run on a Mac. On Linux, ICC assignment returns `Unsupported`. The remaining work is in [the output driver plan](../plan/output_driver.md).
+**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows, macOS and Linux device and capability queries and the recovery-record format. Windows has ICC assignment, readback and restoration; see [Windows profile assignment](#windows-profile-assignment). macOS has the same operations; see [macOS profile assignment](#macos-profile-assignment). They have not run on a Mac. Linux has the same operations through colord; see [Linux profile assignment](#linux-profile-assignment). They have not run on Linux. The remaining work is in [the output driver plan](../plan/output_driver.md).
 
 The host coordinates three separate interfaces:
 
@@ -242,7 +242,7 @@ Profile operations do not read `NSScreen`. The device name in their records is t
 
 ### Linux reports
 
-The backend reads the kernel display state, not a compositor report. The devices are the connectors in `/sys/class/drm` with the status `connected`. A device list reads only sysfs. A query also opens the card node `/dev/dri/cardN` of that device to read its KMS connector properties, and reads the display devices of colord. The KMS reads need seat access to the card node. Without access, the KMS fields are unknown with the reason, and the EDID fields remain.
+The backend reads the kernel display state, not a compositor report. The devices are the connectors in `/sys/class/drm` with the status `connected`. A device list reads only sysfs. Profile operations also read colord, but open no card node. A query also opens the card node `/dev/dri/cardN` of that device to read its KMS connector properties, and reads the display devices of colord. The KMS reads need seat access to the card node. Without access, the KMS fields are unknown with the reason, and the EDID fields remain.
 
 The device key is the bus ID of the card device, the kernel connector name and the EDID identity, for example `0000:01:00.0/DP-6/DEL40E7-<serial>`. The EDID identity is the PNP ID, the product code, and the serial number descriptor or else the numeric serial number. Another unit on the same connector, or the same unit on another connector, gets a new key. Without a readable bus ID, the key holds the card number, which can change after a restart. The identity evidence is the connector name, the EDID IDs, both serial number forms and the EDID MD5.
 
@@ -267,11 +267,66 @@ The Qt host maps a `QScreen` to a device as follows:
 | Luminance | Desired content max, max frame-average and min luminance of the EDID HDR Static Metadata Data Block | Peak, full frame and minimum. Code 0 of a maximum is unknown. A minimum is known only with a known peak. |
 | `sdr_white_nits` | none | Unknown. Compositor settings are not read. |
 | `native_size` | Mode of the CRTC of the connector | No CRTC is unknown. |
-| `icc_profiles` | colord `GetDevicesByKind` | No if colord runs and no device matches. Otherwise unknown until assignment exists; the reason names the matched device. The query does not start colord. |
+| `icc_profiles` | colord `GetDevicesByKind` | Yes if one colord device matches. No if colord runs and no device matches. Otherwise unknown with the reason. The query does not start colord. |
 
 The first process that opens a card without a DRM master becomes its master. The backend drops the master immediately, so a compositor that starts during the query can take the card.
 
 **Unverified:** that code 0 of a maximum luminance means "not given", that every driver signals no colorimetry for `Default`, that the wire size is the CRTC mode on an internal panel with a GPU scaler, and that colour daemons other than the GNOME daemon set `OutputEdidMd5`. A check on Ubuntu 26.04 (kernel 7.0, GNOME 50.1 on Wayland, NVIDIA driver 595.99.02, colord 1.4.8) with an SDR monitor on DisplayPort and an HDR10 recorder on HDMI read every field above. With HDR on in GNOME, the HDMI output reported `hdr_on`, BT.2020 and 3840 × 2160; its EDID has no luminance codes. Each output matched one colord device. With Qt 6.12, both Wayland screens gave the GNOME names `DP-6` and `HDMI-2`, the PNP ID and the product name, and no serial number. Through Xwayland they gave the same names and no EDID. The KWin and wlroots names are from their source code; Qt and Xwayland with these compositors were not checked. X servers other than Xwayland, and other drivers, were not checked.
+
+### Linux profile assignment
+
+`nitpick_display::linux` uses the colord D-Bus interface `org.freedesktop.ColorManager`. The colord device of an output is the device that [Linux reports](#linux-reports) match. A device without exactly one match has no targets. A missing colord service, a missing match or an ambiguous match does not stop the device list or the query. Each device has one target: the `Standard` role in the current-user scope without a host part. colord has no Advanced Color role and no scope setting.
+
+Native model. It comes from the colord 1.4.9 source (`cd-device.c`, `cd-main.c`, `cd-mapping-db.c`, `cd-profile-array.c`) and is not in the colord reference:
+- A device has an ordered profile list. Hard relations come first, then soft relations. In each relation, the newest entry comes first. The first entry is the default profile.
+- `AddProfile` with the relation `hard` and `MakeProfileDefault` give the entry the current time. They do not change other entries. colord stores a hard relation in its mapping database, by device ID and profile ID.
+- `RemoveProfile` sets the timestamp of the database row to 0. It does not remove the row, so colord never adds that profile to the device again from metadata.
+- A new profile object gets each device that has a database row with a nonzero timestamp for its ID.
+- colord accepts only the profile scopes `temp` and `normal`. A `normal` profile remains until `DeleteProfile` or a colord restart. `DeleteProfile` also removes the profile from every device.
+- `FindProfileById` and the duplicate check of `CreateProfileWithFd` prefer a profile of the calling user, and otherwise find a profile of any owner.
+- polkit authorizes each write. The colord policy allows the writes in an active local session and requires an administrator otherwise.
+
+| `ProfileState` field | Source | Rule |
+|---|---|---|
+| `associations` | `Profiles` of the colord device; `ProfileId` and `Filename` of each profile | In colord order. The native ID is the colord profile ID. |
+| `selection` | The first entry | `Override`; `NoOverride` for an empty list. colord has no selection separate from the list. |
+| `applied_scope` | none | Always `None`. |
+| Profile hash | The `Filename` file | Unknown without a file, or if the file cannot be read. |
+| `revision` | The list, with the relation (`GetProfileRelation`), object path and owner of each entry | A change of a relation also changes it. |
+
+`prepare_icc_profile` reads the state without a change. If the default profile has the same content, the change has no resources and writes nothing. Otherwise it plans these resources:
+- `InstalledProfile`: the file `$XDG_DATA_HOME/nitpick/icc/nitpick-<profile hash>-<target hash>.icc`.
+- `RegisteredProfile`: the colord profile ID `nitpick-<profile hash>-<target hash>`.
+- `Association`: the colord device ID.
+
+If the file exists, or colord has a profile with the ID, preparation fails with `StateConflict`.
+
+**Deviation:** the backend does not use an identical profile that colord has already. See [Technical decisions](#technical-decisions).
+
+The file is not in `$XDG_DATA_HOME/icc`, because session daemons register each file there as one more profile object. colord reads the profile through a file descriptor: it cannot read home directories. A compositor reads the `Filename` path.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Checked: identity, topology, colord device ID and state equal the record
+    Checked --> Installed: create the planned file
+    Installed --> Registered: CreateProfileWithFd(scope normal, Filename)
+    Registered --> Associated: AddProfile(hard), if colord did not add it from its database
+    Associated --> Default: MakeProfileDefault
+    Default --> [*]: readback has the planned profile first, with the profile hash
+```
+
+`restore_profile` rechecks the device identity and the colord device ID, but not the topology. It accepts only the original list with the planned profile at one position or absent; another list is `StateConflict`. It then removes the planned profile from the device. It deletes the colord profile if the calling user owns it and no other visible device lists it. It removes the file, unless the profile remains. The readback must have the original associations and selection.
+
+**Deviation:** restoration leaves one database row with timestamp 0 for each profile and target. colord has no call that removes a row. A repeated change of the same profile and target uses the same ID, so the rows do not accumulate. After a colord restart, the registered profile is gone, but its row can keep a nonzero timestamp. A later change with the same ID then gets the association from colord and does not add it.
+
+**colord defect** (source): `CreateProfileWithFd` adds the profile to its list before it reads the file. If the read fails, the profile stays in the list without a D-Bus object until colord restarts. `FindProfileById` then gives an object path that does not answer, and restoration fails until a colord restart.
+
+**Unverified:** all of this section on Linux, and the native model on colord versions other than 1.4.9. Also unverified:
+- Which compositors apply the colord default profile, and whether they read `Filename`. KWin has its own output ICC setting.
+- Whether a colord restart reorders soft relations. They get the time of the automatic addition. Restoration reports a reorder as `StateConflict`.
+- What the session of another user gets. colord stores the relation by device ID, so a device of another user with the same ID gets it, if that session can see the profile.
+
+A successful assignment shows only the colord state.
 
 **Unverified:** these implementations and their restoration behaviour on the selected OS versions. Search existing Rust bindings before adding native declarations. Pin the chosen dependencies. Use only the bindings needed on the target OS.
 
@@ -301,6 +356,9 @@ The crate must build on all three operating systems. Missing APIs, services, rol
 | Windows installed profile file | Use the caller's name; content hash; content hash and target | Content hash and target, with the `nitpick-` prefix. The name is unique per target, so two changes never share a file, and restoration cannot remove a user's file. |
 | macOS custom profile scopes | Only the resolved `ColorSyncDeviceCopyDeviceInfo` value, with one target; undocumented preference read of each scope, checked against the resolved value | Preference read with the check. The resolved value cannot show if an entry is at the target or at a wider scope, so restoration could add or remove the wrong entry. Cost: undocumented storage; a wrong read makes the state unreadable, not wrong. |
 | macOS profile file | Use an identical file in a profile folder; always install a new file | A new file with the Windows name rule, unless the target entry already has the same content. A planned resource holds one value, and the record must name both the file and the profile ID. A new file also makes the cleanup the same for each change. |
+| Linux profile registration | Copy the file into `$XDG_DATA_HOME/icc` and wait for a session daemon to register it, as `colormgr import-profile` does; `CreateProfileWithFd` with a file in another directory | `CreateProfileWithFd`. The result does not depend on a session daemon or a wait. A file in the monitored directory gives a second profile object. |
+| colord profile scope | `temp`; `normal`; `disk` | `normal`. colord removes a `temp` profile when the D-Bus connection of the call closes, and each native call opens its own connection. colord rejects `disk` for profiles. Cost: a colord restart removes the profile; restoration then removes only the file. |
+| Linux identical profile | Use an identical colord profile; always register a new profile | A new profile, unless the default profile already has the same content. A hard addition of a profile of the user changes a soft relation to hard, and its removal leaves a database row with timestamp 0 for that profile. |
 
 ## Usage
 
@@ -314,7 +372,7 @@ Run the same trait contract against a fake backend and each native backend. To p
 
 Inject failure after installation, association and default selection. Verify recovery after each step, timeout, cancellation and process restart. Test concurrent external changes, shared pre-existing profiles and repeated restoration. A completed assignment must have matching readback. Failed restoration fails the run.
 
-Native integration tests use a selected test display and the `ordinary` [profile fixtures](output_driver/testing.md#profile-fixtures). Run assignment, readback and restoration on each supported OS. The example below selects the one device whose key contains `<key part>`, saves the recovery record before the first write, assigns, restores and prints each state. It accepts only `ordinary` fixtures. A macOS target needs the host part of the scope; a Windows target must not have it. After a failed restoration it keeps the record; `restore` retries from it:
+Native integration tests use a selected test display and the `ordinary` [profile fixtures](output_driver/testing.md#profile-fixtures). Run assignment, readback and restoration on each supported OS. The example below selects the one device whose key contains `<key part>`, saves the recovery record before the first write, assigns, restores and prints each state. It accepts only `ordinary` fixtures. A macOS target needs the host part of the scope; a Windows target must not have it. The Linux target is `standard user`. After a failed restoration it keeps the record; `restore` retries from it:
 
 ```text
 cargo run -p nitpick-display --example profile_roundtrip -- state <key part>

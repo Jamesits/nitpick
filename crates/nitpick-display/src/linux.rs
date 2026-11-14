@@ -1,6 +1,7 @@
 //! Linux backend. The DRM connectors in sysfs give the devices and their
 //! EDID; KMS connector properties give the signalled HDR state and
-//! colorimetry; colord gives the profile-service device.
+//! colorimetry; colord gives the profile-service device and the ICC
+//! profile assignment; see `profile`.
 //!
 //! The backend reads the kernel state, not a Wayland or X11 client
 //! report, so it works with any compositor and without a window system.
@@ -19,10 +20,13 @@ use nitpick_core::driver::Gamut;
 use crate::common::{Field, NativeFailure, resolve, topology_revision, unsupported};
 use crate::edid::{self, Edid, HdrBlock, HdrStaticMetadata};
 
+mod profile;
 #[cfg(target_os = "linux")]
 mod system;
 #[cfg(all(target_os = "linux", feature = "x11"))]
 pub mod x11;
+
+pub use profile::{ColordProfile, INSTALLED_PREFIX, LinuxProfileNative, Relation};
 
 pub const BACKEND: &str = "linux";
 
@@ -34,7 +38,6 @@ const COLORSPACE: &str = "KMS Colorspace";
 const CRTC_MODE: &str = "KMS CRTC mode";
 const COLORD: &str = "colord GetDevicesByKind";
 
-const NO_PROFILE_CONTROL: &str = "Linux ICC profile assignment is not implemented";
 const NO_SDR_WCG: &str = "Linux has no report of an SDR wide-colour mode";
 const NO_WIRE_DEPTH: &str = "KMS does not report the link depth; max bpc is only a limit";
 const NO_SDR_WHITE: &str = "KMS has no SDR white level; compositor settings are not read";
@@ -89,12 +92,16 @@ pub struct KmsConnector {
 /// One colord display device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColordDevice {
+    /// D-Bus object path.
+    pub path: String,
     /// `DeviceId`, for example `xrandr-Dell Inc.-DELL U2417H-<serial>`.
     pub id: String,
     /// Owner UID. The session's colour daemon registers devices per user.
     pub owner: u32,
     /// `Metadata`.
     pub metadata: BTreeMap<String, String>,
+    /// `Profiles`: object paths, the default first.
+    pub profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,7 +268,13 @@ impl<N: LinuxNative> LinuxDisplay<N> {
     /// # Errors
     /// As [`screen_device`]; an unreadable `/sys/class/drm`.
     pub fn device_for_screen(&mut self, screen: &LinuxScreen) -> Result<DeviceId, DeviceError> {
-        screen_device(screen, &self.devices()?)
+        let devices: Vec<DeviceInfo> = self
+            .snapshot()?
+            .entries
+            .into_iter()
+            .map(|e| e.info)
+            .collect();
+        screen_device(screen, &devices)
     }
 
     /// Sysfs only: listing devices opens no device node and calls no
@@ -489,19 +502,29 @@ fn native_size(kms: Result<&KmsConnector, &str>) -> Report<(usize, usize)> {
     }
 }
 
+/// Why an output has no colord device.
+enum NoMatch {
+    /// No colord display device has the EDID MD5.
+    Absent,
+    Unknown(String),
+    Ambiguous(String),
+}
+
 /// colord matches a display device to an output by the EDID MD5 in its
 /// metadata. Devices of other users are not this process's devices.
-fn icc_profiles(e: &Entry, all: &[Entry], colord: &Result<ColordReport, String>) -> Report<bool> {
-    let colord = match colord {
-        Ok(c) => c,
-        Err(reason) => return unknown(format!("colord: {reason}")),
-    };
+fn colord_match<'a>(
+    e: &Entry,
+    all: &[Entry],
+    colord: &'a ColordReport,
+) -> Result<&'a ColordDevice, NoMatch> {
     let Some(md5) = &e.md5 else {
-        return unknown("no EDID to match a colord device");
+        return Err(NoMatch::Unknown("no EDID to match a colord device".into()));
     };
     let outputs = all.iter().filter(|o| o.md5.as_ref() == Some(md5)).count();
     if outputs > 1 {
-        return unknown(format!("{outputs} outputs have the same EDID"));
+        return Err(NoMatch::Ambiguous(format!(
+            "{outputs} outputs have the same EDID"
+        )));
     }
     let (own, other): (Vec<&ColordDevice>, Vec<&ColordDevice>) = colord
         .devices
@@ -509,14 +532,32 @@ fn icc_profiles(e: &Entry, all: &[Entry], colord: &Result<ColordReport, String>)
         .filter(|d| d.metadata.get(COLORD_EDID_MD5) == Some(md5))
         .partition(|d| d.owner == colord.uid);
     match (own.as_slice(), other.as_slice()) {
-        ([d], _) => unknown(format!("{NO_PROFILE_CONTROL}; colord device {}", d.id)),
-        ([], []) => known(false, COLORD),
-        ([], [d, ..]) => unknown(format!("colord device {} has owner {}", d.id, d.owner)),
-        (many, _) => unknown(format!("{} colord devices match the EDID", many.len())),
+        ([d], _) => Ok(d),
+        ([], []) => Err(NoMatch::Absent),
+        ([], [d, ..]) => Err(NoMatch::Unknown(format!(
+            "colord device {} has owner {}",
+            d.id, d.owner
+        ))),
+        (many, _) => Err(NoMatch::Ambiguous(format!(
+            "{} colord devices match the EDID",
+            many.len()
+        ))),
     }
 }
 
-impl<N: LinuxNative> DisplayDeviceControl for LinuxDisplay<N> {
+fn icc_profiles(e: &Entry, all: &[Entry], colord: &Result<ColordReport, String>) -> Report<bool> {
+    let colord = match colord {
+        Ok(c) => c,
+        Err(reason) => return unknown(format!("colord: {reason}")),
+    };
+    match colord_match(e, all, colord) {
+        Ok(_) => known(true, COLORD),
+        Err(NoMatch::Absent) => known(false, COLORD),
+        Err(NoMatch::Unknown(reason) | NoMatch::Ambiguous(reason)) => unknown(reason),
+    }
+}
+
+impl<N: LinuxNative + LinuxProfileNative> DisplayDeviceControl for LinuxDisplay<N> {
     fn devices(&mut self) -> Result<Vec<DeviceInfo>, DeviceError> {
         Ok(self
             .snapshot()?
@@ -566,29 +607,33 @@ impl<N: LinuxNative> DisplayDeviceControl for LinuxDisplay<N> {
     }
 
     fn profile_targets(&mut self, device: &DeviceId) -> Result<Vec<ProfileTarget>, DeviceError> {
-        let snapshot = self.snapshot()?;
-        resolve(&snapshot.entries, device, |e| &e.info)?;
-        Ok(Vec::new())
+        self.targets_of(device)
     }
 
-    fn profile_state(&mut self, _: &ProfileTarget) -> Result<ProfileState, DeviceError> {
-        Err(unsupported("profile state", NO_PROFILE_CONTROL))
+    fn profile_state(&mut self, target: &ProfileTarget) -> Result<ProfileState, DeviceError> {
+        self.profile_state_of(target)
     }
 
     fn prepare_icc_profile(
         &mut self,
-        _: &ProfileTarget,
-        _: &IccProfile,
+        target: &ProfileTarget,
+        profile: &IccProfile,
     ) -> Result<PreparedProfileChange, DeviceError> {
-        Err(unsupported("profile preparation", NO_PROFILE_CONTROL))
+        self.prepare_of(target, profile)
     }
 
-    fn set_icc_profile(&mut self, _: &PreparedProfileChange) -> Result<ProfileState, DeviceError> {
-        Err(unsupported("profile assignment", NO_PROFILE_CONTROL))
+    fn set_icc_profile(
+        &mut self,
+        change: &PreparedProfileChange,
+    ) -> Result<ProfileState, DeviceError> {
+        self.set_of(change)
     }
 
-    fn restore_profile(&mut self, _: &PreparedProfileChange) -> Result<ProfileState, DeviceError> {
-        Err(unsupported("profile restoration", NO_PROFILE_CONTROL))
+    fn restore_profile(
+        &mut self,
+        change: &PreparedProfileChange,
+    ) -> Result<ProfileState, DeviceError> {
+        self.restore_of(change)
     }
 }
 
