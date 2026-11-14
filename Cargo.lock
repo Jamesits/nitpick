@@ -2155,6 +2155,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lcms2-sys"
+version = "4.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "264db0b78119c5a37d78bb41fb355daab29b3b29430b53cd92e3da51f0ab06cc"
+dependencies = [
+ "cc",
+ "dunce",
+ "libc",
+]
+
+[[package]]
 name = "libappindicator"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2486,6 +2497,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "nitpick-profile"
+version = "0.1.0"
+dependencies = [
+ "lcms2-sys",
+ "nitpick-fixtures",
 ]
 
 [[package]]

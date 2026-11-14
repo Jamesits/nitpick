@@ -1,0 +1,21 @@
+[package]
+name = "nitpick-profile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Little CMS profile adapter: ICC display tags and MHC2 extraction as owned values"
+publish = false
+
+[dependencies]
+# Without the default `dynamic` feature, pkg-config cannot select a system
+# library: the build always compiles the Little CMS sources bundled in this
+# crate version, so the lockfile pins the engine too. `LCMS2_LIB_DIR` still
+# overrides it; `engine_version` reports the linked engine.
+lcms2-sys = { version = "4.0.7", default-features = false, features = ["static"] }
+
+[dev-dependencies]
+nitpick-fixtures = { path = "../nitpick-fixtures" }
+
+[lints]
+workspace = true

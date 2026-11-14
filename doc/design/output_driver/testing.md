@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The test-host protocol, capture adapters and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` passes the profile fixtures on Windows only. The test-host protocol, capture adapters, conventional ICC transforms and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -64,7 +64,7 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 | QRhi check | upload-texture dump; draw readback | Read back after the draw. An upload dump misses shader and render-target errors. |
 | Capture interface | Windows-only scripts; common result with OS adapters | Common result. Each adapter must report its format and colour contract. |
 | Error limit | exact bytes everywhere; perceptual error everywhere | Exact transport checks plus numeric and perceptual checks at later boundaries. |
-| Profile handling | custom ICC/MHC2 parser; Little CMS through `lcms2` | Little CMS for profile reading, MHC2 extraction and conventional ICC transforms. Use the library's existing profile support. |
+| Profile handling | custom ICC/MHC2 parser; Little CMS through a Rust binding | Little CMS for profile reading, MHC2 extraction and conventional ICC transforms. Use the library's existing profile support. The adapter also checks and decodes the raw `MHC2` tag, because the Little CMS reader does not check bounds; see [MHC2 profile adapter](#mhc2-profile-adapter). |
 | Device operations | native queries and setters in each output driver; separate device interface | [`DisplayDeviceControl`](../display_device.md) with native implementations in `nitpick-display`. Hosts and tests share capability enumeration, profile assignment, readback and restoration. |
 | Display model | ICC transform alone; explicit HDR model with library support | Explicit HDR model. Nitpick controls units, stage order, transfer functions and clipping; see [Colour library boundary](#colour-library-boundary). |
 | IDD dependency | required for unit tests; optional lab tool | Optional lab tool. Signing and HDR hardware must not block normal CI. |
@@ -321,7 +321,11 @@ Test capture with identity and nonidentity calibration profiles whose other meta
 
 ### Colour library boundary
 
-Use the Rust `lcms2` binding for profile handling. Its [MHC2 tag API](https://docs.rs/lcms2/6.2.0/lcms2/enum.Tag.html#variant.MHC2) exposes the calibration data. Little CMS added MHC2 reading and writing in 2.16 and fixed MHC2 handling in 2.18; see the [library changelog](https://github.com/mm2/Little-CMS/blob/master/ChangeLog). Pin the Rust binding and the native engine separately. Select an engine with those fixes, then qualify that exact build with the profile fixtures.
+Little CMS added MHC2 reading and writing in 2.16 and fixed MHC2 handling in 2.18; see the [library changelog](https://github.com/mm2/Little-CMS/blob/master/ChangeLog). Pin the Rust binding and the native engine separately. Select an engine with those fixes, then qualify that exact build with the profile fixtures.
+
+The adapter crate `nitpick-profile` uses [`lcms2-sys`](https://crates.io/crates/lcms2-sys) 4.0.7 with only its `static` feature. This version bundles the Little CMS 2.19 sources and compiles them with `cc`. Without the default `dynamic` feature, pkg-config cannot select a system library, so the Cargo lockfile also pins the engine. The environment variable `LCMS2_LIB_DIR` still links another library. `nitpick_profile::engine_version` reports the linked engine; the adapter rejects engines older than 2.18.
+
+**Deviation from the safe wrapper:** the adapter does not use the `lcms2` crate (6.2.0). That crate has no raw tag read. It does not expose its profile handle or the parameters of a parametric curve, and it returns the `chad` matrix as a `CIExyYTRIPLE`. All Little CMS calls are in one module of the adapter, `native.rs`. Conventional ICC transforms can call `lcms2-sys` there, or add `lcms2` over the same `lcms2-sys` build.
 
 | Responsibility | Owner |
 |---|---|
@@ -349,16 +353,42 @@ The tag header is 36 bytes. It contains the LUT count, minimum and peak luminanc
 
 Adapter tests cover truncated headers, wrong signatures, negative fixed-point values, wrong relative bases, offset/size overflow, arrays outside the tag, identity fields and counts above 4096. Check exact extracted values against the fixture manifest. The initial model accepts identity or 2–4096 LUT samples; a one-sample LUT returns `Unsupported` because its interpolation is not defined by this design. This is a model restriction, not a claim that Windows rejects it. Include two-entry identity LUTs, unequal channel curves, interior knots and values at each endpoint.
 
-**Deviation of Little CMS from the Microsoft layout.** This comes from a reading of `Type_MHC2_Read` in `cmstypes.c` (master branch, November 2026). It is not checked with a build:
-- It ignores the tag size. It reads the matrix and LUT arrays wherever the offsets point in the file.
-- It skips the 8-byte `sf32` header and does not check its signature.
+**Deviation of Little CMS from the Microsoft layout.** `Type_MHC2_Read` in `cmstypes.c` of Little CMS 2.19 does the following. The adapter tests (`native_tests.rs`) confirm each item with the fixtures on Windows:
+- It ignores the tag size. It reads the matrix and LUT arrays wherever the offsets point in the file. The `*_outside_tag` and `*_wrap` cases read without error.
+- It skips the 8-byte `sf32` header and does not check its signature. `mhc2_wrong_lut_signature` reads without error.
 - It adds each offset to the tag start in 32-bit arithmetic, so a large offset wraps to another file position.
 - With LUT count 0, its zero-size allocation returns null and the read fails. Microsoft defines count 0 as identity.
-- It rejects counts above 4096. It gives identity for matrix offset 0.
+- It rejects counts above 4096 and a wrong type signature. It gives identity for matrix offset 0.
 
-Thus Little CMS tag access alone cannot pass the malformed cases or the count-0 case. The adapter must also check bounds and signatures on the raw tag bytes, for example from `cmsReadRawTag`.
+The reads of `mhc2_truncated_header` and `mhc2_file_relative_offsets` fail only because an offset points outside the file. A file with other bytes after the tag can read without error.
 
-**Unverified:** the selected library build handles every required identity and malformed-profile fixture. A missing or unreadable tag must not silently become identity. A valid profile that the library cannot read is a qualification failure. Resolve it in the adapter or library before enabling that case.
+`cmsReadRawTag` returns the stored bytes only before the first `cmsReadTag` of the same tag on that handle. After it, Little CMS serializes its parsed object again, in its own layout. This is not documented; a test pins it.
+
+Thus Little CMS tag access alone cannot pass the malformed cases or the count-0 case. The adapter reads an `MHC2` tag as follows:
+1. Open a new profile handle. Return `invalid_profile` if Little CMS rejects the profile, and `missing_tag` if the profile has no `MHC2` tag. Neither becomes identity.
+2. Read the raw tag with `cmsReadRawTag`, before any cooked read.
+3. Check the raw tag and decode it. Report every structural defect as `malformed_tag` before an `unsupported` value.
+4. Read the tag with `cmsReadTag`. Its values must be bit-identical to the decoded values. Otherwise return a `library` error: the build fails qualification for that case. If the LUT count is 0, the decoded values are used alone, because of the count-0 failure above.
+
+Raw-tag rules:
+
+| Field | Rule | Result |
+|---|---|---|
+| Tag length | at least the 36-byte header | `malformed_tag` |
+| Type signature | `MHC2` | `malformed_tag` |
+| LUT count | at most 4096 | `malformed_tag` |
+| Matrix, each LUT | starts at or after byte 36 and ends within the tag; checked arithmetic, no wrap | `malformed_tag` |
+| Each LUT | starts with `sf32` | `malformed_tag` |
+| LUT count 1 | | `unsupported` |
+| LUT offset 0, LUT count above 0 | | `unsupported` |
+| LUT offsets, LUT count 0 | not read | identity LUTs |
+| Reserved fields, luminance values | not checked | values |
+
+**Deviation from the Microsoft text:** Microsoft does not state that elements start after the header. The adapter rejects an element that overlaps the header, because it would decode header fields as samples. The rule for LUT offset 0 with a nonzero count and the reserved-field and luminance rules are open questions in the [output driver plan](../../plan/output_driver.md); `unsupported` keeps the first case out of the model until a decision.
+
+The adapter also reads `wtpt`, `chad`, `rXYZ`, `gXYZ`, `bXYZ`, `lumi` and the TRC tags as stored, without adaptation. It accepts only one-segment parametric curves and returns `unsupported` for other curves. Little CMS reads a `curv` tag with zero or one entry as a gamma curve, so the adapter reports ICC function 0 for it.
+
+**Qualified build:** `lcms2-sys` 4.0.7, Little CMS 2.19, compiled by MSVC 14.52 for x86_64 Windows 11. It passes every profile fixture in the test profile (no `NDEBUG`, no optimization) and in the release profile (`NDEBUG`, optimized). macOS and Linux builds are not qualified.
 
 Test conventional ICC transforms separately with known identity, transfer-curve and primary-conversion fixtures. Record all transform options and use independent expected values for those simple cases. A successful ICC transform is not evidence that Windows loaded its MHC2 calibration.
 
@@ -451,7 +481,11 @@ cargo nextest run -p nitpick-core
 
 The new harness commands are not implemented. Its runner will query and validate the selected display before showing patches. It must use the existing driver and host lifecycle, rather than add a second colour path just for tests.
 
-When the profile adapter is added, its build needs the native Little CMS engine as well as the Rust binding. Use a pinned bundled build or pinned native package on each OS. A Cargo lockfile alone does not pin a system library. Record both versions and the library build settings in test results; rerun the adapter fixtures after either dependency changes.
+The profile adapter build compiles the bundled Little CMS sources, so it needs a C compiler for the target. Do not set `LCMS2_LIB_DIR` for qualification runs: it links another library, which the lockfile does not pin. Record the binding version, `engine_version()`, the C compiler and the build profile in test results. Rerun the adapter fixtures after any of them changes:
+
+```text
+cargo nextest run -p nitpick-profile
+```
 
 For physical QRhi setup, use [QRhi measurement settings](qt.md#testing). For iPad setup, use [Browser measurement settings](browser.md#testing). Record brightness, ambient-light controls, Night light/Night Shift/True Tone, accessibility filters, profile association, SDR white, output depth/range, display mode and background patch level. Hold them fixed. Use large interior patches for probes; record patch area and average picture level because local dimming and automatic brightness can change results.
 

@@ -37,6 +37,7 @@ graph LR
 | `nitpick-cli` | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, a Rust executor; optional `nitpick-display`; no `nitpick-app` |
 | `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, `nitpick-display`, Qt and its C++ bridge |
 | `nitpick-webview` | optional local display process | Tauri; connects to the server by URL; no other workspace crate |
+| `nitpick-profile` | test support: the [profile adapter](testing.md#colour-library-boundary) | `lcms2-sys` with its bundled Little CMS; no other workspace crate except `nitpick-fixtures` for its tests |
 
 Dependencies go from each host or driver to the core. The core must not import a driver or host. Its current `output` module does pixel calculations without Qt or a GPU. Each host selects its concrete driver. The command-line host does not build or register QRhi. Build it by package; a workspace build also selects the Qt application and the Tauri shell.
 

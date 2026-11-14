@@ -177,16 +177,12 @@ TODO:
 
 Open questions:
 
-- Which pinned `lcms2` binding and native Little CMS build pass every required fixture on all three operating systems? Native build settings and versions must be recorded separately.
-- Does a LUT offset of 0 with a nonzero LUT count select identity for that channel? Microsoft says that the 1DLUT elements "may be set to 0 (NULL)" for identity, but marks only the count as optional. No fixture has this case.
-- Must the adapter reject nonzero reserved fields, or a negative or reversed MHC2 luminance (minimum above peak)? The design gives no rule; no fixture has these cases.
+- Does a LUT offset of 0 with a nonzero LUT count select identity for that channel? Microsoft says that the 1DLUT elements "may be set to 0 (NULL)" for identity, but marks only the count as optional. No fixture has this case. Until a decision, the adapter returns `unsupported`.
+- Must the adapter reject nonzero reserved fields, or a negative or reversed MHC2 luminance (minimum above peak)? The design gives no rule; no fixture has these cases. The adapter does not check them now.
 
 TODO:
 
-- Add the test-support adapter under [Colour library boundary](../design/output_driver/testing.md#colour-library-boundary). Use library tag access and return owned Rust data. Keep native handles, GUI dependencies and Windows APIs out of the model interface.
-- Verify extracted values against the [profile fixture](../design/output_driver/testing.md#profile-fixtures) manifest, including identity fields, signed values, bounds failures and unsupported LUT counts. Missing or unreadable tags must not silently become identity. Qualify the exact native build; resolve valid-profile failures before enabling the case.
-- Test relocated tag data and internal offsets; do not assume a fixed file offset or contiguous matrix and LUT storage. Cover zero matrix offset, zero LUT count, two-entry identity curves and a nonzero ignored fourth matrix column. Compare decoded values with the `encoded` values of the manifest.
-- Little CMS `Type_MHC2_Read` ignores the tag size and the `sf32` signatures, wraps offsets in 32 bits and fails for LUT count 0; see [MHC2 profile adapter](../design/output_driver/testing.md#mhc2-profile-adapter). This comes from a source reading only. Confirm it with the selected build, then add raw-tag bounds and signature checks in the adapter.
+- Run `cargo nextest run -p nitpick-profile` on macOS and on Linux, in the test and release profiles, with the bundled Little CMS 2.19 build of `lcms2-sys` 4.0.7. Record the C compiler and the build profile. Windows passed in both profiles; see [MHC2 profile adapter](../design/output_driver/testing.md#mhc2-profile-adapter). A failure of a valid-profile case blocks that case until the adapter or the library is fixed.
 
 ### 44. Implement Windows ICC profile assignment
 
@@ -246,7 +242,7 @@ Requires: 43.
 
 TODO:
 
-- Add the adapter's conventional ICC transform tests with explicit formats, intent, adaptation and black-point compensation settings. Use independent identity, transfer-curve and primary-conversion expectations.
+- Add the adapter's conventional ICC transform tests with explicit formats, intent, adaptation and black-point compensation settings. Use independent identity, transfer-curve and primary-conversion expectations. The adapter calls `lcms2-sys` directly; add the transform calls in its `native.rs`, or add the `lcms2` wrapper over the same `lcms2-sys` build and record why.
 - Use profiles with known white points and `chad` values to distinguish native XYZ from D50 PCS values. The [profile fixture](../design/output_driver/testing.md#profile-fixtures) manifest gives native and adapted colorants, but every fixture has a D65 white; add a fixture with another white if a case needs one. Verify that adaptation occurs only where requested. Keep any `vcgt` loading separate from ordinary ICC pixel conversion; do not apply calibration twice.
 - Verify numeric bounds and record all options and library versions. Keep these results separate from MHC2 model and Windows calibration results. Account for the library's f32 stage precision where stages are used.
 
@@ -320,7 +316,7 @@ Requires: 28, 33, 36, 43, 48, 49, 50. Add device jobs after their qualification 
 
 TODO:
 
-- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display. Include the `nitpick-cli` process and dependency-graph tests on Linux and macOS without a display server or a window session; they passed only on Windows in a desktop session. Build and unit-test `nitpick-webview` in a separate job on each OS; on Linux it needs the WebKitGTK and GTK development packages, and it has been built only on Windows.
+- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display. Include the `nitpick-cli` process and dependency-graph tests on Linux and macOS without a display server or a window session; they passed only on Windows in a desktop session. Run the `nitpick-profile` adapter tests on each OS; the job needs a C compiler and must not set `LCMS2_LIB_DIR`. Build and unit-test `nitpick-webview` in a separate job on each OS; on Linux it needs the WebKitGTK and GTK development packages, and it has been built only on Windows.
 - Run native device query and profile contract tests with injected calls on each target OS. Keep actual profile mutations in selected-device integration jobs. Verify routing and result aggregation with injected pass, fail and unavailable results. A required device losing qualification must fail; an optional unavailable device must not count as HDR coverage. Record conversion, encoding, acknowledgement, capture and settle times separately. Fail bounded-wait and queue-growth checks independently of pixel results.
 
 ### 57. Record physical output qualification
