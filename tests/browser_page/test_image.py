@@ -335,6 +335,33 @@ def test_new_frame_during_fetch(session, host):
     assert len([e for e in probe(c, "p.log") if e[0] == "create"]) == 1
 
 
+def test_resize_during_fetch(session, host):
+    c, view = session()
+    held = hold_first_fetch(c)
+    show(host, 1)
+    wait_held(c, held)
+
+    start = len(host.seen)
+    c.page.set_viewport_size({"width": 640, "height": 400})
+    # The driver reply and the service events come from different tasks.
+    failed = host.since(start, "present_failed", seq=1)
+    assert "viewport changed" in failed["error"]
+    host.since(start, "viewport_changed", display=view["display"])
+    assert host.since(start, "client", display=view["display"])["size"] == [640, 400]
+
+    # The host renders again at the new size.
+    show(host, 2, {"fill": BLACK})
+    host.wait("presented", seq=2)
+    release(held)
+    c.page.wait_for_timeout(300)
+    [img] = frames(c)
+    assert img["natural"] == [640, 400]
+    assert img["css"] == [pytest.approx(640, abs=0.01), pytest.approx(400, abs=0.01)]
+    [applied] = replies(c)
+    assert [applied["naturalWidth"], applied["naturalHeight"]] == [640, 400]
+    assert probe(c, "[...p.urls]") == [img["src"]]
+
+
 def test_close_during_fetch(session, host):
     c, _ = session()
     held = hold_first_fetch(c)

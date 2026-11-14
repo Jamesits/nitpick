@@ -168,6 +168,23 @@ def test_server_close_after_authentication(browser, host):
         context.close()
 
 
+@pytest.mark.parametrize(("dpr", "size"), [(1, [640, 400]), (2, [1280, 800])])
+def test_window_resize_reports_new_geometry(client_factory, host, dpr, size):
+    c = client_factory(dpr=dpr)
+    c.authenticate()
+    c.wait_hello(1)
+    first = ready_client(host)
+
+    c.page.set_viewport_size({"width": 640, "height": 400})
+    hello = c.wait_hello(2)
+    assert hello["viewport"] == {"width": 640, "height": 400, "scale": 1}
+    assert hello["pixelRatio"] == dpr
+    host.wait("viewport_changed", display=first["display"])
+    view = ready_client(host)
+    assert view["display"] == first["display"]
+    assert view["size"] == size
+
+
 def test_browser_zoom_changes_pixel_ratio(client_factory, host, is_chromium):
     if not is_chromium:
         pytest.skip("needs Chromium DevTools")

@@ -70,8 +70,15 @@ Requires: 25, 28. Test the optional shell after 30.
 
 TODO:
 
-- Run the page checks in [Browser integration](../design/output_driver/testing.md#browser-integration) on each supported engine. Record engine and OS versions. Include resize, zoom, full-screen changes and cancellation during fetch or decode.
-- Verify authenticated fetch, layout, acknowledgement and resource release. Use screenshots for geometry only. Keep HDR pixel and metadata-effect claims unverified until qualified capture or physical measurement.
+- Run the page tests in [Browser output driver testing](../design/output_driver/browser.md#testing) with Safari on macOS and on iPadOS, Firefox on macOS, and Chromium and Firefox on Linux. Record engine and OS versions. Windows passed with Edge, Chrome and the Playwright Chromium, Firefox and WebKit builds; the Playwright WebKit build is not Safari. Safari on iPadOS needs a remote harness or a manual run; Playwright cannot drive it.
+- Verify run-time browser zoom and pinch zoom outside Chromium, and full-screen geometry in a desktop browser. Playwright has no zoom call for Firefox and WebKit, and its full screen does not resize the OS window; use manual input or another harness. Use screenshots for geometry only.
+- Find a working headed Firefox harness, or record why headless runs are sufficient. On Windows, headed Playwright Firefox 157 delays clicks and then its page process stops.
+- Keep HDR pixel and metadata-effect claims unverified until qualified capture or physical measurement.
+
+Open questions:
+
+- Must `pixel_exact` accept a ratio within a small tolerance of an integer? Headed Chromium at 150 % OS scale reports emulated ratios as float32 values, for example 2.0000000596, and the driver gives `No`. **Unverified:** whether ordinary browser zoom levels give such values.
+- Must `pixel_exact` accept a non-integer ratio when the layout size equals the image size? Edge at $r = 1.5$ showed one image pixel per display pixel in a screenshot. A screenshot cannot show resampling of HDR codes; a decision needs a qualified capture.
 
 ### 33. Add the shared test-host protocol
 

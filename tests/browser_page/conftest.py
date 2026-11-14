@@ -4,6 +4,8 @@ Environment:
 - `NITPICK_BROWSER`: Playwright engine, `chromium` (default), `firefox` or `webkit`.
 - `NITPICK_BROWSER_CHANNEL`: installed browser for Chromium, for example `msedge` or
   `chrome`. Without it, Playwright needs its own build (`playwright install chromium`).
+- `NITPICK_BROWSER_HEADED`: if set, the browser opens windows on the desktop. The
+  full-screen test then changes the window to full screen for a short time.
 """
 
 import json
@@ -77,6 +79,16 @@ class Host:
             if item["event"] == event and all(item.get(k) == v for k, v in fields.items()):
                 return item
 
+    def since(self, start, event, **fields):
+        """First event of this kind with these fields at or after `seen[start]`.
+
+        For events from different sources that can arrive in either order.
+        """
+        for item in self.seen[start:]:
+            if item["event"] == event and all(item.get(k) == v for k, v in fields.items()):
+                return item
+        return self.wait(event, **fields)
+
     def drain(self, settle=0.3):
         """Events that arrive within `settle` seconds."""
         items = []
@@ -118,8 +130,10 @@ def playwright_instance():
 
 def launch(playwright_instance, args=()):
     engine = getattr(playwright_instance, os.environ.get("NITPICK_BROWSER", "chromium"))
-    channel = os.environ.get("NITPICK_BROWSER_CHANNEL")
-    return engine.launch(channel=channel, args=list(args)) if channel else engine.launch(args=list(args))
+    options = {"args": list(args), "headless": "NITPICK_BROWSER_HEADED" not in os.environ}
+    if channel := os.environ.get("NITPICK_BROWSER_CHANNEL"):
+        options["channel"] = channel
+    return engine.launch(**options)
 
 
 @pytest.fixture(scope="session")
