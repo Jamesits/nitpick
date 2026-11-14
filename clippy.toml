@@ -1,2 +1,2 @@
 # Names in doc comments that are not code.
-doc-valid-idents = ["RandR", "Xwayland", "WebKitGTK", ".."]
+doc-valid-idents = ["RandR", "Xwayland", "WebKitGTK", "WebView2", ".."]

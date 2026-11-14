@@ -109,7 +109,7 @@ The client shows the image at one image pixel per display pixel:
 - The `<img>` has the CSS size $W / r \times H / r$, `image-rendering: pixelated`, no transform, opacity 1 and `dynamic-range-limit: no-limit`. A transform or an opacity below 1 can clamp HDR to SDR (reported for WebKit).
 - `pixel_exact` is `Yes` only if $r$ is an integer, `visualViewport.scale` is 1 and the client reports a layout size equal to the image size. Otherwise the browser resamples and changes codes. The driver continues and shows a warning. A non-integer $r$ or a scale other than 1 gives `No`. Before the client reports a layout size in `applied`, the result is `Unknown`.
 - iPad: $r = 2$. Safari ignores `user-scalable=no`, so a pinch zoom changes `visualViewport.scale`. The client reports it.
-- Tauri on Windows: the shell starts WebView2 with `--force-device-scale-factor=1`, so $r = 1$ at all Windows scale settings.
+- Tauri on Windows: the shell starts WebView2 with `--force-device-scale-factor=1`, so $r = 1$ at all Windows scale settings. On a 150 % monitor, the page reports $r = 1$ with this argument and $r = 1.5$ without it.
 
 ## Interface
 
@@ -260,6 +260,7 @@ The status line names the frame ID, format and surface size, then the mode descr
 | PNG encoder | `png` crate; own encoder | `png` crate | Writes 16-bit RGB. Version 0.18.1 decodes `cICP`, `mDCV` and `cLLI`, but its encoder does not write them. The driver writes them with `Writer::write_chunk` after the header and before `IDAT`. |
 | Local test window | system browser; Tauri; `wry` direct | system browser for basic use; optional Tauri process for controlled tests | Tauri gives a fixed engine (WebView2 on Windows), monitor selection and browser arguments. A separate process keeps its event loop independent of the host. |
 | Monitor selection (Tauri) | monitor index; screen position | screen position | The shell accepts a position and selects the monitor that contains it. The Qt launcher derives the position from its screen list; a command-line caller can supply it. The server does not use Qt screen geometry. |
+| Position units (Tauri) | the windowing library's physical units on all platforms; the desktop units of each OS | desktop units: native pixels on Windows, logical units on macOS and Linux | On macOS and Linux, the library multiplies logical monitor geometry by the scale of each monitor. With mixed scales, these physical rectangles can overlap or leave gaps, so a point does not identify one monitor. Windows positions monitors in native pixels. |
 | Access | open; token in the URL; WebSocket authentication and bearer token | fixed API paths and [session authentication](#authentication), server bound to localhost by default | The server code controls display access. The bearer token controls image access without a secret in the URL. A LAN address only when the user turns on remote displays. The host gives a specific interface address; the service rejects an unspecified address (`0.0.0.0`, `::`), because the URL shown to the user contains the bound address. |
 | Sessions | multiple clients; one client | one session, including authentication | One client controls the display state. A second connection cannot replace it. |
 | Failed-attempt limit | permanent lock after $N$ failures; fixed delay; exponential lock per failure | exponential lock, 1 s to 60 s, reset on success | A user who mistypes the code waits about 1 s. A permanent lock needs a service restart. A fixed short delay allows too many guesses. |
@@ -271,6 +272,26 @@ Qt launcher, local webview test:
 1. In the launcher, select the driver "Browser (local webview)" and a screen.
 2. "Show pattern" starts `nitpick-webview --url <url> --at <x>,<y>` if no session exists.
 3. Enter the code shown by the launcher in the webview. After authentication, the launcher waits 10 s for `hello`.
+4. Select "Full screen" in the page. The window already covers the monitor, but the page reports `fullscreen` only after this user action. Until then, the panel covers part of the pattern and the host shows the full-screen layout warning.
+
+Local webview process (`nitpick-webview`), also without Qt:
+
+```sh
+cargo run -p nitpick-webview -- --list-monitors
+cargo run -p nitpick-webview -- --url http://127.0.0.1:8080/ --at 100,100
+```
+
+| Flag | Value |
+|---|---|
+| `--url` | service URL, `http` or `https`; the shell adds the query parameter `webview` |
+| `--at` | `<x>,<y>`: a point on the target monitor, in desktop units (see below) |
+| `--list-monitors` | print each monitor name, rectangle `x,y wxh` in desktop units and scale, then exit; not with `--url` or `--at` |
+
+Desktop units are native pixels on Windows, points on macOS and GDK application pixels on Linux. See the "Position units" decision in [Technical decisions](#technical-decisions). Edges are half-open: a monitor at `0,0 2560x1440` contains `2559,1439`, not `2560,0`. The shell fails if no monitor or more than one monitor contains the point.
+
+The shell opens one borderless full-screen window on the selected monitor and requests the keyboard focus. The window permits navigation only inside the origin of `--url` and rejects new windows. The shell defines no commands and no capabilities, so the page has no IPC access to it. The webview runs in private mode, so it keeps no cookies or storage. WebView2 still creates a data folder in `%LOCALAPPDATA%\com.nekomimirouter.nitpick.webview`. On Linux, the shell prints `warning: WebKitGTK shows HDR images as SDR`; the driver identifies the engine from the user agent, see [Graphics path](#graphics-path).
+
+Exit status: 0 after the window closes and after `--list-monitors`, 1 if the shell cannot start, read the monitors, select a monitor or open the window, and 2 for invalid arguments. The process does not stop when the session ends; the caller closes it. When the process ends, the server sees a closed client.
 
 Qt launcher, remote display (iPad):
 1. In the launcher, turn on remote displays. The launcher shows the URL with the LAN address.
@@ -338,6 +359,16 @@ NITPICK_BROWSER_CHANNEL=msedge uv run pytest
 ```
 
 `NITPICK_BROWSER` selects the Playwright engine (`chromium`, `firefox` or `webkit`); `NITPICK_BROWSER_CHANNEL` selects an installed Chromium browser. Without a channel, install the engine with `uv run playwright install <engine>`. The tests that need DevTools skip on other engines. Image tests use Pillow to read screenshots. Results: all pass with headless Edge 156 on Windows 11. Firefox, WebKit and iPadOS Safari are not tested.
+
+Webview shell unit tests (`nitpick-webview`, `args_tests.rs`, `monitor_tests.rs`) cover the `--at` syntax, the URL schemes, the added `webview` parameter, the navigation origin rule, the exclusive `--list-monitors` flag, the desktop rectangles in native and logical units, half-open edges, mixed scales and overlapping monitors.
+
+Webview shell run on Windows 11 (WebView2, Tauri 2.12.5), one HDR monitor at 3840×2160 and 150 % scale, with the `page_host` example. A script typed the code and pressed "Full screen" with keyboard input; the script activated the window first. Results:
+- The page reported a 3840×2160 viewport, $r = 1$, `dynamic-range: high`, `webview` true and the display name "Edge webview at 127.0.0.1". After "Full screen", the layout warning cleared.
+- A 1-pixel column frame gave "Pixel-exact layout". A screenshot showed the alternating columns on all 3840 columns of the first, middle and last rows, with no panel.
+- Alt+F4 closed the window with exit status 0. A killed process gave exit status 1. In both cases the server reported "client closed", and no WebView2 process stayed.
+- A point outside all monitors gave exit status 1 and the monitor list; a `ftp` URL gave exit status 2.
+
+**Not verified:** more than one monitor, mixed scales, macOS, Linux on X11 and Wayland, the WebKitGTK SDR output, and the keyboard focus without the script's activation.
 
 **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
 

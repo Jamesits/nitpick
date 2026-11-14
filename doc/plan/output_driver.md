@@ -43,8 +43,11 @@ Requires: 25.
 
 TODO:
 
-- Add `nitpick-webview` as a separate Tauri process with URL and screen-position arguments. Apply the platform rules in [Pixel mapping](../design/output_driver/browser.md#pixel-mapping), including the Windows scale argument.
-- Verify monitor selection, full-screen layout, authentication and process exit. Report the Linux SDR limit. Build and run the browser service and CLI without this package.
+- Run `nitpick-webview` on macOS, on Linux with X11 and with Wayland, and on Windows with two monitors at different scales. Verify `--list-monitors`, monitor selection by `--at`, the full-screen layout, authentication and exit. On Linux, record the WebKitGTK user agent and check the SDR output on an HDR display. Windows with one monitor passed; see [Browser output driver testing](../design/output_driver/browser.md#testing).
+
+Open questions:
+
+- In the shell, the page reports `fullscreen` only after the user selects "Full screen", although the window already covers the monitor. Until then, the panel covers part of the pattern and the host warns. Must the driver accept a full-screen shell window, for example when the viewport equals `screen`, and must the page hide the panel after authentication in the shell?
 
 ### 31. Launch the optional webview from Qt
 
@@ -53,7 +56,13 @@ Requires: 29, 30.
 TODO:
 
 - Add the local-webview selection and process lifecycle in [Usage](../design/output_driver/browser.md#usage). Derive the monitor position from Qt; keep screen geometry out of the server.
+- On Windows, start `nitpick-webview` without a console window; it is a console program, so that its errors and `--list-monitors` output reach a terminal. Check that its window gets the keyboard focus when the launcher starts it; Windows can refuse a foreground change.
 - Verify launch when no session exists, pairing, the post-authentication `hello` timeout, process failure and screen changes. An existing client must not be replaced by another session.
+
+Open questions:
+
+- Which Qt screen value gives the `--at` point? On Windows, check whether `QScreen::geometry()` keeps the native origin of each screen with mixed scales. On macOS and Linux, check that Qt and the shell use the same logical units, also with `QT_SCALE_FACTOR` or a GDK scale.
+- Must the shell stop when the launcher ends unexpectedly? It runs until its window closes.
 
 ### 32. Verify the real page in browser engines
 
@@ -308,7 +317,7 @@ Requires: 28, 33, 36, 43, 48, 49, 50. Add device jobs after their qualification 
 
 TODO:
 
-- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display. Include the `nitpick-cli` process and dependency-graph tests on Linux and macOS without a display server or a window session; they passed only on Windows in a desktop session.
+- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display. Include the `nitpick-cli` process and dependency-graph tests on Linux and macOS without a display server or a window session; they passed only on Windows in a desktop session. Build and unit-test `nitpick-webview` in a separate job on each OS; on Linux it needs the WebKitGTK and GTK development packages, and it has been built only on Windows.
 - Run native device query and profile contract tests with injected calls on each target OS. Keep actual profile mutations in selected-device integration jobs. Verify routing and result aggregation with injected pass, fail and unavailable results. A required device losing qualification must fail; an optional unavailable device must not count as HDR coverage. Record conversion, encoding, acknowledgement, capture and settle times separately. Fail bounded-wait and queue-growth checks independently of pixel results.
 
 ### 57. Record physical output qualification

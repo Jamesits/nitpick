@@ -10,7 +10,7 @@ The compatibility API is one Rust trait, `OutputDriver`, in `nitpick-core` (modu
 
 Native display enumeration, capability queries and ICC profile assignment use the separate [`DisplayDeviceControl` trait](../display_device.md) in `nitpick-core::device`. The `nitpick-display` crate implements native device operations on Windows, macOS and Linux. QRhi combines device reports with its output-path limits. Hosts coordinate device changes with presentation; `OutputDriver` does not change OS profile associations.
 
-`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries. `nitpick-browser` has the browser service, the PNG encoder and the browser driver. `nitpick-cli` is the command-line host of the browser driver. **Not implemented:** ICC profile assignment. The core library has no Qt dependency. Only `nitpick-app` needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
+`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries. `nitpick-browser` has the browser service, the PNG encoder and the browser driver. `nitpick-cli` is the command-line host of the browser driver. `nitpick-webview` is the optional local webview process. **Not implemented:** ICC profile assignment. The core library has no Qt dependency. Only `nitpick-app` needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
 
 ```mermaid
 graph LR
@@ -36,9 +36,9 @@ graph LR
 | `nitpick-browser` | browser driver, PNG encoder, HTTP and WebSocket service | `nitpick-core`, Rust server and image libraries; no Qt or Tauri |
 | `nitpick-cli` | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, a Rust executor; optional `nitpick-display`; no `nitpick-app` |
 | `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, `nitpick-display`, Qt and its C++ bridge |
-| `nitpick-webview` (planned) | optional local display process | Tauri; connects to the server by URL |
+| `nitpick-webview` | optional local display process | Tauri; connects to the server by URL; no other workspace crate |
 
-Dependencies go from each host or driver to the core. The core must not import a driver or host. Its current `output` module does pixel calculations without Qt or a GPU. Each host selects its concrete driver. The command-line host does not build or register QRhi. Build it by package; a workspace build also selects the Qt application.
+Dependencies go from each host or driver to the core. The core must not import a driver or host. Its current `output` module does pixel calculations without Qt or a GPU. Each host selects its concrete driver. The command-line host does not build or register QRhi. Build it by package; a workspace build also selects the Qt application and the Tauri shell.
 
 The browser service has a Rust handle separate from the mutable `OutputDriver` borrow. It supplies the bound URL, pairing-code events, client-state events and shutdown. The host can receive a disconnect or viewport change while `present` or the measurement delay is pending. The console and Qt UI consume the same events. Server startup, authentication and client discovery must not require a `QObject`, a Qt screen list or a Tauri process.
 
