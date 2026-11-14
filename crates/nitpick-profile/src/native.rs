@@ -1,5 +1,5 @@
-//! Little CMS calls. Profile handles and tag storage owned by Little CMS stay
-//! in this module; every read returns a copy.
+//! Little CMS calls. Profile and transform handles and tag storage owned by
+//! Little CMS stay in this module; every read returns a copy.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -7,6 +7,7 @@ use std::ptr::NonNull;
 use lcms2_sys as ffi;
 
 use crate::Tag;
+use crate::transform::{Format, Intent, TransformOptions};
 
 /// Encoded version of the linked engine, for example 2190 for 2.19.
 pub(crate) fn engine_version() -> u32 {
@@ -64,6 +65,12 @@ impl Profile {
         // the block in read mode, so the handle does not borrow `icc`.
         let h = unsafe { ffi::cmsOpenProfileFromMem(icc.as_ptr().cast::<c_void>(), len) };
         NonNull::new(h).map(Self)
+    }
+
+    /// The built-in XYZ identity profile. `None` if allocation fails.
+    pub fn pcs_xyz() -> Option<Self> {
+        // SAFETY: no arguments; the result is a new handle or null.
+        NonNull::new(unsafe { ffi::cmsCreateXYZProfile() }).map(Self)
     }
 
     fn handle(&self) -> ffi::HPROFILE {
@@ -165,6 +172,90 @@ impl Drop for Profile {
         unsafe {
             ffi::cmsCloseProfile(self.handle());
         }
+    }
+}
+
+fn pixel_format(f: Format) -> ffi::PixelFormat {
+    match f {
+        Format::RgbF64 => ffi::PixelFormat::RGB_DBL,
+        Format::XyzF64 => ffi::PixelFormat::XYZ_DBL,
+    }
+}
+
+fn intent(i: Intent) -> u32 {
+    use ffi::Intent as I;
+    (match i {
+        Intent::Perceptual => I::Perceptual,
+        Intent::RelativeColorimetric => I::RelativeColorimetric,
+        Intent::Saturation => I::Saturation,
+        Intent::AbsoluteColorimetric => I::AbsoluteColorimetric,
+    }) as u32
+}
+
+/// A two-profile transform. It does not borrow its profiles: Little CMS
+/// builds its own pipeline at creation.
+pub(crate) struct Transform(NonNull<ffi::_HTRANSFORM>);
+
+impl Transform {
+    /// `None` if Little CMS cannot build the transform.
+    pub fn new(src: &Profile, dst: &Profile, o: &TransformOptions) -> Option<Self> {
+        let mut profiles = [src.handle(), dst.handle()];
+        // Each array entry applies to the step into that profile; the
+        // first entry is not used for two profiles.
+        let mut bpc = [ffi::Bool::from(o.black_point_compensation); 2];
+        let mut intents = [intent(o.intent); 2];
+        let mut adaptation = [o.adaptation_state; 2];
+        // For float formats Little CMS runs only its pre-optimization,
+        // which joins adjacent matrices and drops identity stages, also with
+        // NOOPTIMIZE. The flag keeps any later optimization out.
+        let mut flags = ffi::FLAGS_NOOPTIMIZE;
+        if o.black_point_compensation {
+            flags |= ffi::FLAGS_BLACKPOINTCOMPENSATION;
+        }
+        // SAFETY: each array has one entry per profile; both handles are
+        // open. A null gamut profile disables the gamut check.
+        let h = unsafe {
+            ffi::cmsCreateExtendedTransform(
+                std::ptr::null_mut(),
+                2,
+                profiles.as_mut_ptr(),
+                bpc.as_mut_ptr(),
+                intents.as_mut_ptr(),
+                adaptation.as_mut_ptr(),
+                std::ptr::null_mut(),
+                0,
+                pixel_format(o.input),
+                pixel_format(o.output),
+                flags,
+            )
+        };
+        NonNull::new(h).map(Self)
+    }
+
+    pub fn apply(&self, pixels: &[[f64; 3]]) -> Vec<[f64; 3]> {
+        let mut out = vec![[0.0; 3]; pixels.len()];
+        let max = usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        for (i, o) in pixels.chunks(max).zip(out.chunks_mut(max)) {
+            let n = u32::try_from(i.len()).expect("chunk length fits u32");
+            // SAFETY: both formats are three interleaved f64 channels, the
+            // layout of `[f64; 3]`; each buffer holds `n` pixels.
+            unsafe {
+                ffi::cmsDoTransform(
+                    self.0.as_ptr(),
+                    i.as_ptr().cast::<c_void>(),
+                    o.as_mut_ptr().cast::<c_void>(),
+                    n,
+                );
+            }
+        }
+        out
+    }
+}
+
+impl Drop for Transform {
+    fn drop(&mut self) {
+        // SAFETY: the handle is valid and not used after this.
+        unsafe { ffi::cmsDeleteTransform(self.0.as_ptr()) }
     }
 }
 

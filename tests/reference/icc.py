@@ -62,6 +62,16 @@ def mluc_type(text):
     return b"mluc\0\0\0\0" + struct.pack(">II2s2sII", 1, 12, b"en", b"US", len(s), 28) + s
 
 
+def vcgt_table_type(tables):
+    """Apple `vcgt` video card gamma tag, table form: three channels of
+    equal length, 16-bit entries. Not part of ICC.1:2010."""
+    count = len(tables[0])
+    if len(tables) != 3 or any(len(t) != count for t in tables):
+        raise ValueError("vcgt needs three tables of equal length")
+    data = b"".join(struct.pack(">H", v) for t in tables for v in t)
+    return b"vcgt\0\0\0\0" + struct.pack(">IHHH", 0, 3, count, 2) + data
+
+
 def mhc2_type(count, min_nits, peak_nits, matrix, luts, *, order=("matrix", "r", "g", "b"), gap=b""):
     """MHC2 tag data and the position of each element relative to the tag start.
 

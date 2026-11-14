@@ -236,15 +236,15 @@ TODO:
 - Verify responsive event loops, saved recovery records and serialization when a native write outlives a timeout or cancellation. Before profile assignment, cancel presentation and readiness. After readback, refresh device state, reopen as needed and submit a new frame.
 - Test a local display mapping and reject a remote browser client as a local device identity. Verify stale callbacks and captures cannot qualify the new profile state. Build and run the browser-only CLI without the native device feature.
 
-### 49. Verify conventional ICC transforms separately
+### 58. Decide the remaining conventional ICC transform cases
 
 Requires: 43.
 
-TODO:
+Open questions:
 
-- Add the adapter's conventional ICC transform tests with explicit formats, intent, adaptation and black-point compensation settings. Use independent identity, transfer-curve and primary-conversion expectations. The adapter calls `lcms2-sys` directly; add the transform calls in its `native.rs`, or add the `lcms2` wrapper over the same `lcms2-sys` build and record why.
-- Use profiles with known white points and `chad` values to distinguish native XYZ from D50 PCS values. The [profile fixture](../design/output_driver/testing.md#profile-fixtures) manifest gives native and adapted colorants, but every fixture has a D65 white; add a fixture with another white if a case needs one. Verify that adaptation occurs only where requested. Keep any `vcgt` loading separate from ordinary ICC pixel conversion; do not apply calibration twice.
-- Verify numeric bounds and record all options and library versions. Keep these results separate from MHC2 model and Windows calibration results. Account for the library's f32 stage precision where stages are used.
+- Is a check of black-point compensation with a nonzero black point necessary? No fixture curve has one, so the setting has no effect on the [transform cases](../design/output_driver/testing.md#conventional-icc-transforms). Little CMS finds a black point through a 16-bit transform, so an independent expected value needs a stated tolerance.
+- Are out-of-gamut values necessary? The generator does not accept a negative linear value at a gamma 2.2 profile. The Little CMS result for that input is not pinned.
+- Must tests pin the Little CMS identity rules (0.002 for the absolute-intent conversion matrix, $10^{-5}$ for joined matrices)? No current case depends on them; a case with almost equal profiles or absolute intent to the PCS endpoint does.
 
 ### 50. Add the explicit HDR display model
 

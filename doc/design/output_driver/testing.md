@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` passes the profile fixtures on Windows only. The test-host protocol, capture adapters, conventional ICC transforms and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The test-host protocol, capture adapters and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -130,7 +130,7 @@ Convert XYZ to BT.2020 linear RGB, then encode the requested input codes. A red 
 
 ### Profile fixtures
 
-The ICC profiles and `manifest.json` are in `tests/fixtures/profile/`. The generator in `tests/reference/` (`icc.py`, `profiles.py`) writes them together with the output fixtures. It serializes the bytes itself; it does not use Little CMS or nitpick code. The `profile` module of the `nitpick-fixtures` crate reads the manifest and checks each file against the manifest size and SHA-256. The manifest holds only data with a programmatic use: case ID, file, use, hash, expected values and expected adapter errors. The generator source documents each case.
+The ICC profiles and `manifest.json` are in `tests/fixtures/profile/`. The generator in `tests/reference/` (`icc.py`, `profiles.py`, `transforms.py`) writes them together with the output fixtures. It serializes the bytes itself; it does not use Little CMS or nitpick code. The `profile` module of the `nitpick-fixtures` crate reads the manifest and checks each file against the manifest size and SHA-256. The manifest holds only data with a programmatic use: case ID, file, use, hash, expected values, expected adapter errors and the [conventional transform cases](#conventional-icc-transforms). The generator source documents each case.
 
 Every matrix, curve and luminance value is an exact rational, defined before serialization. The manifest stores two forms of each stored value:
 - `intended`: the binary64 value nearest to the rational.
@@ -138,7 +138,7 @@ Every matrix, curve and luminance value is an exact rational, defined before ser
 
 **Deviation from common rounding:** exact halves go up for both signs. Thus $-1.5 \cdot 2^{-16}$ is stored as $-1$, not $-2$. Little CMS writes with the same rule. MHC2Gen in [dantmnf/MHC2](https://github.com/dantmnf/MHC2) uses .NET `Math.Round`, which rounds halves to even. The `mhc2_signed` case has half steps of both signs. Compare extracted values with `encoded`, so parsed data cannot become its own expected result.
 
-All valid profiles are complete ICC v4.3 display profiles (`mntr`, RGB, XYZ PCS). They contain `desc`, `cprt`, `wtpt`, `chad`, `rXYZ`, `gXYZ`, `bXYZ`, and `para` curves in `rTRC`, `gTRC` and `bTRC`. `wtpt` is the D50 PCS illuminant, `chad` is the Bradford matrix from D65 to D50, and the colorants are adapted to D50. The header has a fixed date and an MD5 profile ID. The vendor, platform and creator fields are zero.
+All valid profiles are complete ICC v4.3 display profiles (`mntr`, RGB, XYZ PCS). They contain `desc`, `cprt`, `wtpt`, `chad`, `rXYZ`, `gXYZ`, `bXYZ`, and `para` curves in `rTRC`, `gTRC` and `bTRC`. `wtpt` is the D50 PCS illuminant, `chad` is the Bradford matrix from the display white to D50, and the colorants are adapted to D50. The display white is D65, except in `display_d50`. The header has a fixed date and an MD5 profile ID. The vendor, platform and creator fields are zero.
 
 | Use | Profiles | Content |
 |---|---|---|
@@ -185,12 +185,14 @@ Adapter cases. "Values" means the manifest gives the expected MHC2 values. A cas
 | `mhc2_matrix_outside_tag`, `mhc2_lut_outside_tag` | An array ends 4 bytes after the tag; the file continues | `malformed_tag` |
 | `mhc2_lut_count_4097` | 4097 entries, with arrays of that length inside the tag | `malformed_tag` |
 | `icc_truncated` | `mhc2_identity` cut to 100 bytes | `invalid_profile` |
+| `vcgt_srgb` | `ordinary_srgb` plus a `vcgt` table with unequal, non-identity channels. Do not install it: an OS loads `vcgt` into the video card gamma ramp. | `missing_tag` |
+| `display_d50` | BT.709 primaries, gamma 2.2 and the D50 PCS illuminant as display white. Its `chad` is identity, so its native XYZ is its PCS XYZ. | `missing_tag` |
 
 Each `malformed_tag` case except `mhc2_lut_count_4097` has one defect in a valid base tag (asymmetric matrix, two-entry LUTs). In the `*_wrap` and `*_outside_tag` cases the arrays are inside the file, so a reader that ignores the tag size reads other bytes and does not fail.
 
 The generator tests parse the bytes with a separate reader and compare them with the manifest. They check the profile ID, the equal tags of the `mhc2` set, the defect of each case and reproducible bytes. They also open each valid profile with the Little CMS build in Pillow 13.0.0 (Little CMS 2.19) and compare `wtpt`, the colorants and `lumi`.
 
-A one-time check on Windows 11 build 26200: `IsColorProfileValid` accepted every profile except `icc_truncated`, which `OpenColorProfileW` rejected. That call does not read `MHC2`. **Unverified:** that Windows accepts the `mhc2` set as MHC profiles and applies their calibration.
+A one-time check on Windows 11 build 26200: `IsColorProfileValid` accepted every profile except `icc_truncated`, which `OpenColorProfileW` rejected. `vcgt_srgb` and `display_d50` did not exist at that time. That call does not read `MHC2`. **Unverified:** that Windows accepts the `mhc2` set as MHC profiles and applies their calibration.
 
 ### Host boundary
 
@@ -325,7 +327,7 @@ Little CMS added MHC2 reading and writing in 2.16 and fixed MHC2 handling in 2.1
 
 The adapter crate `nitpick-profile` uses [`lcms2-sys`](https://crates.io/crates/lcms2-sys) 4.0.7 with only its `static` feature. This version bundles the Little CMS 2.19 sources and compiles them with `cc`. Without the default `dynamic` feature, pkg-config cannot select a system library, so the Cargo lockfile also pins the engine. The environment variable `LCMS2_LIB_DIR` still links another library. `nitpick_profile::engine_version` reports the linked engine; the adapter rejects engines older than 2.18.
 
-**Deviation from the safe wrapper:** the adapter does not use the `lcms2` crate (6.2.0). That crate has no raw tag read. It does not expose its profile handle or the parameters of a parametric curve, and it returns the `chad` matrix as a `CIExyYTRIPLE`. All Little CMS calls are in one module of the adapter, `native.rs`. Conventional ICC transforms can call `lcms2-sys` there, or add `lcms2` over the same `lcms2-sys` build.
+**Deviation from the safe wrapper:** the adapter does not use the `lcms2` crate (6.2.0). That crate has no raw tag read. It does not expose its profile handle or the parameters of a parametric curve, and it returns the `chad` matrix as a `CIExyYTRIPLE`. All Little CMS calls are in one module of the adapter, `native.rs`; the conventional ICC transforms call `lcms2-sys` there too. The `lcms2` crate sets the adaptation state per context, global or per thread, and does not wrap `cmsCreateExtendedTransform`, which takes it per transform.
 
 | Responsibility | Owner |
 |---|---|
@@ -388,11 +390,51 @@ Raw-tag rules:
 
 The adapter also reads `wtpt`, `chad`, `rXYZ`, `gXYZ`, `bXYZ`, `lumi` and the TRC tags as stored, without adaptation. It accepts only one-segment parametric curves and returns `unsupported` for other curves. Little CMS reads a `curv` tag with zero or one entry as a gamma curve, so the adapter reports ICC function 0 for it.
 
-**Qualified build:** `lcms2-sys` 4.0.7, Little CMS 2.19, compiled by MSVC 14.52 for x86_64 Windows 11. It passes every profile fixture in the test profile (no `NDEBUG`, no optimization) and in the release profile (`NDEBUG`, optimized). macOS and Linux builds are not qualified.
-
-Test conventional ICC transforms separately with known identity, transfer-curve and primary-conversion fixtures. Record all transform options and use independent expected values for those simple cases. A successful ICC transform is not evidence that Windows loaded its MHC2 calibration.
+**Qualified build:** `lcms2-sys` 4.0.7, Little CMS 2.19, compiled by MSVC 14.52 for x86_64 Windows 11. It passes every profile fixture and every [conventional transform case](#conventional-icc-transforms) in the test profile (no `NDEBUG`, no optimization) and in the release profile (`NDEBUG`, optimized). macOS and Linux builds are not qualified.
 
 Use complete valid display ICC profiles for installation tests, including required luminance and chromaticity tags. A valid standalone MHC2 byte block does not prove that Windows will accept the profile.
+
+### Conventional ICC transforms
+
+`nitpick_profile::transform` converts f64 pixels between two endpoints through `cmsCreateExtendedTransform`. An endpoint is an ICC profile or the Little CMS built-in XYZ identity profile: D50 PCS XYZ, $Y = 1$ for the PCS white. The caller sets every option; the adapter has no defaults:
+
+| Option | Values |
+|---|---|
+| Input and output format | `RgbF64` or `XyzF64`: three interleaved f64 channels, unbounded. A format that does not match the colour space of its endpoint gives a `transform` error. |
+| Rendering intent | perceptual, relative colorimetric, saturation, absolute colorimetric |
+| Black-point compensation | on or off |
+| Adaptation state | 0 to 1; another value gives `invalid_option` |
+
+The adapter always sets `cmsFLAGS_NOOPTIMIZE`. The transform does not apply `MHC2` or `vcgt`. A successful ICC transform is not evidence that Windows loaded its MHC2 calibration. Keep `vcgt` loading out of ICC pixel conversion, so that calibration does not apply two times.
+
+The test cases are in the `transforms` list of the profile manifest. Each case gives the source and target (a profile ID, or `null` for the PCS endpoint), intent, black-point compensation, adaptation state, input and expected output. `transforms.py` calculates the expected values without a colour library, from the stored 15.16 tag values and the stored binary64 input. It uses the matrix/TRC model of ICC.1:2010 with exact rational matrices, $M$ the colorant columns:
+
+$$
+XYZ_{PCS} = M\,TRC(RGB),\qquad RGB = TRC^{-1}(M^{-1}\,XYZ_{PCS}).
+$$
+
+For the absolute colorimetric intent at adaptation state 0, the step between the two profiles is $C_{out}\,C_{in}^{-1}$, with $C$ the `chad` matrix: the colour keeps its native XYZ. The generator accepts only states 0 and 1 for this intent, and only two profiles with the same stored `wtpt`.
+
+| Cases | Check |
+|---|---|
+| `srgb_identity` | The same profile at both ends gives the input. |
+| `srgb_to_pcs`, `p3_gamma22_to_pcs` | Transfer curves and colorants: neutrals, near black on the linear sRGB segment, primaries and mixed colours. |
+| `pcs_to_srgb`, `pcs_to_p3_gamma22` | Inverse matrices and inverse curves. |
+| `srgb_to_p3_gamma22`, `srgb_to_p3_gamma22_perceptual`, `srgb_to_p3_gamma22_bpc` | Primary conversion. The three cases have the same expected values. |
+| `srgb_to_d50_relative`, `srgb_to_d50_relative_unadapted`, `srgb_to_d50_absolute_adapted`, `srgb_to_d50_absolute_unadapted` | Adaptation. Only the absolute intent at state 0 gives other values: the D65 white of sRGB is not neutral in `display_d50`. |
+
+The adapter tests also check that each profile of the `mhc2` set gives the same bits as `mhc2_identity`, and `vcgt_srgb` the same bits as `ordinary_srgb`, in both directions through the PCS.
+
+**Precision limit:** Little CMS rounds each stage result to f32. The limit is $2^{-20}$ for each component; `transform_tests.rs` gives the reason. The largest measured error on Windows is $4.3 \cdot 10^{-7}$. The expected values use stored tag values, because the 15.16 rounding of a colorant (up to $2^{-17}$) is larger than this limit.
+
+The generator does not accept a value that has no inverse in the stored curve: a negative linear value at a gamma 2.2 profile, or a value in the small gap of the stored sRGB curve at its knot. The 15.16 parameters make that curve discontinuous. **Not covered:** out-of-gamut values and profiles with a nonzero black point.
+
+**Deviations of Little CMS 2.19 from a simple ICC model.** These come from `cmscnvrt.c` and `cmsopt.c`:
+- It always uses black-point compensation for the perceptual and saturation intents with ICC v4 profiles, and never for the absolute colorimetric intent. Each fixture curve gives 0 for input 0, so black-point compensation has no effect on the fixtures.
+- The adaptation state has an effect only with the absolute colorimetric intent. The fixture cases confirm this.
+- In the absolute colorimetric intent, it removes the conversion matrix if the sum of the absolute differences of matrix and offset from identity is less than 0.002. Thus it ignores a small white-point scale. **Unverified** by a test.
+- It joins adjacent matrices, and removes the product if each entry is within $10^{-5}$ of identity. This occurs also with `cmsFLAGS_NOOPTIMIZE`. For float formats, it does no other optimization. **Unverified** by a test.
+- The built-in XYZ profile stores the D50 illuminant without 15.16 rounding, but a fixture `wtpt` is rounded. Thus the absolute colorimetric scale to the PCS endpoint differs from 1 by up to $7 \cdot 10^{-6}$. Because of the 0.002 rule, Little CMS ignores it at adaptation state 1 but applies it at state 0. The generator does not accept the absolute intent with the PCS endpoint. **Unverified** by a test.
 
 ### Model order and domain
 

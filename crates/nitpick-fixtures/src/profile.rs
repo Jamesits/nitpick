@@ -31,6 +31,37 @@ pub struct ProfileManifest {
     /// HDR10 metadata of frames shown during calibration checks.
     pub frame_metadata: MetadataRequest,
     pub profiles: Vec<ProfileEntry>,
+    pub transforms: Vec<TransformCase>,
+}
+
+/// A conventional ICC transform with its expected output. The generator
+/// computes `expected` from the stored profile values and the stored
+/// `input`, without a colour library.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TransformCase {
+    pub id: String,
+    /// Profile ID; `None` for the D50 PCS XYZ endpoint (XYZ, Y = 1 for the
+    /// PCS white).
+    pub source: Option<String>,
+    pub target: Option<String>,
+    pub intent: RenderingIntent,
+    pub black_point_compensation: bool,
+    /// Observer adaptation for the absolute colorimetric intent: 1 keeps
+    /// the `chad` adaptation, 0 undoes it.
+    pub adaptation_state: f64,
+    /// RGB device values or PCS XYZ, as the source requires.
+    pub input: Vec<[f64; 3]>,
+    pub expected: Vec<[f64; 3]>,
+}
+
+/// ICC.1:2010 rendering intents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderingIntent {
+    Perceptual,
+    RelativeColorimetric,
+    Saturation,
+    AbsoluteColorimetric,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,12 +135,12 @@ pub type Luts = Serialized<[Vec<f64>; 3], [Vec<i32>; 3]>;
 pub struct DisplayTags {
     /// CIE xy of red, green and blue.
     pub primaries: [[f64; 2]; 3],
-    /// CIE xy of the display white (D65).
+    /// CIE xy of the display white.
     pub white: [f64; 2],
     /// `wtpt`: the D50 PCS illuminant, as ICC.1:2010 requires for a
     /// display profile.
     pub media_white: Serialized<[f64; 3], [i32; 3]>,
-    /// `chad`: Bradford D65 to D50, rows.
+    /// `chad`: Bradford from `white` to D50, rows.
     pub chad: Serialized<[[f64; 3]; 3], [[i32; 3]; 3]>,
     pub colorants: Colorants,
     /// `rTRC`, `gTRC` and `bTRC` (equal).
@@ -121,7 +152,7 @@ pub struct DisplayTags {
 /// `rXYZ`, `gXYZ` and `bXYZ`, one XYZ triple per primary.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Colorants {
-    /// Unadapted D65 XYZ with white Y = 1.
+    /// Unadapted XYZ with white Y = 1.
     pub native: [[f64; 3]; 3],
     /// After `chad`.
     pub intended: [[f64; 3]; 3],

@@ -1,8 +1,8 @@
 //! Test-support profile adapter over Little CMS.
 //!
 //! Reads ICC display tags and the Microsoft `MHC2` calibration tag, and
-//! returns owned values. Library handles stay inside the adapter. It does
-//! not install, assign or apply a profile.
+//! returns owned values. Runs conventional ICC transforms. Library handles
+//! stay inside the adapter. It does not install or assign a profile.
 //!
 //! Each call opens its own profile handle, so a raw tag read always comes
 //! before the cooked read of the same tag.
@@ -12,9 +12,11 @@ use std::fmt;
 mod display;
 mod mhc2;
 mod native;
+mod transform;
 
 pub use display::{DisplayTags, ParametricCurve};
 pub use mhc2::{Channel, Element, MAX_LUT_LEN, Mhc2};
+pub use transform::{Endpoint, Format, Intent, TransformOptions, transform};
 
 /// Oldest accepted engine. Little CMS added MHC2 support in 2.16 and fixed
 /// its MHC2 handling in 2.18.
@@ -106,6 +108,11 @@ pub enum ProfileError {
     /// Little CMS cannot read a tag that passed the adapter checks, or reads
     /// other values. The linked build fails qualification for this case.
     Library(Tag),
+    /// A transform option outside its range.
+    InvalidOption,
+    /// Little CMS cannot build the transform, for example because a pixel
+    /// format does not match its profile.
+    Transform,
 }
 
 impl ProfileError {
@@ -119,6 +126,8 @@ impl ProfileError {
             Self::MalformedTag(..) => "malformed_tag",
             Self::Unsupported(..) => "unsupported",
             Self::Library(_) => "library",
+            Self::InvalidOption => "invalid_option",
+            Self::Transform => "transform",
         }
     }
 }
@@ -132,6 +141,8 @@ impl fmt::Display for ProfileError {
             Self::MalformedTag(t, d) => write!(f, "malformed tag {t}: {d:?}"),
             Self::Unsupported(t, u) => write!(f, "unsupported tag {t}: {u:?}"),
             Self::Library(t) => write!(f, "Little CMS read of tag {t} disagrees with its bytes"),
+            Self::InvalidOption => f.write_str("transform option out of range"),
+            Self::Transform => f.write_str("Little CMS cannot build the transform"),
         }
     }
 }

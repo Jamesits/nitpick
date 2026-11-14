@@ -18,6 +18,7 @@ from fractions import Fraction as Q
 
 import icc
 import reference as ref
+import transforms
 
 # Bradford cone response matrix (ICC.1:2010 Annex E).
 BRADFORD = (
@@ -108,12 +109,26 @@ SIGNED_LUT = (
 )
 
 
+def rgb_to_xyz(space, white):
+    """Normalized primary matrix: RGB (1, 1, 1) maps to `white` (XYZ)."""
+    cols = [ref.xyz_of_xy(p) for p in ref.PRIMARIES[space]]
+    p = tuple(tuple(cols[j][i] for j in range(3)) for i in range(3))
+    s = ref.mat_vec(ref.mat_inv(p), white)
+    return tuple(tuple(p[i][j] * s[j] for j in range(3)) for i in range(3))
+
+
+# The PCS illuminant as a display white, for a display without adaptation.
+D50_WHITE = tuple(c / sum(icc.D50) for c in icc.D50[:2])
+
+
 class Display:
-    def __init__(self, space, trc, lumi):
-        self.space, self.trc, self.lumi = space, trc, lumi
-        m = ref.rgb_to_xyz(space)
+    def __init__(self, space, trc, lumi, white=ref.D65):
+        self.space, self.trc, self.lumi, self.white = space, trc, lumi, white
+        white_xyz = ref.xyz_of_xy(white)
+        self.chad = bradford(white_xyz, icc.D50)
+        m = rgb_to_xyz(space, white_xyz)
         self.native = tuple(tuple(m[i][j] for i in range(3)) for j in range(3))
-        self.adapted = tuple(ref.mat_vec(CHAD, c) for c in self.native)
+        self.adapted = tuple(ref.mat_vec(self.chad, c) for c in self.native)
 
     def tags(self):
         """Tags other than `desc` and `MHC2`, as `(signature, data)`."""
@@ -122,7 +137,7 @@ class Display:
         tags = [
             ("cprt", icc.mluc_type("nitpick test fixture, GPL-3.0-or-later")),
             ("wtpt", icc.xyz_type(icc.D50)),
-            ("chad", icc.sf32_type([v for row in CHAD for v in row])),
+            ("chad", icc.sf32_type([v for row in self.chad for v in row])),
             ("rXYZ", icc.xyz_type(self.adapted[0])),
             ("gXYZ", icc.xyz_type(self.adapted[1])),
             ("bXYZ", icc.xyz_type(self.adapted[2])),
@@ -136,9 +151,9 @@ class Display:
         f, params = self.trc
         return {
             "primaries": [[ref.to_f64(c) for c in p] for p in ref.PRIMARIES[self.space]],
-            "white": [ref.to_f64(c) for c in ref.D65],
+            "white": [ref.to_f64(c) for c in self.white],
             "media_white": serialized(icc.D50),
-            "chad": serialized(CHAD),
+            "chad": serialized(self.chad),
             "colorants": {"native": f64(self.native), **serialized(self.adapted)},
             "trc": {"function": f, **serialized(params)},
             "lumi": None if self.lumi is None else serialized(self.lumi),
@@ -146,6 +161,14 @@ class Display:
 
 
 SRGB_DISPLAY = Display("bt709", SRGB_TRC, LUMI_NITS)
+# Displays of the profiles without MHC2, by profile ID. `display_d50` has
+# the PCS illuminant as its white, so its `chad` is identity and its native
+# XYZ equals its PCS XYZ.
+DISPLAYS = {
+    "ordinary_srgb": Display("bt709", SRGB_TRC, None),
+    "ordinary_p3_gamma22": Display("p3-d65", GAMMA22_TRC, None),
+    "display_d50": Display("bt709", GAMMA22_TRC, None, D50_WHITE),
+}
 
 
 def f64(v):
@@ -181,15 +204,25 @@ class Mhc2:
 
 
 # Table order; MHC2 is before the curves, so data follows it in the file.
-TAG_ORDER = ("desc", "cprt", "wtpt", "chad", "rXYZ", "gXYZ", "bXYZ", "lumi", "MHC2", "rTRC", "gTRC", "bTRC")
+TAG_ORDER = ("desc", "cprt", "wtpt", "chad", "rXYZ", "gXYZ", "bXYZ", "lumi", "MHC2", "rTRC", "gTRC", "bTRC",
+             "vcgt")
 
 
-def profile_tags(pid, display, mhc2_data):
+def profile_tags(pid, display, mhc2_data, vcgt_data=None):
     tags = dict(display.tags())
     tags["desc"] = icc.mluc_type(f"nitpick {pid}")
     if mhc2_data is not None:
         tags["MHC2"] = mhc2_data
+    if vcgt_data is not None:
+        tags["vcgt"] = vcgt_data
     return [(s, tags[s]) for s in TAG_ORDER if s in tags]
+
+
+# Unequal channels, none of them identity.
+VCGT = tuple(
+    [ref.round_half_up(65535 * f(Q(i, 15))) for i in range(16)]
+    for f in (lambda x: Q("0.9") * x, lambda x: Q("0.05") + Q("0.95") * x, lambda x: x * x)
+)
 
 
 def error(kind):
@@ -266,10 +299,8 @@ def cases():
         "mhc2_lut_4096": Mhc2(IDENTITY, LUT_4096),
     }
     out = []
-    for pid, d in (
-        ("ordinary_srgb", Display("bt709", SRGB_TRC, None)),
-        ("ordinary_p3_gamma22", Display("p3-d65", GAMMA22_TRC, None)),
-    ):
+    for pid in ("ordinary_srgb", "ordinary_p3_gamma22"):
+        d = DISPLAYS[pid]
         out.append((pid, "ordinary", d, profile_tags(pid, d, None), None, error("missing_tag")))
     for pid, m in mhc2.items():
         out.append((pid, "mhc2", srgb, profile_tags(pid, srgb, m.tag()[0]), None, m.manifest()))
@@ -279,9 +310,9 @@ def cases():
     # Tag data first in the file, elements out of order with filler gaps.
     combined = mhc2["mhc2_combined"]
     relocated = combined.tag(order=("b", "r", "matrix", "g"), gap=b"\xa5" * 8)[0]
-    order = ["MHC2", *[s for s in TAG_ORDER if s != "MHC2"]]
-    out.append(("mhc2_relocated", "adapter", srgb, profile_tags("mhc2_relocated", srgb, relocated),
-                order, combined.manifest()))
+    tags = profile_tags("mhc2_relocated", srgb, relocated)
+    order = ["MHC2", *[s for s, _ in tags if s != "MHC2"]]
+    out.append(("mhc2_relocated", "adapter", srgb, tags, order, combined.manifest()))
 
     out.append(("mhc2_lut_count_1", "adapter", srgb,
                 profile_tags("mhc2_lut_count_1", srgb, Mhc2(MATRIX, ([Q(1, 2)],) * 3).tag()[0]),
@@ -294,6 +325,15 @@ def cases():
     over = Mhc2(MATRIX, lut(4097, (lambda x: x,) * 3)).tag()[0]
     out.append(("mhc2_lut_count_4097", "adapter", srgb, profile_tags("mhc2_lut_count_4097", srgb, over),
                 None, error("malformed_tag")))
+
+    # Conventional transform cases. `vcgt_srgb` is `ordinary_srgb` plus a
+    # `vcgt` tag; never install it, because an OS loads `vcgt` into the
+    # video card gamma ramp.
+    plain = DISPLAYS["ordinary_srgb"]
+    out.append(("vcgt_srgb", "adapter", plain, profile_tags("vcgt_srgb", plain, None, icc.vcgt_table_type(VCGT)),
+                None, error("missing_tag")))
+    d50 = DISPLAYS["display_d50"]
+    out.append(("display_d50", "adapter", d50, profile_tags("display_d50", d50, None), None, error("missing_tag")))
     return out
 
 
@@ -311,7 +351,7 @@ def build():
     files["icc_truncated.icc"] = truncated_profile(files["mhc2_identity.icc"])
     entries.append(("icc_truncated", "adapter", None, error("invalid_profile")))
 
-    manifest = {"frame_metadata": FRAME_METADATA, "profiles": []}
+    manifest = {"frame_metadata": FRAME_METADATA, "profiles": [], "transforms": transforms.cases(DISPLAYS)}
     for pid, use, display, mhc2 in entries:
         data = files[f"{pid}.icc"]
         manifest["profiles"].append({
