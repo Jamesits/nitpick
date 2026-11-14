@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Reader for the checked-in output test fixtures"
+description = "Reader for the checked-in output and profile test fixtures"
 publish = false
 
 [dependencies]
@@ -12,6 +12,7 @@ serde = { version = "1", features = ["derive"] }
 # The fixtures store shortest round-trip decimals; the default parser can
 # be one ULP off.
 serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.11"
 
 [lints]
 workspace = true

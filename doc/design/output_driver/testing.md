@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The test-host protocol, capture adapters and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The test-host protocol, capture adapters and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -80,7 +80,7 @@ Fixtures and expected data are in `tests/fixtures/output/`. The reference genera
 
 Each case has a stable ID, input depth and encoding, image size, palette of code triples, layout, metadata request, required capabilities and expected results for each boundary. A layout is either rectangles painted in order over a background entry, or one palette index per pixel. Invalid input cases state the expected error.
 
-The files hold data only, for machine reading: no descriptions, labels, provenance records or manifest. The generator source documents each case. Sources and rounding rules for all cases:
+The output fixture files hold data only, for machine reading: no descriptions, labels, provenance records or manifest. The generator source documents each case. Sources and rounding rules for all cases:
 - Transfer: SMPTE ST 2084 PQ. Quantization: ITU-R BT.2100 Table 9. Primary matrices: SMPTE RP 177 with BT.709, BT.2020 and P3-D65 (SMPTE EG 432-1) primaries and D65. Light levels: CTA-861.3. scRGB, packing and PNG mapping: [Swap chain output](qt.md#swap-chain-output) and [Code to PNG sample](browser.md#code-to-png-sample).
 - Codes and PNG samples round half up: $\lfloor x + 1/2 \rfloor$. Real values are the binary64 values nearest to the high-precision results.
 
@@ -103,14 +103,12 @@ Regenerate and check from the repository root. Reproducible generation gives no 
 
 ```sh
 uv run --project tests/reference python tests/reference/generate.py  # write
-git diff --exit-code tests/fixtures/output                            # compare with the committed files
-uv run --project tests/reference pytest tests/reference              # generator tests
+git diff --exit-code tests/fixtures                                   # compare with the committed files
+uv run --project tests/reference pytest tests/reference              # generator and profile tests
 cargo nextest run -p nitpick-fixtures                                 # Rust reader tests
 ```
 
-`.gitattributes` keeps the fixture bytes free of line-ending conversion, so the comparison also passes on Windows.
-
-Profile fixtures also store the known matrix, LUT and luminance values in their manifest. These values are defined before profile serialization. Compare library extraction against that manifest, so parsed data cannot become its own expected result.
+`.gitattributes` keeps the fixture bytes free of line-ending conversion, so the comparison also passes on Windows. The same command writes the [profile fixtures](#profile-fixtures).
 
 | Fixture group | Values and purpose |
 |---|---|
@@ -120,7 +118,7 @@ Profile fixtures also store the known matrix, LUT and luminance values in their 
 | Mixed channels | Bright saturated patches with a small nonzero channel; include all BT.2111 levels and the FP16 levels marked `*` |
 | Geometry | Asymmetric corner colours, one-pixel lines, checkerboard, odd widths and a border marker; find flips, scaling, crop and row-pitch errors |
 | State | Two different frames with unique markers; metadata on/off/changed; close, disconnect, resize and device loss |
-| Profiles | Conventional ICC profiles for native assignment tests; identity, matrix-only, LUT-only and combined MHC2 transforms for Windows calibration; malformed profiles; identical display metadata across transform comparisons |
+| Profiles | See [Profile fixtures](#profile-fixtures) |
 
 Specify coloured luminance without ambiguity. For a P3-D65 primary at measured luminance $Y$, form its XYZ value from chromaticity $(x,y)$:
 
@@ -129,6 +127,70 @@ XYZ = Y\,[x/y,\ 1,\ (1-x-y)/y]^T.
 $$
 
 Convert XYZ to BT.2020 linear RGB, then encode the requested input codes. A red component set to 100 in an RGB luminance vector does not in general give a patch with $Y=100$ cd/m². Keep both the intended colour and the value after code quantization in the fixture.
+
+### Profile fixtures
+
+The ICC profiles and `manifest.json` are in `tests/fixtures/profile/`. The generator in `tests/reference/` (`icc.py`, `profiles.py`) writes them together with the output fixtures. It serializes the bytes itself; it does not use Little CMS or nitpick code. The `profile` module of the `nitpick-fixtures` crate reads the manifest and checks each file against the manifest size and SHA-256. The manifest holds only data with a programmatic use: case ID, file, use, hash, expected values and expected adapter errors. The generator source documents each case.
+
+Every matrix, curve and luminance value is an exact rational, defined before serialization. The manifest stores two forms of each stored value:
+- `intended`: the binary64 value nearest to the rational.
+- `encoded`: the signed 15.16 integer in the profile, $n = \lfloor 65536\,v + 1/2 \rfloor$.
+
+**Deviation from common rounding:** exact halves go up for both signs. Thus $-1.5 \cdot 2^{-16}$ is stored as $-1$, not $-2$. Little CMS writes with the same rule. MHC2Gen in [dantmnf/MHC2](https://github.com/dantmnf/MHC2) uses .NET `Math.Round`, which rounds halves to even. The `mhc2_signed` case has half steps of both signs. Compare extracted values with `encoded`, so parsed data cannot become its own expected result.
+
+All valid profiles are complete ICC v4.3 display profiles (`mntr`, RGB, XYZ PCS). They contain `desc`, `cprt`, `wtpt`, `chad`, `rXYZ`, `gXYZ`, `bXYZ`, and `para` curves in `rTRC`, `gTRC` and `bTRC`. `wtpt` is the D50 PCS illuminant, `chad` is the Bradford matrix from D65 to D50, and the colorants are adapted to D50. The header has a fixed date and an MD5 profile ID. The vendor, platform and creator fields are zero.
+
+| Use | Profiles | Content |
+|---|---|---|
+| `ordinary` | `ordinary_srgb`, `ordinary_p3_gamma22` | No `lumi` and no `MHC2`. BT.709 primaries with the sRGB curve; P3-D65 primaries with gamma 2.2. For assignment tests on all operating systems. An MHC2 read must return `missing_tag`. |
+| `mhc2` | `mhc2_identity`, `mhc2_matrix`, `mhc2_lut`, `mhc2_combined`, `mhc2_swap_rg` | Windows calibration set. All tags except `desc` and `MHC2` are byte-identical: BT.709 primaries, sRGB curve and `lumi`. The MHC2 luminance values are also equal. |
+| `adapter` | all other cases | Profile adapter cases only. Do not install them. |
+
+The `mhc2` set uses the BT.709 primaries and the sRGB curve of the Windows SDR wire basis. Thus the SDR gamut mapping of the OS is identity, and only the MHC2 transform changes the output. The MHC2 transforms of the set are:
+- `mhc2_identity`: identity matrix and two-entry identity LUTs $[0, 1]$.
+- `mhc2_matrix`: an asymmetric XYZ matrix with unequal row sums; identity LUTs.
+- `mhc2_lut`: identity matrix; 256-entry LUTs with unequal channel curves. Red ends at 0.96; green starts at 0.02.
+- `mhc2_combined`: the matrix of `mhc2_matrix` and the LUTs of `mhc2_lut`.
+- `mhc2_swap_rg`: red/green exchange. The intended RGB action $P$ in the BT.709/D65 basis gives $A = M P M^{-1}$, with $M$ the RGB-to-XYZ matrix at D65 and no D50 adaptation. $A$ agrees with the public [SwapRedGreen.icm](https://github.com/dantmnf/MHC2/tree/master/profiles) sample to six decimals. The manifest stores $P$.
+
+Each luminance field has a different value, so a test can find a swapped field:
+
+| Value | cd/m² |
+|---|---|
+| MHC2 minimum luminance | 0.05 |
+| MHC2 peak luminance | 1000 |
+| ICC `lumi` full-frame luminance | 400 |
+| Frame metadata: mastering minimum and maximum | 0.005, 4000 |
+| Frame metadata: MaxCLL, MaxFALL | 800, 200 |
+
+`frame_metadata` is the HDR10 metadata request for frames shown during calibration checks. It uses BT.2020 primaries and D65.
+
+Adapter cases. "Values" means the manifest gives the expected MHC2 values. A case with an error kind gives that kind instead of values:
+
+| Case | Content | Expected |
+|---|---|---|
+| `mhc2_signed` | Negative matrix and LUT values, half steps of both signs, nonzero fourth matrix column, 3 LUT entries | values |
+| `mhc2_zero_matrix_offset` | Matrix offset 0 | identity matrix |
+| `mhc2_zero_lut_count` | LUT count 0 and LUT offsets 0 | identity LUTs |
+| `mhc2_metadata_only` | Matrix offset 0 and LUT count 0 | identity |
+| `mhc2_lut_4096` | 4096 entries; LUT values at both endpoints | values |
+| `mhc2_relocated` | `MHC2` data is first in the file but not first in the tag table. Elements are in the order blue, red, matrix, green, each after 8 filler bytes `A5`. | the values of `mhc2_combined` |
+| `mhc2_lut_count_1` | One LUT entry | `unsupported` |
+| `mhc2_truncated_header` | Tag size 32, less than the 36-byte header | `malformed_tag` |
+| `mhc2_wrong_type_signature` | Type signature `MHC1` | `malformed_tag` |
+| `mhc2_wrong_lut_signature` | Green LUT signature `curv` | `malformed_tag` |
+| `mhc2_file_relative_offsets` | Element offsets relative to the file start | `malformed_tag` |
+| `mhc2_matrix_offset_wrap` | Tag start plus matrix offset wraps in 32 bits to file offset 128 | `malformed_tag` |
+| `mhc2_lut_offset_wrap` | Red LUT offset plus 8 wraps in 32 bits to tag offset 4 | `malformed_tag` |
+| `mhc2_matrix_outside_tag`, `mhc2_lut_outside_tag` | An array ends 4 bytes after the tag; the file continues | `malformed_tag` |
+| `mhc2_lut_count_4097` | 4097 entries, with arrays of that length inside the tag | `malformed_tag` |
+| `icc_truncated` | `mhc2_identity` cut to 100 bytes | `invalid_profile` |
+
+Each `malformed_tag` case except `mhc2_lut_count_4097` has one defect in a valid base tag (asymmetric matrix, two-entry LUTs). In the `*_wrap` and `*_outside_tag` cases the arrays are inside the file, so a reader that ignores the tag size reads other bytes and does not fail.
+
+The generator tests parse the bytes with a separate reader and compare them with the manifest. They check the profile ID, the equal tags of the `mhc2` set, the defect of each case and reproducible bytes. They also open each valid profile with the Little CMS build in Pillow 13.0.0 (Little CMS 2.19) and compare `wtpt`, the colorants and `lumi`.
+
+A one-time check on Windows 11 build 26200: `IsColorProfileValid` accepted every profile except `icc_truncated`, which `OpenColorProfileW` rejected. That call does not read `MHC2`. **Unverified:** that Windows accepts the `mhc2` set as MHC profiles and applies their calibration.
 
 ### Host boundary
 
@@ -281,11 +343,20 @@ Little CMS accepts double-precision matrix coefficients, but its [floating-point
 
 ### MHC2 profile adapter
 
-Use Little CMS to read the profile and its MHC2 tag. The [MHC2 layout](https://learn.microsoft.com/en-us/windows/win32/wcs/display-calibration-mhc#new-mhc2-tag-for-icc-profiles) defines the byte fixtures and their expected values. ICC fields are big-endian. The ICC tag-table offset is relative to the file start; MHC2 internal offsets are relative to the tag start. Include offset and size bounds in malformed-input checks.
+Use Little CMS to read the profile and its MHC2 tag. The [MHC2 layout](https://learn.microsoft.com/en-us/windows/win32/wcs/display-calibration-mhc#new-mhc2-tag-for-icc-profiles) defines the byte fixtures and their expected values; see [Profile fixtures](#profile-fixtures). ICC fields are big-endian. The ICC tag-table offset is relative to the file start; MHC2 internal offsets are relative to the tag start. Include offset and size bounds in malformed-input checks.
 
 The tag header is 36 bytes. It contains the LUT count, minimum and peak luminance, matrix offset and three LUT offsets. Matrix storage is 12 signed 15.16 values in row order. The profile's fourth matrix column is ignored; use its left 3×3 XYZ adjustment. Each LUT has an `sf32` header and signed 15.16 samples. Null transform fields select identity as specified by Microsoft. This is separate from the IDD callback layout, whose fourth column is an active offset.
 
 Adapter tests cover truncated headers, wrong signatures, negative fixed-point values, wrong relative bases, offset/size overflow, arrays outside the tag, identity fields and counts above 4096. Check exact extracted values against the fixture manifest. The initial model accepts identity or 2–4096 LUT samples; a one-sample LUT returns `Unsupported` because its interpolation is not defined by this design. This is a model restriction, not a claim that Windows rejects it. Include two-entry identity LUTs, unequal channel curves, interior knots and values at each endpoint.
+
+**Deviation of Little CMS from the Microsoft layout.** This comes from a reading of `Type_MHC2_Read` in `cmstypes.c` (master branch, November 2026). It is not checked with a build:
+- It ignores the tag size. It reads the matrix and LUT arrays wherever the offsets point in the file.
+- It skips the 8-byte `sf32` header and does not check its signature.
+- It adds each offset to the tag start in 32-bit arithmetic, so a large offset wraps to another file position.
+- With LUT count 0, its zero-size allocation returns null and the read fails. Microsoft defines count 0 as identity.
+- It rejects counts above 4096. It gives identity for matrix offset 0.
+
+Thus Little CMS tag access alone cannot pass the malformed cases or the count-0 case. The adapter must also check bounds and signatures on the raw tag bytes, for example from `cmsReadRawTag`.
 
 **Unverified:** the selected library build handles every required identity and malformed-profile fixture. A missing or unreadable tag must not silently become identity. A valid profile that the library cannot read is a qualification failure. Resolve it in the adapter or library before enabling that case.
 

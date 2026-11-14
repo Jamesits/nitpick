@@ -1,4 +1,5 @@
-//! Reader for the output fixtures in `tests/fixtures/output`.
+//! Reader for the output fixtures in `tests/fixtures/output`, and in
+//! [`profile`] for the profile fixtures in `tests/fixtures/profile`.
 //!
 //! The fixtures and their expected values come from the independent
 //! reference generator in `tests/reference`. This crate only reads them; it
@@ -12,6 +13,8 @@ use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
+
+pub mod profile;
 
 /// Group files with patch and image cases; the file is `<group>.json`.
 pub const CASE_GROUPS: [&str; 6] = ["codes", "luminance", "gamut", "mixed", "geometry", "state"];

@@ -1,9 +1,10 @@
-"""Write the output fixtures to tests/fixtures/output.
+"""Write the output fixtures to tests/fixtures/output and the profile
+fixtures to tests/fixtures/profile.
 
 Usage (from the repository root):
     uv run --project tests/reference python tests/reference/generate.py
 
-Check reproducibility with `git diff tests/fixtures/output` after a run.
+Check reproducibility with `git diff tests/fixtures` after a run.
 The files hold data only, for machine reading. Sources, rounding rules
 and the schema are in doc/design/output_driver/testing.md.
 """
@@ -13,10 +14,13 @@ import sys
 from pathlib import Path
 
 import cases
+import profiles
 import reference as ref
 import spec
 
-OUT = Path(__file__).resolve().parents[1] / "fixtures" / "output"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+OUT = FIXTURES / "output"
+PROFILE_OUT = FIXTURES / "profile"
 
 
 def dumps(obj, indent=0):
@@ -80,15 +84,26 @@ def build():
     return {name: (dumps(body) + "\n").encode("ascii") for name, body in files.items()}
 
 
-def main():
-    out = build()
-    OUT.mkdir(parents=True, exist_ok=True)
-    for p in OUT.glob("*.json"):
-        if p.name not in out:
+def build_profiles():
+    """File name to bytes, including `manifest.json`."""
+    files, manifest = profiles.build()
+    files["manifest.json"] = (dumps(manifest) + "\n").encode("ascii")
+    return files
+
+
+def write(out_dir, files, pattern):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for p in out_dir.glob(pattern):
+        if p.name not in files:
             p.unlink()
-    for n, b in out.items():
-        (OUT / n).write_bytes(b)
-    print(f"wrote {len(out)} files to {OUT}")
+    for n, b in files.items():
+        (out_dir / n).write_bytes(b)
+    print(f"wrote {len(files)} files to {out_dir}")
+
+
+def main():
+    write(OUT, build(), "*.json")
+    write(PROFILE_OUT, build_profiles(), "*")
     return 0
 
 

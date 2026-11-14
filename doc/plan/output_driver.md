@@ -173,42 +173,38 @@ TODO:
 - Add the ScreenCast portal/PipeWire adapter, or the required compositor adapter, from [Platform capture adapters](../design/output_driver/testing.md#platform-capture-adapters). Record negotiated samples and colour state.
 - Verify layout, timestamps, resize and missing-field handling. Missing transfer, primaries, range or scale must make absolute HDR comparison unavailable. Keep X11 screenshots limited to geometry.
 
-### 42. Add known ICC and MHC2 profile fixtures
-
-TODO:
-
-- Add complete display ICC fixtures for identity, matrix-only, LUT-only and combined calibration. Define matrix, curve and luminance expectations before serialization. Keep other display metadata equal across transform comparisons.
-- Include ordinary ICC profiles without MHC2 for cross-platform assignment tests. Reserve MHC2 activation checks for Windows.
-- Store both intended values and expected signed 15.16 values after serialization. State the rounding rule and test positive and negative half steps. Add a red/green exchange whose XYZ matrix is derived from its intended RGB action in the native sRGB/D65 basis.
-- Give MHC2 minimum and peak display luminance, ICC `lumi` full-frame luminance and frame MaxCLL/MaxFALL distinct values in the manifests.
-- Add the malformed-input and curve-boundary cases in [MHC2 profile adapter](../design/output_driver/testing.md#mhc2-profile-adapter). Verify fixture manifests, hashes and reproducible bytes. Keep profile extraction checks separate from later Windows installation checks.
-
 ### 43. Add and qualify the Little CMS profile adapter
-
-Requires: 42.
 
 Open questions:
 
 - Which pinned `lcms2` binding and native Little CMS build pass every required fixture on all three operating systems? Native build settings and versions must be recorded separately.
+- Does a LUT offset of 0 with a nonzero LUT count select identity for that channel? Microsoft says that the 1DLUT elements "may be set to 0 (NULL)" for identity, but marks only the count as optional. No fixture has this case.
+- Must the adapter reject nonzero reserved fields, or a negative or reversed MHC2 luminance (minimum above peak)? The design gives no rule; no fixture has these cases.
 
 TODO:
 
 - Add the test-support adapter under [Colour library boundary](../design/output_driver/testing.md#colour-library-boundary). Use library tag access and return owned Rust data. Keep native handles, GUI dependencies and Windows APIs out of the model interface.
-- Verify extracted values against manifests, including identity fields, signed values, bounds failures and unsupported LUT counts. Missing or unreadable tags must not silently become identity. Qualify the exact native build; resolve valid-profile failures before enabling the case.
-- Test relocated tag data and internal offsets; do not assume a fixed file offset or contiguous matrix and LUT storage. Cover zero matrix offset, zero LUT count, two-entry identity curves and a nonzero ignored fourth matrix column. Compare decoded values to the serialized expectations from item 42.
+- Verify extracted values against the [profile fixture](../design/output_driver/testing.md#profile-fixtures) manifest, including identity fields, signed values, bounds failures and unsupported LUT counts. Missing or unreadable tags must not silently become identity. Qualify the exact native build; resolve valid-profile failures before enabling the case.
+- Test relocated tag data and internal offsets; do not assume a fixed file offset or contiguous matrix and LUT storage. Cover zero matrix offset, zero LUT count, two-entry identity curves and a nonzero ignored fourth matrix column. Compare decoded values with the `encoded` values of the manifest.
+- Little CMS `Type_MHC2_Read` ignores the tag size and the `sf32` signatures, wraps offsets in 32 bits and fails for LUT count 0; see [MHC2 profile adapter](../design/output_driver/testing.md#mhc2-profile-adapter). This comes from a source reading only. Confirm it with the selected build, then add raw-tag bounds and signature checks in the adapter.
 
 ### 44. Implement Windows ICC profile assignment
 
-Requires: 5, 42.
+Requires: 5.
+
+Open questions:
+
+- Does Windows accept `ordinary_p3_gamma22` in the Advanced Color role? Its D50 red colorant has $Z = -0.00105$, as in the Apple Display P3 profile. MHC2Gen states that SDR auto colour management fails for MHC profiles with negative colorants. **Unverified** for profiles without `MHC2`.
 
 TODO:
 
 - Implement profile target discovery, preparation, assignment, readback and restoration in `nitpick-display`. Use native installation and association APIs with explicit scope and ordinary or Advanced Color role.
 - Inject failure after each native write. Verify restoration, permission errors, no prior override, existing shared profiles and device replacement. On a selected test display, assign a known fixture and restore its original state. Verify OS assignment separately from MHC2 activation.
+- With each profile of the `mhc2` fixture set assigned, check that Windows accepts it as an MHC profile: the Advanced Color luminance reports (for example `DXGI_OUTPUT_DESC1`) must give the fixture's MHC2 minimum, MHC2 peak and `lumi` values. The values differ, so a swapped field shows. `IsColorProfileValid` does not read `MHC2`; it is not this check.
 
 ### 45. Implement macOS ICC profile assignment
 
-Requires: 6, 42.
+Requires: 6.
 
 TODO:
 
@@ -217,7 +213,7 @@ TODO:
 
 ### 46. Implement Linux ICC profile assignment
 
-Requires: 7, 42.
+Requires: 7.
 
 TODO:
 
@@ -251,7 +247,7 @@ Requires: 43.
 TODO:
 
 - Add the adapter's conventional ICC transform tests with explicit formats, intent, adaptation and black-point compensation settings. Use independent identity, transfer-curve and primary-conversion expectations.
-- Use profiles with known white points and `chad` values to distinguish native XYZ from D50 PCS values. Verify that adaptation occurs only where requested. Keep any `vcgt` loading separate from ordinary ICC pixel conversion; do not apply calibration twice.
+- Use profiles with known white points and `chad` values to distinguish native XYZ from D50 PCS values. The [profile fixture](../design/output_driver/testing.md#profile-fixtures) manifest gives native and adapted colorants, but every fixture has a D65 white; add a fixture with another white if a case needs one. Verify that adaptation occurs only where requested. Keep any `vcgt` loading separate from ordinary ICC pixel conversion; do not apply calibration twice.
 - Verify numeric bounds and record all options and library versions. Keep these results separate from MHC2 model and Windows calibration results. Account for the library's f32 stage precision where stages are used.
 
 ### 50. Add the explicit HDR display model

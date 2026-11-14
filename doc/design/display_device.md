@@ -217,7 +217,7 @@ Run the same trait contract against a fake backend and each native backend. To p
 
 Inject failure after installation, association and default selection. Verify recovery after each step, timeout, cancellation and process restart. Test concurrent external changes, shared pre-existing profiles and repeated restoration. A completed assignment must have matching readback. Failed restoration fails the run.
 
-Native integration tests use a selected test display and known ICC profiles. Run assignment, readback and restoration on each supported OS. Apply MHC2 fixtures only in the Windows calibration tests. Confirm calibration activation and light output at their own boundaries in [Output verification](output_driver/testing.md).
+Native integration tests use a selected test display and the `ordinary` [profile fixtures](output_driver/testing.md#profile-fixtures). Run assignment, readback and restoration on each supported OS. Apply MHC2 fixtures only in the Windows calibration tests. Confirm calibration activation and light output at their own boundaries in [Output verification](output_driver/testing.md).
 
 ## Future enhancements
 
