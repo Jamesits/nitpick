@@ -51,6 +51,7 @@ fn artifact(frame: u64) -> Artifact {
             display: "qrhi:screen-1".into(),
             generation: 3,
             surface_size: [2, 2],
+            surface: "FP16 scRGB swap chain (D3D11: DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)".into(),
             mode: ModeReport {
                 hdr_on: Some(true),
                 gamut: Some(GamutReport::Rec2020),

@@ -986,6 +986,8 @@ PatternSurface openPatternWindow(std::int32_t screen, bool fp16, PatternBackend 
 
 void closePatternWindow() { delete g_window.data(); }
 
+std::uint64_t patternWindowHandle() { return std::uint64_t(openWindow().winId()); }
+
 void presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
                     std::int32_t height, std::uint64_t frame, std::int32_t timeoutMs) {
     openWindow().present(pixels.data(), pixels.size(), width, height, frame, timeoutMs);

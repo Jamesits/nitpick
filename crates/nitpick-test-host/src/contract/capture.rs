@@ -191,6 +191,7 @@ async fn capture_waits_for_three_current_frames(mut h: Harness) {
             ("mock", DISPLAY, 1)
         );
         assert_eq!(run.surface_size, [SIZE.0, SIZE.1]);
+        assert_eq!(run.surface, "mock surface");
         assert_eq!(run.mode, ModeReport::from(&query().mode));
         assert_eq!((run.frame, run.fixture.as_str()), (2, FRAME_B));
         assert_eq!(

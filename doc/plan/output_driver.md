@@ -105,7 +105,7 @@ TODO:
 
 ### 62. Connect capture artifacts to the hosts
 
-Requires: 34. Do this with the first capture adapter (39, 40 or 41); before it, both hosts give `unavailable` for every capture of a frame shown with the marker.
+Requires: 34. The first capture adapter exists: the [WGC adapter](../design/output_driver/testing.md#windows-graphics-capture-adapter) of the QRhi host on Windows. Without an artifact directory, that host gives `unavailable` for an accepted frame; the browser host, and the QRhi host on other platforms, give `unavailable` for every capture.
 
 TODO:
 
@@ -115,7 +115,7 @@ TODO:
 Open questions:
 
 - At `quit`, the host waits for each queued write without a deadline, so a write that does not end blocks `stopped`. Must the wait have a deadline, and must the host then report `error` with kind `artifact` for each write that did not end?
-- Raw API metadata is a JSON object plus named binary blobs. How must each adapter convert native metadata (Core Foundation dictionaries of pixel-buffer attachments, PipeWire SPA pods, WinRT properties) without loss? Record the rule in [Platform capture adapters](../design/output_driver/testing.md#platform-capture-adapters).
+- Raw API metadata is a JSON object plus named binary blobs. How must each adapter convert native metadata (Core Foundation dictionaries of pixel-buffer attachments, PipeWire SPA pods) without loss? Record the rule in [Platform capture adapters](../design/output_driver/testing.md#platform-capture-adapters). The WGC adapter has no such structure: it stores the typed WinRT and D3D11 values that it reads as JSON numbers and strings.
 
 ### 37. Verify QRhi offscreen draw readback
 
@@ -157,15 +157,6 @@ Open questions:
 - Must the window create a new `QRhi` after a device loss? Qt 6.12 gives device loss for each later `beginFrame`, so each frame fails with `Platform` until the host opens the window again. Neither host reopens by itself.
 - Is a check with a real device loss or a real out-of-date swap chain necessary? The checks inject the `QRhi` results. A D3D11 device removal needs a TDR, which resets the GPU for all processes. A real out-of-date swap chain needs a resize of the full-screen window or a mode change.
 
-### 39. Add Windows FP16 capture
-
-Requires: 34, 35.
-
-TODO:
-
-- Add the WGC window adapter in [Platform capture adapters](../design/output_driver/testing.md#platform-capture-adapters). Keep FP16 through storage and preserve content size, timestamps and raw metadata.
-- Verify negative and greater-than-one samples, row layout, resize and window identity. Report permission or API failure with a reason. Record the submitted colour tag; do not infer the capture colour contract from FP16 storage.
-
 ### 40. Add macOS HDR capture
 
 Requires: 34, 35.
@@ -193,21 +184,41 @@ TODO:
 - Add the ScreenCast portal/PipeWire adapter, or the required compositor adapter, from [Platform capture adapters](../design/output_driver/testing.md#platform-capture-adapters). Record negotiated samples and colour state.
 - Verify layout, timestamps, resize and missing-field handling. Missing transfer, primaries, range or scale must make absolute HDR comparison unavailable. Keep X11 screenshots limited to geometry.
 
-### 63. Qualify frame acceptance with a real capture adapter
+### 66. Add Windows capture to the browser host
 
-Requires: the first adapter of 39, 40 or 41, and 62.
+Requires: 62.
 
-The frame marker, the gate, the heartbeat and region selection pass only with replayed synthetic frames; see [Timing and frame identity](../design/output_driver/testing.md#timing-and-frame-identity).
+Open questions:
+
+- Which window does `nitpick-cli --test-host` capture? The WGC adapter takes an `HWND`, and the browser host knows only the client state. The optional webview runs in the `nitpick-webview` process; an external browser needs a lookup by process or title. A remote browser cannot be captured on the server.
+- WGC captures the whole top-level window. Must the adapter accept a browser window only in full screen, or give a content rectangle without the browser chrome?
 
 TODO:
 
-- With the adapter, capture marked fixtures in both hosts. Check that the marker reads through the real capture conversion, also with YCbCr chroma subsampling, and that three matching frames arrive before the deadline. Record the frame time base of the adapter (for example whether WGC frame times are QPC values) and check it against `now`.
-- Capture a static frame without and with `heartbeat_ms`. Record whether the platform delivers new frames for a static window and for each heartbeat presentation.
+- After the decision, give the browser host a WGC adapter for a local browser window. Verify the window identity and the content rectangle with the page in full screen and in a normal window.
+
+### 67. Check the WGC failure paths and a capture with HDR off
+
+TODO:
+
+- A capture policy or a privacy setting that blocks screen capture must give `unavailable` with the reason. A window of the own process needed no permission on Windows 11 build 26200, so no failure path except a missing window has run. Find a Windows setting or policy that blocks WGC for an unpackaged process and check the reason. Use a dedicated test system.
+- With HDR off, capture a 12-bit pattern window (fallback swap chain) and record the captured samples against the submitted words. `tests/wgc_capture.rs` requires HDR on; extend it or add a separate check. Do not change the display settings of a developer machine without its owner.
+
+### 63. Qualify frame acceptance with a real capture adapter
+
+Requires: 62.
+
+The frame marker, the gate, the heartbeat and region selection are in [Timing and frame identity](../design/output_driver/testing.md#timing-and-frame-identity). With a real adapter, only the QRhi host on Windows was checked (the ignored process test of `nitpick-app`, WGC adapter): the marker read through the WGC FP16 capture of the HDR10 and the FP16 swap chain, and three matching frames arrived before a 10 s deadline with `heartbeat_ms` 100. Without a heartbeat, a static window gave one frame in 2 s. The WGC frame time is a QPC time; see [Windows Graphics Capture adapter](../design/output_driver/testing.md#windows-graphics-capture-adapter).
+
+TODO:
+
+- Capture marked fixtures in the browser host (after item 66) and with the macOS and Linux adapters. Check that the marker reads through each capture conversion, also with YCbCr chroma subsampling if an adapter gives it, and that three matching frames arrive before the deadline. Record the frame time base of each adapter and check it against `now`.
+- Record whether each heartbeat presentation gives a new frame: count the received frames per heartbeat (WGC, ScreenCaptureKit, PipeWire). `captured` does not report the count of an accepted capture; use the artifact (item 62) or a log.
 - Measure the time of the per-frame checks on the Qt GUI thread with a full-screen fixture. If Qt controls stop responding, move the checks to a worker and update the design.
 
 Open questions:
 
-- Matching frames must have equal stored samples (limit 0). Is this correct for real captures, for example with temporal dithering or capture noise? If not, which limit, and in which units?
+- Matching frames must have equal stored samples (limit 0). Is this correct for real captures, for example with temporal dithering or capture noise? If not, which limit, and in which units? WGC FP16 frames on one Windows system matched with limit 0.
 - A frame of another size after the submission fails the capture at once. Can a transient resize after the submission occur, for example while a window becomes full screen? If yes, must such a frame be stale instead?
 - The marker and each heartbeat presentation change the frame, so automatic `MaxFALL` (and `MaxCLL` of a fixture darker than the marker) changes; with automatic light levels each heartbeat can send new HDR metadata. Must a capture with metadata checks use explicit light levels, or must the heartbeat keep the metadata of the first presentation?
 
@@ -343,7 +354,7 @@ TODO:
 
 ### 51. Qualify capture adapters and compare output
 
-Requires: 32, 35, 36, 38, 47, 48, 62, 63, plus the applicable adapter from 39, 40, 41. Windows profile comparisons also require 43, 50.
+Requires: 32, 35, 36, 38, 47, 48, 62, 63, plus the applicable adapter: 40 or 41 (the Windows adapter exists). Windows profile comparisons also require 43, 50.
 
 TODO:
 
@@ -353,13 +364,13 @@ TODO:
 
 ### 64. Decide the comparison limits outside the binary16 scRGB capture
 
-Requires: the applicable adapter of 39, 40 or 41 for the first TODO, and 51 for the second.
+Requires: the applicable adapter of 40 or 41 for the first TODO, and 51 for the second.
 
 The metric, the check and the per-case bounds are in `nitpick-compare` and the output fixtures; see [Reference metric](../design/output_driver/testing.md#reference-metric) and [Pass criteria](../design/output_driver/testing.md#pass-criteria). The fixtures have bounds only for a binary16 scRGB capture of the ideal values.
 
 TODO:
 
-- With each capture adapter (39, 40, 41), derive and freeze the bounds of its capture storage and scale in the generator, for example 10-bit PQ, P010 or 8-bit samples. Until then, a comparison of such a capture has no limits and must be `unavailable`.
+- With the macOS and Linux capture adapters (40, 41), derive and freeze the bounds of their capture storage and scale in the generator, for example 10-bit PQ, P010 or 8-bit samples. Until then, a comparison of such a capture has no limits and must be `unavailable`. The WGC adapter stores binary16 samples, as the current bounds assume.
 - At capture qualification (51), check the two assumptions of the bounds: the compositor and the capture keep binary16 swap-chain values unchanged, and the browser keeps more precision than binary16 from the PNG decode to the capture. If a check fails, change the bound in the generator after review, not in a test.
 
 Open questions:
@@ -367,6 +378,7 @@ Open questions:
 - Which HLG display (peak, black level, system gamma) does a browser HLG comparison use? `HlgDisplay` has no default. BT.2124 Annex 2 uses 1000 cd/m², $\gamma = 1.2$ and black 0, but a browser does not state its HLG rendering.
 - With bounds from quantization, the perceptual check adds a failure only for a sample outside the bound box. Is the perceptual target then needed as a separate criterion of a capture check, or only for looser bounds (model and light comparisons)?
 - Next to black, 19 entries of 12-bit fixtures have no quantization $\Delta E_{ITP}$, because the FP16 search range reaches below 0 and the metric has no value there. Only the component check applies to them. Is this sufficient?
+- A WGC capture has no colour fields: WGC gives none, and the descriptor must not take scRGB from FP16 storage. Thus the scRGB expectation and its bounds apply to it only with a colour contract from qualification (51). Where does a comparison get that contract, for example a qualified-contract record per runner and display state, kept outside the capture descriptor?
 
 ### 52. Model IDD callback state without an installed driver
 

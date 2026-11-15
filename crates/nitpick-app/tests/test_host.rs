@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use nitpick_test_host::controller::NO_ARTIFACTS;
 use nitpick_test_host::protocol::{CaptureOutcome, Cause, ErrorKind, SurfaceState, VERSION};
 use nitpick_test_host::{Event, Request};
 // The build script links the generated C++ of the package into every
@@ -121,6 +122,48 @@ fn capture(frame: u64) -> Request {
     }
 }
 
+/// The `captured` event of `frame`: its result and reason.
+fn captured(host: &mut Host, frame: u64) -> (CaptureOutcome, Option<String>) {
+    match host.next() {
+        Event::Captured {
+            frame: f,
+            result,
+            reason,
+            ..
+        } if f == frame => (result, reason),
+        other => panic!("expected `captured` of frame {frame}, got {other:?}"),
+    }
+}
+
+/// Captures the marked, acknowledged `frame` of the pattern window. On
+/// Windows, frame acceptance needs a heartbeat, because the window gives
+/// no new frames while it shows a static image. The host has no artifact
+/// directory, so an accepted frame is `unavailable` with that reason.
+fn check_capture(host: &mut Host, frame: u64) {
+    if !cfg!(windows) {
+        host.send(&capture(frame));
+        assert_eq!(captured(host, frame).0, CaptureOutcome::Unavailable);
+        return;
+    }
+    host.send(&Request::Capture {
+        frame,
+        heartbeat_ms: None,
+        deadline_ms: Some(2000),
+    });
+    let (result, reason) = captured(host, frame);
+    eprintln!("without heartbeat: {result:?}, {reason:?}");
+    assert_eq!(result, CaptureOutcome::Fail, "{reason:?}");
+    host.send(&Request::Capture {
+        frame,
+        heartbeat_ms: Some(100),
+        deadline_ms: Some(10_000),
+    });
+    assert_eq!(
+        captured(host, frame),
+        (CaptureOutcome::Unavailable, Some(NO_ARTIFACTS.into()))
+    );
+}
+
 /// `show` with the frame marker.
 fn marked(mut request: Request) -> Request {
     if let Request::Show { marker, .. } = &mut request {
@@ -215,15 +258,7 @@ fn presents_fixtures_on_a_screen() {
         delay_ms: 300,
     });
     assert!(start.elapsed() >= Duration::from_millis(250));
-    host.send(&capture(2));
-    assert!(matches!(
-        host.next(),
-        Event::Captured {
-            frame: 2,
-            result: CaptureOutcome::Unavailable,
-            ..
-        }
-    ));
+    check_capture(&mut host, 2);
 
     // A 12-bit fixture on a 10-bit surface.
     host.send(&show(3, "state-frame-a-pq-full-12", 0));
@@ -256,13 +291,14 @@ fn presents_fixtures_on_a_screen() {
         }
         other => panic!("unexpected {other:?}"),
     }
-    host.send(&show(4, "state-frame-b-pq-full-12", 0));
+    host.send(&marked(show(4, "state-frame-b-pq-full-12", 0)));
     let status = submitted(&mut host, 4, 2, 0);
     assert!(status.contains("FP16 scRGB swap chain"), "{status}");
     host.expect(&Event::Ready {
         frame: 4,
         delay_ms: 0,
     });
+    check_capture(&mut host, 4);
 
     host.send(&Request::Close {});
     host.expect(&Event::Surface {

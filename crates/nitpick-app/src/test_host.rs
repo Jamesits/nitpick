@@ -50,19 +50,17 @@ use std::thread;
 use cxx_qt_lib::QGuiApplication;
 use futures_util::stream;
 use nitpick_core::driver::DEFAULT_DELAY_MS;
-use nitpick_test_host::{Clock, Event, Exit, Fixtures, Hooks, LocalFuture, NoCapture, TestHost};
+use nitpick_test_host::{Clock, Event, Exit, Fixtures, Hooks, LocalFuture, TestHost};
 
 use crate::delay::{DelayTimer, QtTimer};
 use crate::display::{self, Backend, DeviceStates};
 use crate::gui_executor::{self, Post};
+use crate::pattern_capture;
 use crate::qrhi_driver::{BridgeWindow, QrhiDriver, Threads};
 use crate::submission;
 
 /// The command-line flag of this mode; the first argument.
 pub const FLAG: &str = "--test-host";
-
-/// Reason of every `capture` request.
-const NO_CAPTURE: &str = "no OS capture adapter is implemented for the QRhi host";
 
 type Job = Box<dyn FnOnce() + Send>;
 
@@ -178,7 +176,7 @@ pub fn main() -> ExitCode {
             screens: qrhi(),
             states: states.clone(),
         }),
-        capture: Box::new(NoCapture(NO_CAPTURE.into())),
+        capture: pattern_capture::adapter(),
         artifacts: None,
         fixtures: Rc::new(fixtures),
         delay_ms: DEFAULT_DELAY_MS,

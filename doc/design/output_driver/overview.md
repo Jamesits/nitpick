@@ -35,8 +35,9 @@ graph LR
 | `nitpick-display` | native device and capability enumeration, ICC assignment and restoration | `nitpick-core`, native OS bindings; no Qt, Tauri or Little CMS |
 | `nitpick-browser` | browser driver, PNG encoder, HTTP and WebSocket service | `nitpick-core`, Rust server and image libraries; no Qt or Tauri |
 | `nitpick-cli` | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, `nitpick-test-host`, a Rust executor; optional `nitpick-display`; no `nitpick-app` |
-| `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, `nitpick-display`, `nitpick-test-host`, Qt and its C++ bridge |
+| `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, `nitpick-display`, `nitpick-test-host`, `nitpick-capture` on Windows, Qt and its C++ bridge |
 | `nitpick-test-host` | [test-host protocol](testing.md#host-boundary): protocol types, fixture frames, host state machine | `nitpick-core`, `nitpick-fixtures`, `serde`, `futures`; no executor, GUI or server |
+| `nitpick-capture` | OS [capture adapters](testing.md#platform-capture-adapters) of the test hosts | `nitpick-test-host`; the `windows` crate on Windows; no Qt or executor |
 | `nitpick-webview` | optional local display process | Tauri; connects to the server by URL; no other workspace crate |
 | `nitpick-profile` | test support: the [profile adapter](testing.md#colour-library-boundary) | `lcms2-sys` with its bundled Little CMS; no other workspace crate except `nitpick-fixtures` for its tests |
 | `nitpick-compare` | test support: the [reference metric](testing.md#reference-metric) and the [patch check](testing.md#pass-criteria) | no dependencies; `nitpick-fixtures` and `half` for its tests; no `nitpick-core` (see [Technical decisions](testing.md#technical-decisions)) |

@@ -2421,12 +2421,15 @@ dependencies = [
  "dirs",
  "futures-channel",
  "futures-util",
+ "half",
+ "nitpick-capture",
  "nitpick-core",
  "nitpick-display",
  "nitpick-fixtures",
  "nitpick-test-host",
  "serde_json",
  "tempfile",
+ "windows",
 ]
 
 [[package]]
@@ -2444,6 +2447,19 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "zune-png",
+]
+
+[[package]]
+name = "nitpick-capture"
+version = "0.1.0"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "half",
+ "nitpick-core",
+ "nitpick-test-host",
+ "serde_json",
+ "windows",
 ]
 
 [[package]]

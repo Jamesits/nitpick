@@ -132,6 +132,12 @@ pub mod ffi {
         #[cxx_name = "closePatternWindow"]
         fn close_pattern_window();
 
+        /// `QWindow::winId()` of the open pattern window: the `HWND` on
+        /// Windows. For OS capture of the window.
+        #[namespace = "nitpick"]
+        #[cxx_name = "patternWindowHandle"]
+        fn pattern_window_handle() -> Result<u64>;
+
         /// Queues `pixels` as frame `frame` in the open window and returns:
         /// tightly packed rows in the swap chain format, `width × height`
         /// equal to the pattern area size. The window reports the frame

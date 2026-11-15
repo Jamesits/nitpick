@@ -12,6 +12,7 @@ mod hdr_metadata;
 // attributes on the bridge module itself.
 #[allow(clippy::unnecessary_box_returns)]
 mod launcher;
+pub mod pattern_capture;
 pub mod qrhi_driver;
 pub mod readback;
 mod session;

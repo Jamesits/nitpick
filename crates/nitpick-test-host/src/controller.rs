@@ -987,6 +987,7 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
             display: open.surface.display.to_string(),
             generation: open.generation,
             surface_size: [open.surface.size.0, open.surface.size.1],
+            surface: open.surface.description.clone(),
             mode: open.mode.clone(),
             frame: shown.frame,
             fixture: shown.fixture.clone(),

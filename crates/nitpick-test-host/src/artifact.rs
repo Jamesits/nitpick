@@ -55,6 +55,10 @@ pub struct RunRecord {
     pub display: String,
     pub generation: u64,
     pub surface_size: [usize; 2],
+    /// The surface description of `open`. The `QRhi` driver names the
+    /// native swap-chain format and colour space in it: the colour tag of
+    /// the submitted frames. The capture does not give this tag.
+    pub surface: String,
     /// From the query before `open`: HDR state and scale.
     pub mode: ModeReport,
     pub frame: u64,
