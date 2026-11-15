@@ -234,6 +234,11 @@ pub struct QrhiExpected {
     pub scrgb: [f64; 3],
     /// Packed word at 10 bits; `None` at 12 bits.
     pub r10g10b10a2: Option<u32>,
+    /// Largest absolute difference per component between a binary16 scRGB
+    /// capture and [`Self::scrgb`], from quantization alone. At 10 bits:
+    /// the farther binary16 neighbour of the ideal value. At 12 bits: the
+    /// farthest value of the FP16 neighbour search.
+    pub scrgb_bound: [f64; 3],
 }
 
 /// Browser CPU output.
@@ -245,6 +250,8 @@ pub struct BrowserExpected {
     /// PQ luminance of the stored samples; `None` for HLG.
     pub nits_2020: Option<[f64; 3]>,
     pub scrgb: Option<[f64; 3]>,
+    /// As [`QrhiExpected::scrgb_bound`] at 10 bits; `None` for HLG.
+    pub scrgb_bound: Option<[f64; 3]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

@@ -2464,12 +2464,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitpick-compare"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "nitpick-fixtures",
+]
+
+[[package]]
 name = "nitpick-core"
 version = "0.1.0"
 dependencies = [
  "font8x8",
  "half",
  "hex",
+ "nitpick-fixtures",
  "serde",
  "sha2 0.11.1",
 ]

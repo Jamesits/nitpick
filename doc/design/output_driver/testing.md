@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts), the frame marker, frame acceptance and region selection of [Timing and frame identity](#timing-and-frame-identity) exist with synthetic-capture tests. No host has a capture adapter or an artifact directory. Capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts), the frame marker, frame acceptance and region selection of [Timing and frame identity](#timing-and-frame-identity) exist with synthetic-capture tests. The [reference metric](#reference-metric) and the per-case limits of [Pass criteria](#pass-criteria) exist in `nitpick-compare` with unit tests; no runner uses them yet. No host has a capture adapter or an artifact directory. Capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -66,6 +66,8 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 | Error limit | exact bytes everywhere; perceptual error everywhere | Exact transport checks plus numeric and perceptual checks at later boundaries. |
 | Profile handling | custom ICC/MHC2 parser; Little CMS through a Rust binding | Little CMS for profile reading, MHC2 extraction and conventional ICC transforms. Use the library's existing profile support. The adapter also checks and decodes the raw `MHC2` tag, because the Little CMS reader does not check bounds; see [MHC2 profile adapter](#mhc2-profile-adapter). |
 | Device operations | native queries and setters in each output driver; separate device interface | [`DisplayDeviceControl`](../display_device.md) with native implementations in `nitpick-display`. Hosts and tests share capability enumeration, profile assignment, readback and restoration. |
+| Comparison code | module of `nitpick-test-host`; separate crate | The crate `nitpick-compare`, without a `nitpick-core` dependency. The reference cannot then share the conversion code that it checks. |
+| Comparison limits | derived at run time from the submitted values; frozen in the fixtures | Frozen in the fixtures by the generator. A run cannot change them, and a regression of the submitted values cannot widen them. |
 | Display model | ICC transform alone; explicit HDR model with library support | Explicit HDR model. Nitpick controls units, stage order, transfer functions and clipping; see [Colour library boundary](#colour-library-boundary). |
 | IDD dependency | required for unit tests; optional lab tool | Optional lab tool. Signing and HDR hardware must not block normal CI. |
 | Browser automation | screenshots as an HDR reference; protocol tests and qualified OS capture | Protocol tests on all hosts; HDR checks only on a qualified engine and OS. |
@@ -96,8 +98,8 @@ The output fixture files hold data only, for machine reading: no descriptions, l
 | `invalid.json` | invalid inputs and their error kinds |
 
 Expected results per palette entry:
-- `qrhi`: the codes as full-range PQ for every encoding: signal, linear BT.2020 cd/m², ideal scRGB before f16 rounding and, at 10 bits, the packed word. The FP16 neighbour search is not in the fixtures.
-- `browser`: 16-bit samples and clip state under [Code to PNG sample](browser.md#code-to-png-sample); PQ luminance and scRGB of the stored samples; none for HLG.
+- `qrhi`: the codes as full-range PQ for every encoding: signal, linear BT.2020 cd/m², ideal scRGB before f16 rounding, at 10 bits the packed word, and `scrgb_bound` (see [Pass criteria](#pass-criteria)). The result of the FP16 neighbour search is not in the fixtures; its range is in `scrgb_bound`.
+- `browser`: 16-bit samples and clip state under [Code to PNG sample](browser.md#code-to-png-sample); PQ luminance, scRGB and `scrgb_bound` of the stored samples; none for HLG.
 
 Each case also has MaxCLL and MaxFALL for both drivers, and the resolved metadata if it has a request. A browser HLG case gives the error `unsupported` for automatic light levels. State sequences use the error kind `any` where this design does not fix an `OutputError` variant (stale surface after resize, device loss).
 
@@ -338,7 +340,7 @@ The gate does not need the colour contract. A missing colour contract must make 
 
 **Deadline and heartbeat.** The deadline timer starts with the session; at the deadline the capture fails with the number of received frames and the last reason. With `heartbeat_ms`, the host presents the acknowledged frame again after each interval, with the heartbeat cell changed. It uses the same surface, format and metadata request. It sends no `submitted` event and does not change the readiness. With automatic light levels the driver computes them again for each heartbeat presentation, so `MaxFALL` can change; whether a capture with metadata checks must avoid this is an open question. A failed heartbeat presentation fails the capture. **Unverified:** that a heartbeat presentation makes WGC, ScreenCaptureKit or PipeWire deliver a new frame on each platform.
 
-**Region selection.** Surface pixel $(0, 0)$ is at the origin of the content rectangle; the fixture is at the top-left corner of the surface. The sample pixels of a palette entry are the fixture pixels whose neighbours within the inset (also diagonally) are in the fixture and have the same entry, outside the excluded rectangles (the cursor). Flat patches use an inset of 1 pixel, which skips 2×2 chroma blocks shared with a neighbour patch. One-pixel geometry uses an inset of 0, which samples every fixture pixel. `ErrorStats` gives the maximum and the median of per-sample errors (the mean of the two middle values for an even count) and rejects non-finite errors. The error metric is in [Reference metric](#reference-metric).
+**Region selection.** Surface pixel $(0, 0)$ is at the origin of the content rectangle; the fixture is at the top-left corner of the surface. The sample pixels of a palette entry are the fixture pixels whose neighbours within the inset (also diagonally) are in the fixture and have the same entry, outside the excluded rectangles (the cursor). Flat patches use an inset of 1 pixel, which skips 2×2 chroma blocks shared with a neighbour patch. One-pixel geometry uses an inset of 0, which samples every fixture pixel. The check of the samples is in [Pass criteria](#pass-criteria).
 
 ## Unit tests
 
@@ -393,15 +395,29 @@ Reject negative delays and verify that the Qt setting survives a restart. With H
 
 ### Reference metric
 
-Test the independent reference with analytical black/white cases, primary-matrix vectors and the worked example in [ITU-R BT.2124](https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.2124-0-201901-I!!PDF-E.pdf). Match the published example within its printed precision. Do not fit the implementation to one rounded result.
+The crate `nitpick-compare` has the metric (`itp.rs`) and its own transfer functions and primary matrices (`colour.rs`). It does not depend on `nitpick-core`.
 
-Convert both signals to display-referred linear BT.2020 RGB in cd/m². Apply the BT.2124 LMS matrix, PQ nonlinearity and ICtCp matrix. Then use:
+Convert both signals to display-referred linear BT.2020 RGB in cd/m² (`Nits2020`): from full-range PQ signals, scRGB (BT.709, 1.0 = 80 cd/m²), XYZ in cd/m², or HLG signals with an `HlgDisplay`. Apply the BT.2124 LMS matrix, PQ nonlinearity and ICtCp matrix. Then use:
 
 $$
 \Delta E_{ITP}=720\sqrt{(\Delta I)^2+\tfrac14(\Delta C_T)^2+(\Delta C_P)^2}.
 $$
 
-Keep negative RGB values through the primary conversion. Some valid wide-gamut colours have negative components. If the later LMS values fall outside the metric's supported domain, report an invalid metric and retain the component errors; do not silently clip to obtain a pass. HLG needs an explicit display peak, system gamma and viewing model before an absolute metric is valid.
+Rules:
+- Keep negative RGB values through the primary and LMS conversions. Some valid wide-gamut colours have negative components.
+- An LMS component below 0 has no PQ value. The metric is then invalid (`NegativeLms`), and the check retains the component errors. Nothing is clipped to obtain a pass.
+- Each step rejects a non-finite value.
+- **Deviation from ST 2084:** the PQ inverse EOTF of the metric continues above 10000 cd/m² without clipping. A capture overshoot keeps its size, and binary64 matrix rounding at peak white does not make the metric invalid.
+- HLG needs an explicit display. `HlgDisplay` holds the peak $L_W$, the black level $L_B$ and the system gamma $\gamma$ of the BT.2100 reference EOTF, with the black lift $\beta = \sqrt{3 (L_B / L_W)^{1/\gamma}}$. It has no default. BT.2124 Annex 2 uses $L_W = 1000$ cd/m², $\gamma = 1.2$ and $L_B = 0$; which display a browser HLG comparison uses is an open question in the [output driver plan](../../plan/output_driver.md).
+
+Tests (`colour_tests.rs`, `itp_tests.rs`) compare at the printed precision only. They do not fit the implementation to one rounded result:
+- PQ against the scalar fixture tables.
+- Primary vectors: BT.709 to BT.2020 against BT.2087 (4 decimals), XYZ to BT.2020 against BT.2124 Annex 2 (15 decimals), and the scRGB and BT.2020 values of every fixture entry.
+- Analytical cases: neutral colours have $C_T = C_P = 0$ and $I$ equal to the PQ signal, so one grey code step is $720 / (2^n - 1)$. Black against peak white is $720\,(1 - c_1^{m_2})$.
+- HLG: peak, the scene grey 1/12, the BT.2408 reference white (signal 0.75 is 203 cd/m² at 1000 cd/m²), and the black lift that gives $L_B$.
+- Domain: negative LMS, signals outside 0 to 1, non-finite values.
+
+**Errors in the worked example of [ITU-R BT.2124](https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.2124-0-201901-I!!PDF-E.pdf)-0 Annex 4.** The example truncates some printed values and rounds others. It applies the EOTF to the normalized codes truncated to 4 decimals: red is 8.753 cd/m², not 8.758 as from 296/1023. The printed $I$ of the expected colour, 0.3554, does not follow from the steps: the exact codes, the truncated codes and the printed linear values all give 0.3557. Thus the published $\Delta E_{ITP} = 2.363$ is step 5 on the printed ITP values; the steps give 2.282. The test checks each step from the printed values of the step before and pins these differences. A one-time check with the colour-science 0.4.7 Python package also gave $I = 0.35572$ for the exact codes.
 
 ## GPU and compositor tests
 
@@ -629,7 +645,27 @@ On Linux, an optional lab adapter can record compositor colour state and DRM ato
 | Wire | Within ±1 code at the actual wire depth for qualified unmarked levels. Marked FP16 levels use recorded per-case limits; report every exception. Verify range and subsampling before comparison. |
 | Light | Compare patches below the display peak to their quantized reference. Use a stated luminance/chromaticity uncertainty budget for the probe, repeatability and display target. Above-peak tone mapping is characterized separately. |
 
-FP16 spacing changes with magnitude. Derive a per-case numerical bound from representable neighbours and the conversion matrices. Include nitpick's deliberate neighbour search once, before capture error. Freeze limits in fixtures after review; do not widen them automatically when a test fails. If quantization alone exceeds the perceptual target, report that limit explicitly. It is not an ordinary colour pass.
+FP16 spacing changes with magnitude. Derive a per-case numerical bound from representable neighbours. Include nitpick's deliberate neighbour search once, before capture error. Freeze limits in fixtures after review; do not widen them automatically when a test fails. If quantization alone exceeds the perceptual target, report that limit explicitly. It is not an ordinary colour pass.
+
+**Per-case bounds.** The generator stores `scrgb_bound` for each palette entry, for `qrhi` and for browser PQ. It is the largest absolute difference per scRGB component between a binary16 scRGB capture and the ideal `scrgb`, from quantization alone. The bound is in the space of the capture, so no matrix applies to it; the matrices enter only the ideal value.
+- `qrhi` at 10 bits (HDR10 swap chain) and `browser`: the farther of the two binary16 values next to the ideal value, or 0 if the ideal value is a binary16 value. The capture can round to either neighbour.
+- `qrhi` at 12 bits (FP16 swap chain): the farthest binary16 value within 2 steps of the nearest binary16 value (ties to even). This is the range of the neighbour search. The submitted value is a binary16 value, so the capture adds no second rounding: the search error counts once. This is also a bound for a value that needs no search.
+- Each bound also covers the binary64 rounding of the stored ideal value, and is rounded up to binary64. The generator uses exact rationals from the 50-digit luminance. It stops if a value is within $2^{-40}$ (relative) of a binary16 value or, at 12 bits, of a rounding midpoint, because it cannot decide the side.
+
+**Unverified** until capture qualification: the compositor and the capture keep binary16 swap-chain values unchanged; the browser keeps more precision than binary16 from the PNG decode to the capture. A capture with other storage or another scale needs other bounds; see the [output driver plan](../../plan/output_driver.md).
+
+`nitpick_compare::check_patch` checks the samples of one patch against an `Expectation`: the space (scRGB or BT.2020 cd/m²), the expected value and the bound. The expectation is read-only, and the report includes it unchanged.
+- No samples: `unavailable`. A non-finite sample: `fail`.
+- Component check: the largest absolute difference of each component must not exceed its bound. The report keeps the signed difference of largest magnitude, and the maximum and median of the absolute differences (`ErrorStats`; the median of an even count is the mean of the two middle values).
+- Perceptual check: the largest $\Delta E_{ITP}$ must not exceed $\max(1, q)$, with $q$ the $\Delta E_{ITP}$ of quantization alone: the largest value at the 8 corners of the bound box. **Approximation:** for a small box the metric is close to a norm, whose maximum on a box is at a corner; this is not a proof. If $q > 1$, the report attaches $q$ as the precision limit, and a pass is not an ordinary colour pass. The limit does not change the component check.
+- If a sample or a corner of the box is outside the metric domain, only the component check applies, and the report gives the reason.
+- Because the limit is at least $q$, the perceptual check adds a failure only for a sample outside the bound box when the bounds come from quantization.
+
+For QRhi FP16, the error from the submitted values uses an expectation with the submitted binary16 values and bound 0. The error from the ideal colour uses the fixture values.
+
+Fixture values: $q \le 1$ wherever it is defined. The largest $q$ is 0.55 at 12 bits (`mixed-small-channel-pq-full-12`, codes 3276, 64, 0) and 0.21 at 10 bits and in the browser. At 19 entries of 12-bit cases $q$ is undefined, because the search range reaches below 0 next to black.
+
+Tests: `check_tests.rs` derives each stored bound again from binary16 neighbours, so a bound widened by hand fails. At 10 bits, a capture at the farther neighbour passes and one step beyond fails. The other tests cover the check rules above. `output_tests.rs` in `nitpick-core` checks that the production FP16 search result of each 12-bit entry is within its stored bound.
 
 Each check returns `pass`, `fail` or `unavailable` with a reason. A documented expected precision limit is attached to that check, not used to suppress other failures. An optional lab lane can be unavailable. A required runner losing HDR, its capture contract or its device must fail qualification. Never count skipped HDR checks as HDR coverage.
 

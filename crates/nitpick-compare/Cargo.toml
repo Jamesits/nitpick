@@ -1,0 +1,19 @@
+[package]
+name = "nitpick-compare"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Independent reference metric and fixed limits for comparing output samples"
+publish = false
+
+# No dependency on `nitpick-core`: the reference must not share the
+# conversion code that it checks.
+[dependencies]
+
+[dev-dependencies]
+half = "2.7.1"
+nitpick-fixtures = { path = "../nitpick-fixtures" }
+
+[lints]
+workspace = true

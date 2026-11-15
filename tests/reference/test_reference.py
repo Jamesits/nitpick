@@ -75,3 +75,60 @@ def test_code_940_light_levels():
 
 def test_r10g10b10a2_layout():
     assert ref.r10g10b10a2((1, 2, 3)) == 0xC000_0000 | 3 << 20 | 2 << 10 | 1
+
+
+def test_f16_bracket_and_nearest():
+    one_step = Q(1, 1024)
+    assert ref.f16_bracket(Q(1)) == (1, 1)
+    assert ref.f16_bracket(1 + one_step / 3) == (1, 1 + one_step)
+    assert ref.f16_bracket(-(1 + one_step / 3)) == (-1 - one_step, -1)
+    # Subnormal spacing below 2^-14.
+    assert ref.f16_bracket(Q(3, 2**25)) == (Q(1, 2**24), Q(2, 2**24))
+    # Ties go to the even significand, also across a binade.
+    assert ref.f16_nearest(1 + one_step / 2) == 1
+    assert ref.f16_nearest(1 + 3 * one_step / 2) == 1 + 2 * one_step
+    assert ref.f16_nearest(2 - one_step / 4) == 2
+    assert ref.f16_nearest(Q(65504)) == 65504
+    with pytest.raises(ValueError):
+        ref.f16_bracket(Q(65505))
+
+
+def test_f16_steps_cross_zero_and_binades():
+    tiny = Q(1, 2**24)
+    assert ref.f16_step(Q(0), 1) == tiny
+    assert ref.f16_step(Q(0), -2) == -2 * tiny
+    assert ref.f16_step(tiny, -2) == -tiny
+    assert ref.f16_step(Q(1), -1) == 1 - Q(1, 2048)
+    assert ref.f16_step(Q(1), 1) == 1 + Q(1, 1024)
+
+
+def test_capture_bound_is_the_farther_neighbour():
+    # 80 cd/m² neutral is scRGB 1.0, a binary16 value: no capture error.
+    assert ref.scrgb_bound([80, 80, 80], "capture") == [0.0, 0.0, 0.0]
+    # Black and peak white are exact too.
+    assert ref.scrgb_bound([0, 0, 0], "capture") == [0.0, 0.0, 0.0]
+    assert ref.scrgb_bound([10000] * 3, "capture") == [0.0, 0.0, 0.0]
+    # scRGB 1 + 1/3 step: the far neighbour is 2/3 step away.
+    nits = 80 * (1 + Q(1, 3072))
+    b = ref.scrgb_bound([nits] * 3, "capture")[0]
+    assert Q(2, 3072) <= Q(b) <= Q(2, 3072) * (1 + Q(1, 2**40))
+
+
+def test_fp16_bound_counts_the_search_once():
+    # Nearest binary16 is 1; the search reaches 1 + 2 steps above and
+    # 1 - 2 half steps below. No second rounding term is added.
+    nits = 80 * (1 + Q(1, 3072))
+    b = Q(ref.scrgb_bound([nits] * 3, "fp16")[0])
+    want = 2 * Q(1, 1024) - Q(1, 3072)
+    assert want <= b <= want * (1 + Q(1, 2**40))
+    # An exact value still allows the search range around it.
+    assert ref.scrgb_bound([80, 80, 80], "fp16") == [2 / 1024] * 3
+    assert ref.scrgb_bound([0, 0, 0], "fp16") == [2 / 2**24] * 3
+
+
+def test_fp16_bound_rejects_a_value_at_a_rounding_midpoint():
+    nits = 80 * (1 + Q(1, 2048))
+    with pytest.raises(ValueError):
+        ref.scrgb_bound([nits] * 3, "fp16")
+    # The capture bound does not depend on the rounding direction.
+    ref.scrgb_bound([nits] * 3, "capture")

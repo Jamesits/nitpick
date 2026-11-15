@@ -717,3 +717,37 @@ fn bt2111_levels_have_reference_residuals() {
     }
     assert_eq!(seen.len(), INEXACT_LEVELS.len());
 }
+
+/// The FP16 search result of each 12-bit fixture entry is within the
+/// frozen bound of the fixture, measured from the ideal value.
+#[test]
+fn scrgb_search_stays_within_the_fixture_bounds() {
+    let mut entries = 0;
+    for g in nitpick_fixtures::CASE_GROUPS {
+        for case in nitpick_fixtures::group(g).unwrap().cases {
+            if case.input.format.depth != 12 {
+                continue;
+            }
+            for (entry, want) in case.input.palette.iter().zip(&case.expected.palette) {
+                let [r, g, b] = entry.codes.map(|c| u16::try_from(c).unwrap());
+                let got = scrgb_from_codes(Rgb::new(r, g, b), BitDepth::Twelve);
+                let q = &want.qrhi;
+                for (c, (&bits, (&ideal, &bound))) in got
+                    .iter()
+                    .zip(q.scrgb.iter().zip(&q.scrgb_bound))
+                    .enumerate()
+                {
+                    let error = f64::from(f16::from_bits(bits)) - ideal;
+                    assert!(
+                        error.abs() <= bound,
+                        "{} codes {:?} component {c}: error {error}",
+                        case.input.id,
+                        entry.codes
+                    );
+                }
+                entries += 1;
+            }
+        }
+    }
+    assert!(entries > 0);
+}

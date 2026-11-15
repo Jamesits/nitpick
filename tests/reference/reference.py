@@ -6,6 +6,8 @@ functions use mpmath at `DIGITS` significant digits. Results are stored as
 the nearest IEEE 754 binary64 value.
 """
 
+import math
+import struct
 from fractions import Fraction as Q
 
 import mpmath
@@ -154,6 +156,129 @@ def scrgb_from_nits_2020(nits):
     """Linear BT.2020 cd/m² to scRGB: BT.709 primaries, 1.0 = 80 cd/m²."""
     m = tuple(tuple(mpf(c) for c in row) for row in M_2020_TO_709)
     return tuple(v / SCRGB_WHITE_NITS for v in mat_vec(m, tuple(mpf(n) for n in nits)))
+
+
+def exact(v):
+    """The exact rational value of an int, Fraction or mpf."""
+    if isinstance(v, Q):
+        return v
+    if isinstance(v, int):
+        return Q(v)
+    man, exp = mpmath.mpf(v).man_exp
+    return Q(man) * Q(2) ** exp
+
+
+def scrgb_exact(nits):
+    """`scrgb_from_nits_2020` with the exact matrix. Only the transfer function
+    of `nits` is approximate, so a representable value stays exact."""
+    lin = [exact(n) for n in nits]
+    return tuple(v / SCRGB_WHITE_NITS for v in mat_vec(M_2020_TO_709, lin))
+
+
+# IEEE 754 binary16: 10 fraction bits, normal exponents from -14, largest
+# finite value 65504.
+F16_MAX = Q(65504)
+
+
+def f16_spacing(magnitude):
+    """Distance between the binary16 values in the binade of `magnitude` >= 0."""
+    if magnitude < Q(1, 2**14):
+        return Q(1, 2**24)
+    e = -14
+    while Q(2) ** (e + 1) <= magnitude:
+        e += 1
+    return Q(2) ** (e - 10)
+
+
+def f16_bracket(v):
+    """The binary16 values `lo <= v <= hi` next to `v`; equal if `v` is one."""
+    a = abs(v)
+    if a > F16_MAX:
+        raise ValueError(f"{float(v)} is outside the binary16 range")
+    step = f16_spacing(a)
+    lo = (a // step) * step
+    hi = lo if lo == a else lo + step
+    return (lo, hi) if v >= 0 else (-hi, -lo)
+
+
+def f16_nearest(v):
+    """Round to nearest binary16, ties to even, as the `half` crate does."""
+    lo, hi = f16_bracket(v)
+    if lo == hi:
+        return lo
+    if v - lo != hi - v:
+        return lo if v - lo < hi - v else hi
+    step = f16_spacing(min(abs(lo), abs(hi)))
+    return lo if (abs(lo) / step) % 2 == 0 else hi
+
+
+def f16_step(v, k):
+    """The binary16 value `k` steps from the binary16 value `v`, in value order,
+    as in the FP16 neighbour search of the QRhi driver; +0 and -0 are one value."""
+    (bits,) = struct.unpack("<H", struct.pack("<e", float(v)))
+    magnitude = bits & 0x7FFF
+    ordered = -magnitude if bits & 0x8000 else magnitude
+    ordered += k
+    out = (0x8000 | -ordered) if ordered < 0 else ordered
+    if out & 0x7FFF > 0x7BFF:
+        raise ValueError("step past the largest finite binary16 value")
+    (f,) = struct.unpack("<e", struct.pack("<H", out))
+    return Q(f)
+
+
+# The FP16 neighbour search of the QRhi driver: the result is within this many
+# binary16 steps of the nearest binary16 value, per component.
+FP16_SEARCH_STEPS = 2
+
+# A value this close (relative) to a binary16 value or rounding midpoint
+# makes the generator stop: 50-digit arithmetic, or a binary64 producer,
+# cannot decide its side.
+UNDECIDED = Q(1, 2**40)
+
+
+def _decided(v, points, *, equal_ok):
+    for p in points:
+        if (p != v or not equal_ok) and abs(v - p) <= abs(v) * UNDECIDED:
+            raise ValueError(f"{float(v)} is too close to {float(p)} to decide its rounding")
+
+
+def _round_up_f64(v):
+    f = float(v)
+    return f if Q(f) >= v else math.nextafter(f, math.inf)
+
+
+def scrgb_bound(nits, path):
+    """Largest absolute difference per scRGB component between a binary16
+    scRGB capture and the ideal scRGB of the linear BT.2020 `nits`, from
+    quantization alone.
+
+    `path`:
+    - "capture": the capture rounds the ideal value to binary16; either
+      neighbour is accepted.
+    - "fp16": the submitted value is within `FP16_SEARCH_STEPS` of the
+      nearest binary16 value. It is a binary16 value, so the capture adds no
+      second rounding: the search error is counted once.
+
+    The result also covers the binary64 rounding of the stored ideal value,
+    and is rounded up to binary64.
+    """
+    out = []
+    for c in scrgb_exact(nits):
+        lo, hi = f16_bracket(c)
+        _decided(c, (lo, hi), equal_ok=True)
+        if path == "capture":
+            b = max(c - lo, hi - c)
+        elif path == "fp16":
+            if lo != hi:
+                _decided(c, ((lo + hi) / 2,), equal_ok=False)
+            base = f16_nearest(c)
+            b = max(abs(f16_step(base, k) - c) for k in range(-FP16_SEARCH_STEPS, FP16_SEARCH_STEPS + 1))
+        else:
+            raise ValueError(path)
+        # Rounding is monotonic, so a binary64 difference of the stored value
+        # never exceeds the rounded-up exact bound.
+        out.append(_round_up_f64(b + abs(c - Q(float(c)))))
+    return out
 
 
 def r10g10b10a2(codes):

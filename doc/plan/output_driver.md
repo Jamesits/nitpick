@@ -117,15 +117,6 @@ Open questions:
 - At `quit`, the host waits for each queued write without a deadline, so a write that does not end blocks `stopped`. Must the wait have a deadline, and must the host then report `error` with kind `artifact` for each write that did not end?
 - Raw API metadata is a JSON object plus named binary blobs. How must each adapter convert native metadata (Core Foundation dictionaries of pixel-buffer attachments, PipeWire SPA pods, WinRT properties) without loss? Record the rule in [Platform capture adapters](../design/output_driver/testing.md#platform-capture-adapters).
 
-### 36. Add comparison metrics and fixed limits
-
-Requires: 34.
-
-TODO:
-
-- Implement component errors and the independent [reference metric](../design/output_driver/testing.md#reference-metric). Store per-case numeric bounds and the proposed perceptual target from [Pass criteria](../design/output_driver/testing.md#pass-criteria).
-- Verify analytical cases, primary vectors and the BT.2124 worked example. Reject nonfinite values and invalid metric domains. Preserve signed values; require an explicit HLG viewing model. Check that FP16 search error is counted once and that a failed case cannot widen its limits.
-
 ### 37. Verify QRhi offscreen draw readback
 
 Requires: 9, 10, 34.
@@ -337,6 +328,23 @@ TODO:
 - Run [Capture reference and qualification](../design/output_driver/testing.md#capture-reference-and-qualification) per OS, backend and browser engine. Include black, HDR neutrals, wide-gamut colours, geometry and a separate tagged sRGB control. Save accepted frame timestamps and encoded browser PNGs.
 - Compare QRhi against submitted values and ideal colour separately. On Windows, compare calibration profiles with equal display metadata and restore settings. Do not use MHC2 as a portable calibration test. Record capture conversion and colour scale; unknown contracts must not pass absolute HDR checks. Windows SDR-white behaviour and Linux scRGB scale need measured results.
 - Record whether calibration changes capture. Leave the calibration boundary unverified until the IDD or physical comparison is available. Capture can change composition; the physical check must also run without capture.
+
+### 64. Decide the comparison limits outside the binary16 scRGB capture
+
+Requires: the applicable adapter of 39, 40 or 41 for the first TODO, and 51 for the second.
+
+The metric, the check and the per-case bounds are in `nitpick-compare` and the output fixtures; see [Reference metric](../design/output_driver/testing.md#reference-metric) and [Pass criteria](../design/output_driver/testing.md#pass-criteria). The fixtures have bounds only for a binary16 scRGB capture of the ideal values.
+
+TODO:
+
+- With each capture adapter (39, 40, 41), derive and freeze the bounds of its capture storage and scale in the generator, for example 10-bit PQ, P010 or 8-bit samples. Until then, a comparison of such a capture has no limits and must be `unavailable`.
+- At capture qualification (51), check the two assumptions of the bounds: the compositor and the capture keep binary16 swap-chain values unchanged, and the browser keeps more precision than binary16 from the PNG decode to the capture. If a check fails, change the bound in the generator after review, not in a test.
+
+Open questions:
+
+- Which HLG display (peak, black level, system gamma) does a browser HLG comparison use? `HlgDisplay` has no default. BT.2124 Annex 2 uses 1000 cd/m², $\gamma = 1.2$ and black 0, but a browser does not state its HLG rendering.
+- With bounds from quantization, the perceptual check adds a failure only for a sample outside the bound box. Is the perceptual target then needed as a separate criterion of a capture check, or only for looser bounds (model and light comparisons)?
+- Next to black, 19 entries of 12-bit fixtures have no quantization $\Delta E_{ITP}$, because the FP16 search range reaches below 0 and the metric has no value there. Only the component check applies to them. Is this sufficient?
 
 ### 52. Model IDD callback state without an installed driver
 

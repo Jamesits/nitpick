@@ -119,6 +119,12 @@ def expect(spec):
     for entry in spec["palette"]:
         q, qn = ref.qrhi_expect(entry["codes"], enc, depth)
         b, bn = ref.browser_expect(entry["codes"], enc, depth)
+        # 10 bits use the HDR10 swap chain, 12 bits the FP16 swap chain.
+        q["scrgb_bound"] = ref.scrgb_bound(qn, "capture" if depth == 10 else "fp16")
+        b["scrgb_bound"] = ref.scrgb_bound(bn, "capture") if bn is not None else None
+        _check_stored(q["scrgb"], qn)
+        if bn is not None:
+            _check_stored(b["scrgb"], bn)
         palette.append({"qrhi": q, "browser": b})
         q_nits.append(qn)
         b_nits.append(bn)
@@ -135,6 +141,13 @@ def expect(spec):
         if spec.get("metadata") is not None
         else None,
     }
+
+
+def _check_stored(stored, nits):
+    """The bound derives from the exact-matrix scRGB; it must round to the stored value."""
+    want = [float(v) for v in ref.scrgb_exact(nits)]
+    if stored != want:
+        raise AssertionError(f"stored scRGB {stored} differs from {want}")
 
 
 def requires(spec):
