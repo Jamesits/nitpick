@@ -1,0 +1,30 @@
+[package]
+name = "nitpick-test-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "JSON-lines test-host protocol shared by the nitpick hosts"
+publish = false
+
+[features]
+# The shared host contract with a mock driver, for the executor tests of
+# each host.
+contract = []
+
+# No executor, GUI or server: each host polls the controller with its own
+# executor. The command-line host builds this crate without a window system.
+[dependencies]
+futures-channel = "0.3.34"
+futures-core = "0.3.34"
+futures-util = { version = "0.3.34", default-features = false }
+nitpick-core = { path = "../nitpick-core" }
+nitpick-fixtures = { path = "../nitpick-fixtures" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt", "time"] }
+
+[lints]
+workspace = true

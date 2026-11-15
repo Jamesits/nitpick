@@ -313,6 +313,7 @@ cargo run -p nitpick-cli -- --host 192.168.1.10 --port 8080 --pattern bt2111 --e
 | `--encoding` | `pq-narrow`, `pq-full` or `hlg-narrow` | `pq-narrow` |
 | `--depth` | `10` or `12` | `10` |
 | `--delay` | [measurement delay](overview.md#measurement-delay) in ms after the client acknowledgement; an integer >= 0 | `1000` |
+| `--test-host` | read [test-host protocol](testing.md#host-boundary) requests in place of console commands; `--pattern`, `--encoding` and `--depth` have no effect | off |
 
 The host prints one event per line: `url:`, `pairing code:`, `client:` (connected, authenticated, ready with the name, size and mode, viewport changed, disconnected), `output:` and `warning:` (the [output limits](overview.md#interface) before each frame), `surface:`, `status:` and `error:`. After the acknowledgement, `status: waiting for measurement delay: N ms.` and then `status: ready after delay: N ms.` follow, each with the driver status and its warnings. With a zero delay, only the ready line follows. It reads one command per stdin line:
 
@@ -326,7 +327,7 @@ The host prints one event per line: `url:`, `pairing code:`, `client:` (connecte
 | `close` | cancel the pending frame and close the surface |
 | `help`, `quit` | list the commands; close the surface and stop the service |
 
-A viewport change of the shown client cancels the pending frame or delay; the host shows the pattern again at the next `Ready`. Each delay cancellation in [Measurement delay](overview.md#measurement-delay) prints `status: measurement delay cancelled`. A disconnect during presentation prints `error: presentation failed: display disconnected` or `status: presentation cancelled`; the order of the driver reply and the disconnect event in the host is not fixed. The end of stdin is the same as `quit`. The exit status is 0 after `quit`, 1 if the service stopped with an error, and 2 if the service or executor cannot start.
+A viewport change of the shown client ends the pending frame or delay; the host shows the pattern again at the next `Ready`. Each delay cancellation in [Measurement delay](overview.md#measurement-delay) prints `status: measurement delay cancelled`. A disconnect during presentation prints `error: presentation failed: display disconnected`. A viewport change during presentation prints `error: presentation failed: platform error: the browser viewport changed; open the surface again`. The host prints these lines also if it handles the service event before the driver reply; see [Asynchronous presentation](overview.md#asynchronous-presentation). The end of stdin is the same as `quit`. The exit status is 0 after `quit`, 1 if the service stopped with an error, and 2 if the service or executor cannot start.
 
 Headless use can use the random code printed in the console. Automated tests can configure the server and client with the same fixed string. See [Authentication](#authentication). Close the current client before connecting a different client or selecting a different screen.
 
@@ -347,8 +348,10 @@ Command-line process tests (`nitpick-cli`, `tests/browser_session.rs`) start the
 - replacement before `applied`: the old frame gives `404`, and a late `applied` gives no readiness;
 - replacement after readiness with a different pattern, and `quit`: the client gets `close`, then the server ends the connection, and the exit status is 0;
 - the 10 s acknowledgement timeout, a late `applied` after it, and a delay longer than the timeout;
-- a disconnect during presentation and during the delay, a new display ID after reconnect, and the end of stdin;
+- a disconnect during presentation (one error line, not a cancellation) and during the delay, a new display ID after reconnect, and the end of stdin;
 - a viewport change during the delay: the host cancels the delay and shows the pattern again at the new size.
+
+The test-host process tests (`tests/test_host.rs`) use the same mock page; see [Shared host contract](testing.md#shared-host-contract).
 
 `tests/dependencies.rs` runs `cargo tree` for the host target. It fails if the normal or build dependencies of `nitpick-cli` contain `nitpick-app`, `nitpick-display`, `nitpick-webview`, or a Qt, Tauri, webview, GUI toolkit or window-system package. Results: all pass on Windows 11 in a desktop session. The Windows executable imports no `user32.dll` or `gdi32.dll`. **Not verified:** a run on Linux or macOS without a display server or a window session.
 

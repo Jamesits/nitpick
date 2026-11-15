@@ -486,12 +486,14 @@ async fn handles_console_and_events_while_pending() {
 }
 
 #[tokio::test]
-async fn viewport_change_reopens_at_the_new_size() {
+async fn viewport_change_fails_the_presentation_and_reopens() {
     let (_, h) = session(shared((1280, 720)), async |h| {
         h.show().await;
         h.log.borrow_mut().displays = vec![client((1920, 1080))];
         h.event(ServiceEvent::Client(ClientState::ViewportChanged(id())));
-        h.expect("status: presentation cancelled").await;
+        h.expect("error: presentation failed: platform error: the browser viewport changed")
+            .await;
+        assert!(!h.saw("status: presentation cancelled"));
         assert_eq!(h.log.borrow().live, 0);
         h.clear_calls();
         h.ready();
@@ -513,14 +515,16 @@ async fn viewport_change_reopens_at_the_new_size() {
 }
 
 #[tokio::test]
-async fn disconnect_cancels_and_closes() {
+async fn disconnect_fails_the_presentation_and_closes() {
     session(shared((1280, 720)), async |h| {
         h.show().await;
         h.event(ServiceEvent::Client(ClientState::Disconnected(
             "gone".into(),
         )));
         h.expect("client: disconnected: gone").await;
-        h.expect("status: presentation cancelled").await;
+        h.expect("error: presentation failed: display disconnected")
+            .await;
+        assert!(!h.saw("status: presentation cancelled"));
         h.until(|log| log.calls.last().is_some_and(|c| c == "close mock:client-1"))
             .await;
         h.type_line("show");

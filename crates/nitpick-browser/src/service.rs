@@ -18,9 +18,10 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use nitpick_core::driver::DisplayId;
+use nitpick_core::driver::{DisplayId, OutputError};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::client::VIEWPORT_CHANGED;
 use crate::protocol::MAX_CLIENT_MESSAGE;
 use crate::session::{Incoming, Pairing, ReserveError, SessionHub, Transport, run_session};
 
@@ -73,6 +74,22 @@ pub enum ClientState {
     ViewportChanged(DisplayId),
     /// The session closed; the reason is for the status line.
     Disconnected(String),
+}
+
+impl ClientState {
+    /// The error that this change gives a pending `present` of the client.
+    /// The session sends that result before the event, but a host can
+    /// handle the event first; a host that ends the pending frame on the
+    /// event reports this error, so the result does not depend on the
+    /// order. `None`: the change does not end a pending frame.
+    #[must_use]
+    pub fn presentation_error(&self) -> Option<OutputError> {
+        match self {
+            Self::ViewportChanged(_) => Some(OutputError::Platform(VIEWPORT_CHANGED.into())),
+            Self::Disconnected(_) => Some(OutputError::Disconnected),
+            Self::Connected | Self::Authenticated | Self::Ready(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

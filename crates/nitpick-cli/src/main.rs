@@ -5,6 +5,7 @@
 
 mod command;
 mod host;
+mod test_host;
 
 use std::cell::RefCell;
 use std::io::BufRead;
@@ -17,6 +18,7 @@ use nitpick_browser::{BindHost, BrowserDriver, BrowserService, ServiceConfig};
 use nitpick_core::driver::DEFAULT_DELAY_MS;
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, Encoding, Format};
+use nitpick_test_host::Fixtures;
 use tokio::sync::mpsc;
 
 use crate::host::{Exit, Settings, Stdout};
@@ -49,6 +51,11 @@ struct Args {
     /// Measurement delay after the driver acknowledgement, in ms.
     #[arg(long, default_value_t = DEFAULT_DELAY_MS, value_parser = command::parse_delay)]
     delay: u32,
+    /// Read test-host protocol requests (one JSON object per line) in
+    /// place of console commands, and print protocol events. `--delay` is
+    /// the default delay of `show`.
+    #[arg(long)]
+    test_host: bool,
 }
 
 fn main() -> ExitCode {
@@ -63,6 +70,18 @@ fn main() -> ExitCode {
         format: Format::new(args.encoding, args.depth),
         delay_ms: args.delay,
     };
+    // Before the service starts, so that a missing file fails early.
+    let fixtures = if args.test_host {
+        match Fixtures::load() {
+            Ok(fixtures) => Some(fixtures),
+            Err(e) => {
+                eprintln!("nitpick-cli: cannot read the output fixtures: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
     let (service, mut events) = match BrowserService::start(&config) {
         Ok(started) => started,
         Err(e) => {
@@ -70,16 +89,6 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-
-    // The thread ends, and drops the sender, when stdin closes.
-    let (console_tx, mut console) = mpsc::unbounded_channel();
-    thread::spawn(move || {
-        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-            if console_tx.send(line).is_err() {
-                return;
-            }
-        }
-    });
 
     // The host executor; the service has its own runtime thread.
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -92,20 +101,46 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let driver = RefCell::new(BrowserDriver::new(&service));
-    let exit = runtime.block_on(host::run(
-        &driver,
-        BrowserDriver::new(&service),
-        &mut events,
-        &mut console,
-        settings,
-        Stdout,
-    ));
+    let exit = if let Some(fixtures) = fixtures {
+        let (lines_tx, lines) = futures_channel::mpsc::unbounded();
+        read_stdin(move |line| lines_tx.unbounded_send(line).is_ok());
+        runtime.block_on(test_host::run(
+            &service,
+            events,
+            lines,
+            fixtures,
+            settings.delay_ms,
+        ))
+    } else {
+        let (console_tx, mut console) = mpsc::unbounded_channel();
+        read_stdin(move |line| console_tx.send(line).is_ok());
+        let driver = RefCell::new(BrowserDriver::new(&service));
+        runtime.block_on(host::run(
+            &driver,
+            BrowserDriver::new(&service),
+            &mut events,
+            &mut console,
+            settings,
+            Stdout,
+        ))
+    };
     service.shutdown();
     match exit {
         Exit::Quit | Exit::Stopped(None) => ExitCode::SUCCESS,
         Exit::Stopped(Some(_)) => ExitCode::FAILURE,
     }
+}
+
+/// Passes each stdin line to `send` on a thread, until `send` fails. The
+/// thread ends, and drops `send`, when stdin closes.
+fn read_stdin(send: impl Fn(String) -> bool + Send + 'static) {
+    thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if !send(line) {
+                return;
+            }
+        }
+    });
 }
 
 #[cfg(test)]

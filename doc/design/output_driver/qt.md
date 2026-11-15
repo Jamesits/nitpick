@@ -144,6 +144,14 @@ The session keeps the driver in `Rc<RefCell<…>>`. The task holds the driver bo
 
 The unit tests of `qrhi_driver.rs` and `session.rs` use a simulated event loop with controlled workers. The real Qt event loop was checked on Windows only, see [Running launcher checks](#running-launcher-checks). **Unverified:** that Qt timers and controls stay active during the device read, conversion and submission on macOS and Linux.
 
+### Test host
+
+`nitpick --test-host` runs the [test-host protocol](testing.md#host-boundary) without QML. `test_host.rs` makes a `QGuiApplication` and three `QrhiDriver` values on the shared device cache. The first opens and presents. The second answers `displays` and `query` while a presentation borrows the first. The third lists the screen identities for `refresh`. The state machine runs as one `gui_executor.rs` task. The test host has no `QObject` for `CxxQtThread::queue`, so it posts task steps with `QMetaObject::invokeMethod` on the application object (`cpp/test_host.cpp`). After `stopped`, it ends the event loop. The `submission.rs` close count gives a pattern window that closes outside the host, as in the launcher.
+
+Counter-intuitive:
+- On Windows, the test host sets `QT_D3D_NO_VBLANK_THREAD=1` through `qputenv`, unless the variable is set. Without it, Qt 6.12 sent no `UpdateRequest` to the pattern window when no Qt Quick window existed, and each frame timed out after 10 s. With the variable, `requestUpdate` uses its timer. `std::env::set_var` is not sufficient: Qt reads the C runtime copy of the environment. **Unverified:** the cause, and whether the launcher depends on its Qt Quick window for its update requests.
+- `nitpick-app` is a library and a binary. The build script links the generated C++ into every target, and that C++ calls the Rust side of the bridges. An integration test gets these Rust symbols only from a library.
+
 ## Signalling
 
 The output path targets PQ / BT.2020 full range. All input encodings are accepted. The 10-bit path writes their code values directly; the 12-bit path has the conversion limits below. Thus:

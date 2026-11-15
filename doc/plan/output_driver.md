@@ -84,14 +84,24 @@ Open questions:
 
 Requires: 17, 28.
 
-Open questions:
-
-- In the command-line host, a disconnect during presentation prints either `error: presentation failed: display disconnected` or `status: presentation cancelled`. The service sends the driver reply before the disconnect event, but the host can handle either first. Must the protocol give one fixed event for this case, or accept both?
+The protocol, both hosts and their tests are in [Host boundary](../design/output_driver/testing.md#host-boundary) and [Shared host contract](../design/output_driver/testing.md#shared-host-contract). They pass on Windows.
 
 TODO:
 
-- Implement the JSON-lines requests and events in [Host boundary](../design/output_driver/testing.md#host-boundary). Use the real Qt adapter and CLI browser host, shared fixture IDs, frame IDs and surface generations. Keep capture outside `OutputDriver`.
-- Drive both hosts from a test process. Verify query, open, show, close, error and readiness events, including replacement and malformed input. Run the shared host contract with both executors. An unavailable capture adapter must return a reason.
+- Run the test-host tests of `nitpick-test-host`, `nitpick-cli` and `nitpick-app` on macOS and on Linux: the `offscreen` test without a display server, and the ignored screen test on a desktop (GNOME 50 with Wayland and with xcb). Record the results in the design.
+- In the real Qt event loop, close the pattern window by Esc during a presentation and during the delay. Expect `error` with kind `disconnected` or `cancelled` with cause `disconnected`, then `surface` with `state: closed`. Only the contract checks this now, with a controlled close.
+
+Open questions:
+
+- The hosts read the fixtures from the source tree of the build (`nitpick_fixtures::fixture_dir`). Thus a packaged launcher with `--test-host` stops with exit status 2. Must the release build leave out the test-host mode, or include the fixtures?
+- The host fills the surface around the fixture with nominal black, so automatic MaxCLL and MaxFALL differ from the fixture values (for example `seq-metadata-*`) unless the surface has the fixture size. Must a metadata check use a surface of the fixture size, or must the fixtures give the values of the filled frame?
+
+### 61. Find why the D3D11 vblank thread sends no update requests
+
+TODO:
+
+- Without `QT_D3D_NO_VBLANK_THREAD`, `nitpick --test-host` on Windows 11 with Qt 6.12.0 got no `UpdateRequest` in the pattern window, and each frame timed out; see [Test host](../design/output_driver/qt.md#test-host). Find the cause, for example the adapter of the Qt vsync service, the screen (an HDR recorder with an 8 bpc wire), or the missing Qt Quick window. If the cause is in `pattern_window.cpp`, correct it there and remove the variable from the test host.
+- Check whether the launcher depends on its Qt Quick window for the update requests: show a pattern with the QML window minimized, and with the QML window on another screen. A timeout of a frame is a failure.
 
 ### 34. Add capture descriptors and result artifacts
 

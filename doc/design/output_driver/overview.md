@@ -10,7 +10,7 @@ The compatibility API is one Rust trait, `OutputDriver`, in `nitpick-core` (modu
 
 Native display enumeration, capability queries and ICC profile assignment use the separate [`DisplayDeviceControl` trait](../display_device.md) in `nitpick-core::device`. The `nitpick-display` crate implements native device operations on Windows, macOS and Linux. QRhi combines device reports with its output-path limits. Hosts coordinate device changes with presentation; `OutputDriver` does not change OS profile associations.
 
-`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries and the Windows and macOS ICC profile assignment. The macOS assignment has not run on a Mac. `nitpick-browser` has the browser service, the PNG encoder and the browser driver. `nitpick-cli` is the command-line host of the browser driver. `nitpick-webview` is the optional local webview process. **Not implemented:** ICC profile assignment on Linux. The core library has no Qt dependency. Only `nitpick-app` needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
+`nitpick-core::driver` implements the output types, the `OutputDriver` trait and the capability rules. `nitpick-core::device` has the device trait, and `nitpick-display` has the native device queries and the Windows and macOS ICC profile assignment. The macOS assignment has not run on a Mac. `nitpick-browser` has the browser service, the PNG encoder and the browser driver. `nitpick-cli` is the command-line host of the browser driver. `nitpick-webview` is the optional local webview process. `nitpick-test-host` has the [test-host protocol](testing.md#host-boundary) of both hosts. **Not implemented:** ICC profile assignment on Linux. The core library has no Qt dependency. Only `nitpick-app` needs Qt. See [the output driver plan](../../plan/output_driver.md) for the remaining work.
 
 ```mermaid
 graph LR
@@ -34,8 +34,9 @@ graph LR
 | `nitpick-core` | patterns, reference values, pixel calculations, output and device traits | Rust data and arithmetic; no GUI, server or executor |
 | `nitpick-display` | native device and capability enumeration, ICC assignment and restoration | `nitpick-core`, native OS bindings; no Qt, Tauri or Little CMS |
 | `nitpick-browser` | browser driver, PNG encoder, HTTP and WebSocket service | `nitpick-core`, Rust server and image libraries; no Qt or Tauri |
-| `nitpick-cli` | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, a Rust executor; optional `nitpick-display`; no `nitpick-app` |
-| `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, `nitpick-display`, Qt and its C++ bridge |
+| `nitpick-cli` | command-line host for the browser driver | `nitpick-core`, `nitpick-browser`, `nitpick-test-host`, a Rust executor; optional `nitpick-display`; no `nitpick-app` |
+| `nitpick-app` | Qt launcher and QRhi adapter | `nitpick-core`, `nitpick-browser`, `nitpick-display`, `nitpick-test-host`, Qt and its C++ bridge |
+| `nitpick-test-host` | [test-host protocol](testing.md#host-boundary): protocol types, fixture frames, host state machine | `nitpick-core`, `nitpick-fixtures`, `serde`, `futures`; no executor, GUI or server |
 | `nitpick-webview` | optional local display process | Tauri; connects to the server by URL; no other workspace crate |
 | `nitpick-profile` | test support: the [profile adapter](testing.md#colour-library-boundary) | `lcms2-sys` with its bundled Little CMS; no other workspace crate except `nitpick-fixtures` for its tests |
 
@@ -184,7 +185,7 @@ The Qt launcher uses an executor integrated with its event loop. Qt window and Q
 
 CPU pixel conversion and PNG encoding use worker jobs with owned input data. The browser server uses its own Tokio thread in both hosts. Workers and the server notify the host executor through Rust channels and wakers. They do not access Qt objects. Browser acknowledgement timeouts run on the server runtime. The future owns its pending jobs and callback registrations; the caller retains the frame data until the future is complete or dropped.
 
-Only one presentation may be pending per driver. A new request cancels the old one before it borrows the driver again. Dropping the future cancels its wait, timer and callbacks without waiting for worker jobs. Work that has already reached the GPU or browser can still finish; cancellation does not undo that output. Use a unique frame ID for each request and discard late worker results and acknowledgements. A disconnect or a closed surface completes a pending future with `Disconnected`.
+Only one presentation may be pending per driver. A new request cancels the old one before it borrows the driver again. Dropping the future cancels its wait, timer and callbacks without waiting for worker jobs. Work that has already reached the GPU or browser can still finish; cancellation does not undo that output. Use a unique frame ID for each request and discard late worker results and acknowledgements. A disconnect or a closed surface completes a pending future with `Disconnected`. A host that drops a pending future at a disconnect or a display change reports the error that the driver gives for that change, not a cancellation. Thus the result does not depend on whether the host handles the driver result or the event first. For the browser, `ClientState::presentation_error` gives that error.
 
 The host reports "Submitting pattern" until the future resolves. It continues to process controls or console input and service events. A new frame, a close request or a display change cancels the pending future and the measurement timer. Call `close` after releasing the future's borrow. `query` and `open` remain synchronous; browser authentication and viewport setup occur before `open`.
 
@@ -237,7 +238,7 @@ All native fields come through `DisplayDeviceControl`. Fields remain `None` wher
 
 The shared test design is in [Output verification](testing.md). It defines the [host contract](testing.md#shared-host-contract), [cross-platform run matrix](testing.md#run-matrix), and the limits of each capture boundary.
 
-Command-line host unit tests (`nitpick-cli`, `host_tests.rs`) run the host on a Tokio current-thread runtime with a mock driver and a channel in place of the service. They cover startup output, selection by `DisplayId`, query before open, rendering at the surface size, rejected depths, encodings and sizes, a failed presentation, replacement, console commands and service events while a frame is pending, a viewport change with reopening at the new size, disconnect, `close`, `quit` and a service stop. The mock fails if `close` runs while a `present` future exists. `command_tests.rs` covers the console command parser.
+Command-line host unit tests (`nitpick-cli`, `host_tests.rs`) run the host on a Tokio current-thread runtime with a mock driver and a channel in place of the service. They cover startup output, selection by `DisplayId`, query before open, rendering at the surface size, rejected depths, encodings and sizes, a failed presentation, replacement, console commands and service events while a frame is pending, a viewport change with reopening at the new size, disconnect, `close`, `quit` and a service stop. A disconnect or a viewport change during presentation gives the error line of the driver, not `status: presentation cancelled`. The mock fails if `close` runs while a `present` future exists. `command_tests.rs` covers the console command parser.
 
 ## Future enhancements
 

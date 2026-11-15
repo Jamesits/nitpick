@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The test-host protocol, capture adapters and display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. Capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -69,6 +69,7 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 | Display model | ICC transform alone; explicit HDR model with library support | Explicit HDR model. Nitpick controls units, stage order, transfer functions and clipping; see [Colour library boundary](#colour-library-boundary). |
 | IDD dependency | required for unit tests; optional lab tool | Optional lab tool. Signing and HDR hardware must not block normal CI. |
 | Browser automation | screenshots as an HDR reference; protocol tests and qualified OS capture | Protocol tests on all hosts; HDR checks only on a qualified engine and OS. |
+| Pending frame at a disconnect or a display change | report a cancellation; report the driver error; accept both | The driver error. The state fixtures expect an error, and the result does not depend on the order in which the host sees the driver result and the change. |
 
 ## Fixtures and test interface
 
@@ -196,9 +197,40 @@ A one-time check on Windows 11 build 26200: `IsColorProfileValid` accepted every
 
 ### Host boundary
 
-Add a test-only control interface over standard input and output, with one JSON object per line. This avoids a Windows named-pipe dependency. A QRhi test host runs the real adapter on the Qt GUI thread. The browser host uses the command-line host without Qt. Both share fixture IDs and event formats.
+A test-only control interface uses standard input and output, with one JSON object per line. This avoids a Windows named-pipe dependency. The crate `nitpick-test-host` has the protocol types (`protocol.rs`), the fixture frames (`fixture.rs`) and the host state machine (`controller.rs`). It has no executor, GUI or server dependency. Each host polls the state machine with its own executor:
 
-Proposed requests are `query`, `open`, `show`, `capture` and `close`. `show` selects a fixture and supplies a monotonically increasing frame ID. Events include `submitted`, `ready`, `captured`, `error` and a surface-generation change. These names describe a proposed test protocol, not existing CLI flags.
+| Host | Start | Driver and executor |
+|---|---|---|
+| Browser | `nitpick-cli --test-host` with the options of [browser usage](browser.md#usage); `--delay` is the default delay of `show` | `BrowserDriver` on the Tokio current-thread runtime of the command-line host |
+| QRhi | `nitpick --test-host` (first argument) | `QrhiDriver` on the Qt GUI thread through `gui_executor.rs`, without QML; see [Test host](qt.md#test-host) |
+
+The first event is `hello` with the protocol version (1) and the driver ID. The last event is `stopped`. The end of standard input is the same as `quit`. The exit status is 0 after `quit`, 1 if the driver side stopped with an error, and 2 if the fixtures or the host cannot start.
+
+Requests (field `request`):
+
+| Request | Fields | Reply |
+|---|---|---|
+| `displays` | | `displays` |
+| `refresh` | | `displays` after the host reads the display state again. QRhi: the device read of the launcher, on a worker. Browser: at once. |
+| `query` | `display`: `DisplayId` text | `query`: each `Support` as `state` and `reason`, and the mode |
+| `open` | `display`, `depth` (10 or 12) | `surface` with `state: open` |
+| `show` | `frame`, `fixture`; optional `delay_ms` and `metadata` | `submitted` after the driver acknowledgement, then `ready` after the delay |
+| `capture` | `frame` | `captured` |
+| `close` | | `surface` with `state: closed` |
+| `quit` | | `stopped` |
+
+Other events are `display` (a driver-side change: `connected`, `authenticated`, `ready`, `changed` or `disconnected`), `listening` and `pairing_code` (browser host), `cancelled` with a `cause`, and `error` with a `kind` and, where one applies, the frame. The Rust types in `protocol.rs` define all fields. The tests parse the lines with these types.
+
+Rules:
+- Invalid JSON, an unknown request, a missing or unknown field or an invalid depth gives `error` with kind `malformed`. It changes no state.
+- `show` takes a case ID of the [shared fixtures](#shared-fixtures). Its frame ID must be greater than the frame ID of every earlier `show`, also of a rejected one; otherwise the kind is `frame_order`. An absent `metadata` uses the request of the fixture, `null` sends no metadata, and an object is a request in the fixture form.
+- The host checks the frame order, the fixture, the metadata and the surface before it cancels the pending frame. A rejected `show` keeps the pending frame.
+- **Deviation from the fixture:** the host puts the fixture at the top-left corner of the surface and fills the remaining area with the nominal black code of the fixture format. Thus automatic light levels include the black area. They equal the fixture values only on a surface of the fixture size. A fixture larger than the surface gives `fixture_too_large`.
+- Each `open` starts a new surface generation. The host calls `query` before `open`, as the launcher does. A new `open` first reports the earlier generation as `closed` with cause `opened`. `submitted` gives the generation of its frame.
+- A display change of the surface (browser: a viewport change) makes the surface `stale`. Then `show` fails with `stale_surface` until the next `open`. A disconnect, or a pattern window that closes outside the host (for example by Esc), makes the surface `closed`.
+- A disconnect or a display change during a presentation gives `error` with the driver error for that change: kind `disconnected`, or kind `platform` with the driver text. The host gives the same event if it handles the driver result first or the change first; see the decision table above. A new `show`, `open`, `close` or `quit` gives `cancelled`.
+- A disconnect or a display change during the measurement delay gives `cancelled`.
+- `capture` applies only to the frame of the last `submitted` on the open surface; another frame gives `stale_frame`. The `CaptureAdapter` trait of `nitpick-test-host` is the capture boundary. Neither host has a capture adapter: `captured` gives `result: unavailable` and the reason.
 
 For device tests, add device enumeration and query, profile preparation, assignment and restoration through `DisplayDeviceControl`. Keep these separate from output requests. Save the prepared recovery record before assignment. A profile change invalidates the current measurement and capture generation under [the device lifecycle](../display_device.md#identity-and-execution).
 
@@ -254,6 +286,14 @@ Use [Code to PNG sample](browser.md#code-to-png-sample) as the contract. Test al
 Use a mock driver, controlled clock and controlled worker completions. Check each capability state (`Yes`, `No`, `Unknown`), warning and `OutputError` against [Interface](overview.md#interface). Reject `available = No`, `input = No` and unsupported metadata. Accepted input with `interpretation = No` remains selectable with a warning.
 
 Readiness must follow acknowledgement plus the selected delay. Zero adds no delay. Errors start no timer. New frames, closure, display changes and disconnect cancel old work and timers. An old callback cannot complete a new request. Drop pending futures and check that callback and timer registrations are released. Run the contract with the command-line executor and the Qt executor; Qt timers and controls must continue to run during conversion, presentation and the delay.
+
+`nitpick-test-host` has this contract over the [test-host protocol](#host-boundary) (`contract.rs`, feature `contract`). It uses a mock driver, a controlled clock, controlled presentation results, a controlled device read and a controlled surface close. It runs on the Tokio current-thread executor of the command-line host (`controller_tests.rs`) and on `gui_executor.rs` with a simulated event loop (`nitpick-app`, `test_host_tests.rs`). The command-line host unit tests and the `session.rs` tests cover the interactive hosts.
+
+Process tests drive the real hosts through the protocol:
+- `nitpick-cli`, `tests/test_host.rs`: the real service and the mock page of the [browser process tests](browser.md#testing). They check `query`, `open`, the PNG samples of the placed fixture against the reference sample table, replacement, a late `applied`, the delay, `capture`, `close`, malformed input, the frame order, a disconnect during presentation in three rounds, and a viewport change with a new generation.
+- `nitpick-app`, `tests/test_host.rs`: with the Qt `offscreen` platform, the protocol on the real Qt event loop. That platform has no screen with a native identity, so no window opens. An ignored test opens full-screen windows on the first screen: 10-bit replacement and delay, a 12-bit fixture on a 10-bit surface, a 12-bit surface, `capture` and `close`. Run it with `cargo nextest run -p nitpick-app --test test_host --run-ignored only`.
+
+Results: all pass on Windows 11 build 26200 with Qt 6.12.0. The ignored screen test ran on one 3840×2160 HDR screen with an 8 bpc wire. **Not verified:** macOS and Linux; a pattern window closed by Esc in the real Qt event loop (only the contract checks it, with a controlled close).
 
 Reject negative delays and verify that the Qt setting survives a restart. With HDR off, Windows QRhi and the browser return `hdr_on = Some(false)` and the host shows that state. Check that interpretation warnings and FP16 or clipping marks reach both status output and the reference table.
 
@@ -521,7 +561,7 @@ cargo clippy -p nitpick-core --all-targets -- -D warnings
 cargo nextest run -p nitpick-core
 ```
 
-The new harness commands are not implemented. Its runner will query and validate the selected display before showing patches. It must use the existing driver and host lifecycle, rather than add a second colour path just for tests.
+The test hosts are in [Host boundary](#host-boundary). The runner that compares captures is not implemented. It will query and validate the selected display before it shows patches. It must use the test hosts, rather than add a second colour path just for tests.
 
 The profile adapter build compiles the bundled Little CMS sources, so it needs a C compiler for the target. Do not set `LCMS2_LIB_DIR` for qualification runs: it links another library, which the lockfile does not pin. Record the binding version, `engine_version()`, the C compiler and the build profile in test results. Rerun the adapter fixtures after any of them changes:
 

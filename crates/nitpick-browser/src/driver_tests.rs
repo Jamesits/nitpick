@@ -725,6 +725,11 @@ async fn resize_or_disconnect_fails_the_pending_frame() {
             .send_json(&small_hello(&[("pixelRatio", Some(json!(2)))]));
         assert_eq!(future.await, Err(stale()));
     }
+    // A host that handles the event first reports the same error.
+    assert_eq!(
+        ClientState::ViewportChanged(live.display.clone()).presentation_error(),
+        Some(stale())
+    );
     let surface = live.open();
     assert_eq!(surface.size, (8, 4));
     let image = black(surface.size);
@@ -739,6 +744,10 @@ async fn resize_or_disconnect_fails_the_pending_frame() {
     client.finished().await;
     assert_eq!(future.await, Err(OutputError::Disconnected));
     assert_eq!(hub.frame(2), None, "released on disconnect");
+    assert_eq!(
+        ClientState::Disconnected(String::new()).presentation_error(),
+        Some(OutputError::Disconnected)
+    );
 }
 
 #[tokio::test(start_paused = true)]

@@ -2420,8 +2420,10 @@ dependencies = [
  "cxx-qt-lib",
  "dirs",
  "futures-channel",
+ "futures-util",
  "nitpick-core",
  "nitpick-display",
+ "nitpick-test-host",
  "serde_json",
  "tempfile",
 ]
@@ -2448,10 +2450,13 @@ name = "nitpick-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures-channel",
+ "futures-core",
  "futures-util",
  "nitpick-browser",
  "nitpick-core",
  "nitpick-fixtures",
+ "nitpick-test-host",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -2506,6 +2511,20 @@ version = "0.1.0"
 dependencies = [
  "lcms2-sys",
  "nitpick-fixtures",
+]
+
+[[package]]
+name = "nitpick-test-host"
+version = "0.1.0"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-util",
+ "nitpick-core",
+ "nitpick-fixtures",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

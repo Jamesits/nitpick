@@ -185,6 +185,21 @@ impl<D: OutputDriver, O: Output> Host<'_, D, O> {
         }
     }
 
+    /// Ends the pending frame after a client change. A presentation fails
+    /// with the error that the driver gives for the change, so the output
+    /// does not depend on whether the driver result or the event comes
+    /// first. A delay is cancelled.
+    fn end_pending(&mut self, change: &ClientState) {
+        match (self.pending.take(), change.presentation_error()) {
+            (Some(Pending::Presenting { .. }), Some(e)) => {
+                self.say(&format!("error: presentation failed: {e}"));
+            }
+            (Some(Pending::Presenting { .. }), None) => self.say("status: presentation cancelled"),
+            (Some(Pending::Delay { .. }), _) => self.say("status: measurement delay cancelled"),
+            (None, _) => {}
+        }
+    }
+
     /// A failed `present` starts no timer. A zero delay adds no wait.
     fn on_step(&mut self, step: Step) {
         self.pending = None;
@@ -221,15 +236,22 @@ impl<D: OutputDriver, O: Output> Host<'_, D, O> {
             ServiceEvent::Client(ClientState::Connected) => self.say("client: connected"),
             ServiceEvent::Client(ClientState::Authenticated) => self.say("client: authenticated"),
             ServiceEvent::Client(ClientState::Ready(display)) => self.on_ready(&display),
-            ServiceEvent::Client(ClientState::ViewportChanged(display)) => {
+            ServiceEvent::Client(state @ ClientState::ViewportChanged(_)) => {
+                let ClientState::ViewportChanged(display) = &state else {
+                    unreachable!()
+                };
                 self.say(&format!("client: viewport changed: {display}"));
-                if self.opened.as_ref() == Some(&display) {
-                    self.cancel();
+                if self.opened.as_ref() == Some(display) {
+                    self.end_pending(&state);
                     self.reshow = true;
                 }
             }
-            ServiceEvent::Client(ClientState::Disconnected(reason)) => {
+            ServiceEvent::Client(state @ ClientState::Disconnected(_)) => {
+                let ClientState::Disconnected(reason) = &state else {
+                    unreachable!()
+                };
                 self.say(&format!("client: disconnected: {reason}"));
+                self.end_pending(&state);
                 self.close_surface();
                 self.selected = None;
                 self.reshow = false;

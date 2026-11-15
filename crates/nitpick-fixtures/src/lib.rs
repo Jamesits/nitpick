@@ -12,7 +12,7 @@ use std::io;
 use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub mod profile;
 
@@ -147,7 +147,9 @@ pub enum Layout {
     Rows { rows: Vec<Vec<usize>> },
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// Also the request form of the test-host protocol.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetadataRequest {
     /// CIE xy of red, green and blue.
     pub primaries: [[f64; 2]; 3],
@@ -157,7 +159,7 @@ pub struct MetadataRequest {
     pub light_level: LightLevelRequest,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LightLevelRequest {
     FromFrame,
@@ -474,7 +476,11 @@ pub fn validate(input: &CaseInput) -> Result<(), FixtureError> {
     Ok(())
 }
 
-fn validate_metadata(md: &MetadataRequest) -> Result<(), FixtureError> {
+/// The metadata rules of [`validate`].
+///
+/// # Errors
+/// [`FixtureError::InvalidMetadata`].
+pub fn validate_metadata(md: &MetadataRequest) -> Result<(), FixtureError> {
     let coords = md.primaries.iter().flatten().chain(&md.white);
     if !coords
         .into_iter()

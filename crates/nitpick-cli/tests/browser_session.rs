@@ -1,34 +1,21 @@
 //! The command-line host as a separate process with its real browser
-//! service. A `tokio-tungstenite` client takes the place of the page, so no
-//! browser or window system is necessary. The test decodes the fetched PNG
-//! with `zune-png`, which shares no code with the `png` encoder, and takes
-//! the expected samples from the reference fixtures, not from the encoder.
+//! service and the mock page of `common`. The test takes the expected
+//! samples from the reference fixtures, not from the encoder.
 
-use std::io::Cursor;
+mod common;
+
 use std::net::SocketAddr;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use common::{ACK_TIMEOUT, CODE, Page, WAIT, assert_samples, decode_png, sample_table};
 use nitpick_core::pattern::{MIN_SIZE, PatternKind};
 use nitpick_core::signal::{BitDepth, Encoding, Format};
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::net::TcpStream;
+use serde_json::json;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::{Instant, timeout, timeout_at};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
-use zune_png::PngDecoder;
-use zune_png::zune_core::result::DecodingResult;
 
-type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
-
-const CODE: &str = "0042";
-/// The acknowledgement timeout of the browser service.
-const ACK_TIMEOUT: Duration = Duration::from_secs(10);
-/// Bound of each wait; longer than [`ACK_TIMEOUT`].
-const WAIT: Duration = Duration::from_secs(20);
 const VIEWPORT: (usize, usize) = MIN_SIZE;
 
 /// The `nitpick-cli` process. Each test starts its own on a free port.
@@ -141,198 +128,58 @@ fn no_readiness(lines: &[String]) {
     assert!(ready.is_empty(), "{ready:#?}");
 }
 
-/// The mock page: an authenticated WebSocket client.
-struct Page {
-    ws: Ws,
-    token: String,
-    addr: SocketAddr,
+/// Connects the mock page and authenticates it.
+async fn connect(cli: &mut Cli) -> Page {
+    let mut page = Page::connect(cli.addr).await;
+    assert_eq!(
+        cli.until("pairing code: ").await,
+        format!("pairing code: {CODE}")
+    );
+    page.authenticate().await;
+    cli.until("client: authenticated").await;
+    page
 }
 
-impl Page {
-    async fn connect(cli: &mut Cli) -> Self {
-        let (ws, _) = connect_async(format!("ws://{}/api/v1/ws", cli.addr))
-            .await
-            .expect("WebSocket upgrade");
-        let mut page = Self {
-            ws,
-            token: String::new(),
-            addr: cli.addr,
-        };
-        assert_eq!(page.next_json().await, json!({"type": "auth_required"}));
-        assert_eq!(
-            cli.until("pairing code: ").await,
-            format!("pairing code: {CODE}")
-        );
-        page.send(&json!({"type": "auth", "code": CODE})).await;
-        let reply = page.next_json().await;
-        assert_eq!(reply["type"], "authenticated", "{reply}");
-        page.token = reply["token"].as_str().expect("token").to_owned();
-        cli.until("client: authenticated").await;
-        page
-    }
-
-    /// Connects, sends `hello` and selects the client. Returns its display
-    /// ID.
-    async fn ready(cli: &mut Cli) -> (Self, String) {
-        let mut page = Self::connect(cli).await;
-        page.hello(VIEWPORT).await;
-        let line = cli.until("client: ready: ").await;
-        let display = line["client: ready: ".len()..]
-            .split_once(' ')
-            .expect("display ID")
-            .0
-            .to_owned();
-        assert!(
-            line.contains(&format!("{}×{} px", VIEWPORT.0, VIEWPORT.1)),
-            "{line}"
-        );
-        cli.send(&format!("select {display}")).await;
-        assert_eq!(
-            cli.until("selected: ").await,
-            format!("selected: {display}")
-        );
-        (page, display)
-    }
-
-    async fn send(&mut self, value: &Value) {
-        self.ws
-            .send(Message::text(value.to_string()))
-            .await
-            .unwrap();
-    }
-
-    /// HDR Chromium at pixel ratio 1, full screen: one CSS pixel per
-    /// display pixel.
-    async fn hello(&mut self, (width, height): (usize, usize)) {
-        self.send(&json!({
-            "type": "hello",
-            "client": {
-                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                              (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
-                "webview": false
-            },
-            "screen": {"width": width, "height": height},
-            "viewport": {"width": width, "height": height, "scale": 1},
-            "pixelRatio": 1,
-            "dynamicRange": "high",
-            "colorGamut": "rec2020",
-            "fullscreen": true
-        }))
-        .await;
-    }
-
-    async fn next_json(&mut self) -> Value {
-        loop {
-            let message = timeout(WAIT, self.ws.next())
-                .await
-                .expect("server message")
-                .expect("WebSocket open")
-                .expect("WebSocket message");
-            match message {
-                Message::Text(text) => return serde_json::from_str(&text).unwrap(),
-                Message::Ping(_) | Message::Pong(_) => {}
-                other => panic!("expected a JSON message, got {other:?}"),
-            }
-        }
-    }
-
-    /// Returns the frame ID and size of the next `show`.
-    async fn expect_show(&mut self) -> (u64, (usize, usize)) {
-        let show = self.next_json().await;
-        assert_eq!(show["type"], "show", "{show}");
-        let size = |key: &str| usize::try_from(show[key].as_u64().expect("size")).unwrap();
-        (
-            show["id"].as_u64().expect("id"),
-            (size("width"), size("height")),
-        )
-    }
-
-    async fn applied(&mut self, id: u64, (width, height): (usize, usize)) {
-        self.send(&json!({
-            "type": "applied", "id": id,
-            "naturalWidth": width, "naturalHeight": height,
-            "layoutWidth": width, "layoutHeight": height
-        }))
-        .await;
-    }
-
-    /// HTTP status and body of the frame request with the bearer token.
-    async fn fetch(&self, id: u64) -> (u16, Vec<u8>) {
-        let mut stream = TcpStream::connect(self.addr).await.unwrap();
-        let request = format!(
-            "GET /api/v1/frame/{id}.png HTTP/1.1\r\nHost: {}\r\n\
-             Authorization: Bearer {}\r\nConnection: close\r\n\r\n",
-            self.addr, self.token
-        );
-        stream.write_all(request.as_bytes()).await.unwrap();
-        let mut response = Vec::new();
-        timeout(WAIT, stream.read_to_end(&mut response))
-            .await
-            .expect("HTTP response")
-            .unwrap();
-        let split = response
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .expect("HTTP head");
-        let head = String::from_utf8_lossy(&response[..split]);
-        // A `Bytes` body has a `Content-Length`; no chunked decoding needed.
-        assert!(
-            !head.to_ascii_lowercase().contains("transfer-encoding"),
-            "{head}"
-        );
-        let status = head[9..12].parse().expect("status code");
-        (status, response[split + 4..].to_vec())
-    }
-
-    /// The server sends no further message; it closes the connection.
-    async fn expect_end(&mut self) {
-        loop {
-            match timeout(WAIT, self.ws.next()).await.expect("connection end") {
-                None | Some(Ok(Message::Close(_)) | Err(_)) => return,
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                Some(Ok(other)) => panic!("expected the end, got {other:?}"),
-            }
-        }
-    }
+/// Connects, sends `hello` and selects the client. Returns its display ID.
+async fn ready(cli: &mut Cli) -> (Page, String) {
+    let mut page = connect(cli).await;
+    page.hello(VIEWPORT).await;
+    let line = cli.until("client: ready: ").await;
+    let display = line["client: ready: ".len()..]
+        .split_once(' ')
+        .expect("display ID")
+        .0
+        .to_owned();
+    assert!(
+        line.contains(&format!("{}×{} px", VIEWPORT.0, VIEWPORT.1)),
+        "{line}"
+    );
+    cli.send(&format!("select {display}")).await;
+    assert_eq!(
+        cli.until("selected: ").await,
+        format!("selected: {display}")
+    );
+    (page, display)
 }
 
 /// Renders `pattern` with the core and maps each code through the
 /// reference PNG sample table.
 fn expected_samples(pattern: PatternKind, format: Format, (w, h): (usize, usize)) -> Vec<u16> {
-    let scalar = nitpick_fixtures::scalar().expect("scalar fixture");
-    let table = scalar
-        .browser
-        .iter()
-        .find(|t| t.encoding == format.encoding.id() && t.depth == format.depth.bits())
-        .expect("fixture table of the format");
+    let table = sample_table(format.encoding.id(), format.depth.bits());
     let image = pattern.render(format, w, h).expect("render");
     image
         .pixels()
         .iter()
         .flat_map(|p| [p.r, p.g, p.b])
-        .map(|code| table.sample[usize::from(code)])
+        .map(|code| table[usize::from(code)])
         .collect()
 }
 
 fn assert_png(png: &[u8], pattern: PatternKind, format: Format, size: (usize, usize)) {
-    let mut decoder = PngDecoder::new(Cursor::new(png));
-    let DecodingResult::U16(samples) = decoder.decode().expect("decode") else {
-        panic!("expected 16-bit samples");
-    };
-    assert_eq!(decoder.dimensions(), Some(size));
+    let (decoded, samples) = decode_png(png);
+    assert_eq!(decoded, size);
     let expected = expected_samples(pattern, format, size);
-    assert_eq!(samples.len(), expected.len(), "RGB without alpha");
-    if let Some(i) = samples.iter().zip(&expected).position(|(a, b)| a != b) {
-        let pixel = i / 3;
-        panic!(
-            "{format}: pixel ({}, {}) channel {}: sample {} != expected {}",
-            pixel % size.0,
-            pixel / size.0,
-            i % 3,
-            samples[i],
-            expected[i]
-        );
-    }
+    assert_samples(&samples, &expected, size.0, &format.to_string());
 }
 
 fn frame_tag(id: u64) -> String {
@@ -360,7 +207,7 @@ async fn show_and_check(
 async fn presents_replaces_and_shuts_down() {
     const DELAY: Duration = Duration::from_millis(200);
     let mut cli = Cli::start(200).await;
-    let (mut page, _) = Page::ready(&mut cli).await;
+    let (mut page, _) = ready(&mut cli).await;
 
     let first_format = Format::new(Encoding::PqNarrow, BitDepth::Ten);
     let first = show_and_check(&mut cli, &mut page, PatternKind::ColourBars, first_format).await;
@@ -417,7 +264,7 @@ async fn presents_replaces_and_shuts_down() {
 #[tokio::test(flavor = "current_thread")]
 async fn acknowledgement_timeout_starts_no_delay() {
     let mut cli = Cli::start(200).await;
-    let (mut page, _) = Page::ready(&mut cli).await;
+    let (mut page, _) = ready(&mut cli).await;
 
     // The service starts its timer after this command, so the elapsed time
     // from here is an upper bound of the timer.
@@ -454,7 +301,7 @@ async fn delay_outlasts_the_acknowledgement_timeout() {
     let delay = ACK_TIMEOUT + Duration::from_secs(1);
     let delay_ms = u32::try_from(delay.as_millis()).unwrap();
     let mut cli = Cli::start(delay_ms).await;
-    let (mut page, _) = Page::ready(&mut cli).await;
+    let (mut page, _) = ready(&mut cli).await;
 
     cli.send("show").await;
     let (id, size) = page.expect_show().await;
@@ -476,9 +323,9 @@ async fn delay_outlasts_the_acknowledgement_timeout() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn disconnect_cancels_presentation() {
+async fn disconnect_fails_the_presentation() {
     let mut cli = Cli::start(200).await;
-    let (mut page, display) = Page::ready(&mut cli).await;
+    let (mut page, display) = ready(&mut cli).await;
 
     cli.send("show").await;
     page.expect_show().await;
@@ -489,17 +336,23 @@ async fn disconnect_cancels_presentation() {
     let lines = cli.since(mark);
     assert_eq!(lines.last().map(String::as_str), Some("displays: none"));
     no_readiness(lines);
-    // The driver result and the service event race; either ends the frame.
-    assert!(
-        lines.iter().any(|l| l == "status: presentation cancelled"
-            || l == "error: presentation failed: display disconnected"),
+    // The same line whether the driver result or the service event comes
+    // first.
+    assert_eq!(
+        lines
+            .iter()
+            .filter(
+                |l| l.starts_with("status: presentation") || l.starts_with("error: presentation")
+            )
+            .collect::<Vec<_>>(),
+        ["error: presentation failed: display disconnected"],
         "{lines:#?}"
     );
 
     // The disconnect clears the selection; a new session is a new display.
     cli.send("show").await;
     cli.until("error: no client selected").await;
-    let (_page, new_display) = Page::ready(&mut cli).await;
+    let (_page, new_display) = ready(&mut cli).await;
     assert_ne!(new_display, display);
 
     // The end of stdin is the same as `quit`.
@@ -511,7 +364,7 @@ async fn disconnect_cancels_presentation() {
 #[tokio::test(flavor = "current_thread")]
 async fn disconnect_cancels_delay() {
     let mut cli = Cli::start(60_000).await;
-    let (mut page, _) = Page::ready(&mut cli).await;
+    let (mut page, _) = ready(&mut cli).await;
 
     cli.send("show").await;
     let (id, size) = page.expect_show().await;
@@ -533,7 +386,7 @@ async fn disconnect_cancels_delay() {
 #[tokio::test(flavor = "current_thread")]
 async fn viewport_change_cancels_delay_and_shows_again() {
     let mut cli = Cli::start(60_000).await;
-    let (mut page, display) = Page::ready(&mut cli).await;
+    let (mut page, display) = ready(&mut cli).await;
 
     cli.send("show").await;
     let (first, size) = page.expect_show().await;

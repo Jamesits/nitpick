@@ -1,21 +1,15 @@
-//! nitpick: HDR/WCG test pattern launcher.
+//! nitpick: HDR/WCG test pattern launcher. With `--test-host` as the first
+//! argument, the test host of `nitpick_app::test_host`.
 
-mod delay;
-mod display;
-mod gui_executor;
-mod hdr_metadata;
-// The cxx-qt generated constructor boxes the Rust struct; cxx-qt rejects
-// attributes on the bridge module itself.
-#[allow(clippy::unnecessary_box_returns)]
-mod launcher;
-mod qrhi_driver;
-mod session;
-mod settings;
-mod submission;
+use std::process::ExitCode;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
+use nitpick_app::test_host;
 
-fn main() {
+fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some(test_host::FLAG) {
+        return test_host::main();
+    }
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
     if let Some(engine) = engine.as_mut() {
@@ -24,4 +18,5 @@ fn main() {
     if let Some(app) = app.as_mut() {
         app.exec();
     }
+    ExitCode::SUCCESS
 }
