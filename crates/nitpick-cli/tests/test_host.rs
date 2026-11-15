@@ -313,7 +313,8 @@ async fn reports_capture_readiness_and_close() {
     let Event::Captured {
         frame: 3,
         result: CaptureOutcome::Unavailable,
-        reason,
+        reason: Some(reason),
+        artifact: None,
     } = host.next().await
     else {
         panic!("expected `captured`");

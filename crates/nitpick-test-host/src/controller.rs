@@ -14,12 +14,18 @@ use futures_util::StreamExt as _;
 use nitpick_core::driver::{DisplayId, Frame, Hdr10Request, OutputDriver, OutputError, Surface};
 use nitpick_core::image::Image;
 use nitpick_core::signal::{BitDepth, Format};
+use nitpick_fixtures::MetadataRequest;
 
+use crate::artifact::{Artifact, Artifacts, Check, FormatRecord, RunRecord, Saved};
+use crate::capture::{CaptureAdapter, CaptureTarget};
 use crate::fixture::{Fixtures, hdr10_request};
 use crate::protocol::{
-    CaptureOutcome, Cause, DisplayEntry, DisplayState, ErrorKind, Event, Request, SurfaceState,
-    VERSION, parse_request,
+    CaptureOutcome, Cause, DisplayEntry, DisplayState, ErrorKind, Event, ModeReport, Request,
+    SurfaceState, VERSION, parse_request,
 };
+
+/// Reason of a valid capture in a host without [`Artifacts`].
+pub const NO_ARTIFACTS: &str = "the host has no artifact directory";
 
 pub type LocalFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
@@ -38,37 +44,6 @@ pub trait Hooks {
     /// closes outside the host, for example by Esc in the window. `None`:
     /// the host reports such changes as [`DriverEvent`]s.
     fn watch_surface(&mut self) -> Option<LocalFuture<()>>;
-}
-
-/// The acknowledged frame to capture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CaptureTarget<'a> {
-    pub display: &'a DisplayId,
-    pub frame: u64,
-    pub generation: u64,
-}
-
-/// Raw captures are not implemented.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CaptureResult {
-    Unavailable { reason: String },
-}
-
-/// An OS capture adapter. It is not part of `OutputDriver`.
-pub trait CaptureAdapter {
-    fn capture(&mut self, target: &CaptureTarget<'_>) -> CaptureResult;
-}
-
-/// A host without a capture adapter.
-#[derive(Debug, Clone)]
-pub struct NoCapture(pub String);
-
-impl CaptureAdapter for NoCapture {
-    fn capture(&mut self, _: &CaptureTarget<'_>) -> CaptureResult {
-        CaptureResult::Unavailable {
-            reason: self.0.clone(),
-        }
-    }
 }
 
 /// A change on the driver side, outside the requests.
@@ -113,6 +88,8 @@ pub struct TestHost<D> {
     pub clock: Box<dyn Clock>,
     pub hooks: Box<dyn Hooks>,
     pub capture: Box<dyn CaptureAdapter>,
+    /// `None`: a valid capture is `unavailable`, with [`NO_ARTIFACTS`].
+    pub artifacts: Option<Artifacts>,
     pub fixtures: Rc<Fixtures>,
     /// Measurement delay of a `show` without `delay_ms`.
     pub delay_ms: u32,
@@ -121,16 +98,27 @@ pub struct TestHost<D> {
 struct Open {
     surface: Surface,
     generation: u64,
+    /// Of the query before `open`.
+    mode: ModeReport,
     stale: bool,
     watch: Option<LocalFuture<()>>,
+}
+
+/// A `show` request in presentation, and then acknowledged.
+#[derive(Clone)]
+struct Shown {
+    frame: u64,
+    generation: u64,
+    delay_ms: u32,
+    fixture: String,
+    format: Format,
+    metadata: Option<MetadataRequest>,
 }
 
 /// At most one; dropping it cancels the presentation or the timer.
 enum Pending {
     Presenting {
-        frame: u64,
-        generation: u64,
-        delay_ms: u32,
+        shown: Shown,
         future: LocalFuture<Result<String, OutputError>>,
     },
     Delay {
@@ -143,7 +131,8 @@ enum Pending {
 impl Pending {
     fn frame(&self) -> u64 {
         match self {
-            Self::Presenting { frame, .. } | Self::Delay { frame, .. } => *frame,
+            Self::Presenting { shown, .. } => shown.frame,
+            Self::Delay { frame, .. } => *frame,
         }
     }
 }
@@ -153,10 +142,9 @@ enum Input {
     Driver(Option<DriverEvent>),
     Refreshed,
     SurfaceClosed,
+    Saved(Saved),
     Presented {
-        frame: u64,
-        generation: u64,
-        delay_ms: u32,
+        shown: Shown,
         result: Result<String, OutputError>,
     },
     Elapsed {
@@ -177,14 +165,14 @@ struct Machine<D, O> {
     generation: u64,
     /// Of the last `show` that passed the order check.
     last_frame: Option<u64>,
-    /// The acknowledged frame on the open surface, and its generation.
-    current: Option<(u64, u64)>,
+    /// The acknowledged frame on the open surface.
+    current: Option<Shown>,
 }
 
 impl<D: OutputDriver + 'static> TestHost<D> {
     /// Runs until `quit`, the end of `lines` or [`DriverEvent::Stopped`].
-    /// Then it ends the pending frame, closes the surface and sends
-    /// [`Event::Stopped`].
+    /// Then it ends the pending frame, closes the surface, waits for the
+    /// queued artifacts and sends [`Event::Stopped`].
     pub async fn run(
         self,
         mut lines: impl Stream<Item = String> + Unpin,
@@ -214,6 +202,9 @@ impl<D: OutputDriver + 'static> TestHost<D> {
         };
         m.cancel(Cause::Stopped);
         m.close_surface(Cause::Stopped);
+        while let Some(saved) = poll_fn(|cx| m.poll_saved(cx)).await {
+            m.saved(saved);
+        }
         let error = match &exit {
             Exit::Quit => None,
             Exit::Stopped(error) => error.clone(),
@@ -253,6 +244,9 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
         {
             return Poll::Ready(Input::SurfaceClosed);
         }
+        if let Poll::Ready(Some(saved)) = self.poll_saved(cx) {
+            return Poll::Ready(Input::Saved(saved));
+        }
         let ready = match &mut self.pending {
             Some(Pending::Presenting { future, .. }) => future.as_mut().poll(cx).map(Ok),
             Some(Pending::Delay { timer, .. }) => timer.as_mut().poll(cx).map(Err),
@@ -262,20 +256,9 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
             return Poll::Pending;
         };
         Poll::Ready(match (self.pending.take(), result) {
-            (
-                Some(Pending::Presenting {
-                    frame,
-                    generation,
-                    delay_ms,
-                    ..
-                }),
-                Ok(result),
-            ) => Input::Presented {
-                frame,
-                generation,
-                delay_ms,
-                result,
-            },
+            (Some(Pending::Presenting { shown, .. }), Ok(result)) => {
+                Input::Presented { shown, result }
+            }
             (
                 Some(Pending::Delay {
                     frame, delay_ms, ..
@@ -288,6 +271,29 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
             },
             _ => unreachable!("the result matches the pending state"),
         })
+    }
+
+    /// `Ready(None)`: no artifact is queued.
+    fn poll_saved(&mut self, cx: &mut Context<'_>) -> Poll<Option<Saved>> {
+        match &mut self.host.artifacts {
+            Some(a) => a.sink.poll_saved(cx),
+            None => Poll::Ready(None),
+        }
+    }
+
+    fn saved(&mut self, saved: Saved) {
+        let event = match saved.result {
+            Ok(()) => Event::Saved {
+                frame: saved.frame,
+                artifact: saved.name,
+            },
+            Err(e) => Event::error(
+                Some(saved.frame),
+                ErrorKind::Artifact,
+                format!("{}: {e}", saved.name),
+            ),
+        };
+        self.emit(&event);
     }
 
     fn on_input(&mut self, input: Input) -> Option<Exit> {
@@ -304,12 +310,8 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
             Input::Driver(Some(event)) => return self.on_event(event),
             Input::Refreshed => self.displays(),
             Input::SurfaceClosed => self.surface_lost(),
-            Input::Presented {
-                frame,
-                generation,
-                delay_ms,
-                result,
-            } => self.presented(frame, generation, delay_ms, result),
+            Input::Saved(saved) => self.saved(saved),
+            Input::Presented { shown, result } => self.presented(shown, result),
             Input::Elapsed {
                 frame,
                 delay_ms,
@@ -410,8 +412,8 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
     /// A presentation gets the driver's `error`; a delay is cancelled.
     fn fail_pending(&mut self, error: &OutputError, cause: Cause) {
         match self.pending.take() {
-            Some(Pending::Presenting { frame, .. }) => {
-                self.emit(&Event::output_error(Some(frame), error));
+            Some(Pending::Presenting { shown, .. }) => {
+                self.emit(&Event::output_error(Some(shown.frame), error));
             }
             Some(Pending::Delay { frame, .. }) => self.emit(&Event::Cancelled { frame, cause }),
             None => {}
@@ -506,20 +508,22 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
         if let Some(old) = earlier.as_ref().filter(|old| **old != display) {
             driver.close(old);
         }
-        let opened = driver
-            .query(&display)
-            .and_then(|_| driver.open(&display, depth));
+        let opened = driver.query(&display).and_then(|query| {
+            let surface = driver.open(&display, depth)?;
+            Ok((surface, ModeReport::from(&query.mode)))
+        });
         if opened.is_err() && earlier.as_ref() == Some(&display) {
             // The event above reported the earlier surface closed.
             driver.close(&display);
         }
         drop(driver);
         match opened {
-            Ok(surface) => {
+            Ok((surface, mode)) => {
                 self.generation += 1;
                 let open = Open {
                     surface,
                     generation: self.generation,
+                    mode,
                     stale: false,
                     watch: self.host.hooks.watch_surface(),
                 };
@@ -577,9 +581,14 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
                         metadata.as_ref().map(hdr10_request),
                     );
                     self.pending = Some(Pending::Presenting {
-                        frame,
-                        generation,
-                        delay_ms: delay_ms.unwrap_or(self.host.delay_ms),
+                        shown: Shown {
+                            frame,
+                            generation,
+                            delay_ms: delay_ms.unwrap_or(self.host.delay_ms),
+                            fixture: fixture.into(),
+                            format,
+                            metadata,
+                        },
                         future: Box::pin(future),
                     });
                     return;
@@ -591,18 +600,13 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
     }
 
     /// A failed presentation starts no timer. A zero delay adds no wait.
-    fn presented(
-        &mut self,
-        frame: u64,
-        generation: u64,
-        delay_ms: u32,
-        result: Result<String, OutputError>,
-    ) {
+    fn presented(&mut self, shown: Shown, result: Result<String, OutputError>) {
+        let (frame, generation, delay_ms) = (shown.frame, shown.generation, shown.delay_ms);
         let status = match result {
             Ok(status) => status,
             Err(e) => return self.emit(&Event::output_error(Some(frame), &e)),
         };
-        self.current = Some((frame, generation));
+        self.current = Some(shown);
         self.emit(&Event::Submitted {
             frame,
             generation,
@@ -620,12 +624,17 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
         }
     }
 
+    /// Checks the descriptor and queues the artifact. A capture with an
+    /// invalid descriptor is saved too, for its raw data.
     fn capture(&mut self, frame: u64) {
-        let open = self
+        let current = self.current.as_ref().filter(|c| c.frame == frame);
+        let found = self
             .open
             .as_ref()
-            .filter(|o| !o.stale && self.current == Some((frame, o.generation)));
-        let Some(open) = open else {
+            .filter(|o| !o.stale)
+            .zip(current)
+            .filter(|(o, c)| c.generation == o.generation);
+        let Some((open, shown)) = found else {
             let e = Event::error(
                 Some(frame),
                 ErrorKind::StaleFrame,
@@ -638,12 +647,69 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
             frame,
             generation: open.generation,
         };
-        let CaptureResult::Unavailable { reason } = self.host.capture.capture(&target);
-        self.emit(&Event::Captured {
+        let captured = |result, reason, artifact| Event::Captured {
             frame,
-            result: CaptureOutcome::Unavailable,
+            result,
             reason,
-        });
+            artifact,
+        };
+        let capture = match self.host.capture.capture(&target) {
+            Ok(capture) => capture,
+            Err(reason) => {
+                return self.emit(&captured(CaptureOutcome::Unavailable, Some(reason), None));
+            }
+        };
+        let check = match capture.validate() {
+            Ok(_) => Check {
+                result: CaptureOutcome::Pass,
+                reason: None,
+            },
+            Err(e) => Check {
+                result: CaptureOutcome::Fail,
+                reason: Some(e.to_string()),
+            },
+        };
+        let Some(artifacts) = &mut self.host.artifacts else {
+            let event = match check.result {
+                CaptureOutcome::Pass => {
+                    captured(CaptureOutcome::Unavailable, Some(NO_ARTIFACTS.into()), None)
+                }
+                _ => captured(check.result, check.reason, None),
+            };
+            return self.emit(&event);
+        };
+        let run = RunRecord {
+            driver: self.host.viewer.id().into(),
+            display: open.surface.display.to_string(),
+            generation: open.generation,
+            surface_size: [open.surface.size.0, open.surface.size.1],
+            mode: open.mode.clone(),
+            frame,
+            fixture: shown.fixture.clone(),
+            format: FormatRecord {
+                encoding: shown.format.encoding.id().into(),
+                depth: shown.format.depth.bits(),
+            },
+            metadata: shown.metadata.clone(),
+            delay_ms: shown.delay_ms,
+            environment: artifacts.environment.clone(),
+        };
+        let artifact = Artifact {
+            check: check.clone(),
+            run,
+            capture,
+        };
+        let event = match artifacts.sink.submit(artifact) {
+            Ok(name) => captured(check.result, check.reason, Some(name)),
+            Err(e) => {
+                let reason = match check.reason {
+                    Some(r) => format!("{r}; not saved: {e}"),
+                    None => e,
+                };
+                captured(CaptureOutcome::Fail, Some(reason), None)
+            }
+        };
+        self.emit(&event);
     }
 }
 

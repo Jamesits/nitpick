@@ -103,15 +103,6 @@ TODO:
 - Without `QT_D3D_NO_VBLANK_THREAD`, `nitpick --test-host` on Windows 11 with Qt 6.12.0 got no `UpdateRequest` in the pattern window, and each frame timed out; see [Test host](../design/output_driver/qt.md#test-host). Find the cause, for example the adapter of the Qt vsync service, the screen (an HDR recorder with an 8 bpc wire), or the missing Qt Quick window. If the cause is in `pattern_window.cpp`, correct it there and remove the variable from the test host.
 - Check whether the launcher depends on its Qt Quick window for the update requests: show a pattern with the QML window minimized, and with the QML window on another screen. A timeout of a frame is a failure.
 
-### 34. Add capture descriptors and result artifacts
-
-Requires: 33.
-
-TODO:
-
-- Add the raw-plane capture interface and result writer from [Host boundary](../design/output_driver/testing.md#host-boundary). Save source and frame identity, colour descriptors, raw API metadata, run settings and unmodified samples. Keep previews separate.
-- With synthetic captures, verify row pitch, channel order, plane layout, unknown fields and artifact round trips. Return `pass`, `fail` or `unavailable` with a reason. Bound artifact queues and reject invalid descriptors without inventing a colour space.
-
 ### 35. Reject stale captures and sample valid regions
 
 Requires: 34.
@@ -119,7 +110,22 @@ Requires: 34.
 TODO:
 
 - Add the binary frame marker, optional heartbeat, bounded capture wait and region selection from [Timing and frame identity](../design/output_driver/testing.md#timing-and-frame-identity).
+- `CaptureAdapter::capture` is synchronous, and the host calls it and checks the descriptor on its own thread (the Qt GUI thread for the QRhi host); see [Capture interface and artifacts](../design/output_driver/testing.md#capture-interface-and-artifacts). Make the capture asynchronous for the bounded wait. Define and test what a new `show`, `open`, `close`, display change, disconnect and `quit` do to a pending capture, in the shared host contract on both executors.
 - Replay synthetic frame streams. Verify timestamps, current marker, three matching frames, deadline, resize and display-state changes. Test inset patch sampling separately from one-pixel geometry. Do not resize a capture to pass comparison.
+
+### 62. Connect capture artifacts to the hosts
+
+Requires: 34. Do this with the first capture adapter (39, 40 or 41); before it, both hosts give `unavailable` for every capture.
+
+TODO:
+
+- Add an artifact directory option to `nitpick --test-host` and `nitpick-cli --test-host`, and give `TestHost::artifacts` an `ArtifactWriter`. Select and document the queue size. Fill the `Environment` fields that each host can read: OS and build, GPU and driver, Qt version and QRhi backend, or browser and engine version from the client. Leave the EDID hash and the profile hash `null` until the device worker of item 48 gives them.
+- Run a process test of each host with an artifact directory: `pass`, `saved`, the files and `read` of the artifact.
+
+Open questions:
+
+- At `quit`, the host waits for each queued write without a deadline, so a write that does not end blocks `stopped`. Must the wait have a deadline, and must the host then report `error` with kind `artifact` for each write that did not end?
+- Raw API metadata is a JSON object plus named binary blobs. How must each adapter convert native metadata (Core Foundation dictionaries of pixel-buffer attachments, PipeWire SPA pods, WinRT properties) without loss? Record the rule in [Platform capture adapters](../design/output_driver/testing.md#platform-capture-adapters).
 
 ### 36. Add comparison metrics and fixed limits
 
@@ -164,6 +170,7 @@ Requires: 34, 35.
 Open questions:
 
 - Which ScreenCaptureKit preset and high-precision format preserve the required signal on the selected macOS runner? Absolute luminance remains unverified until qualification.
+- The capture descriptor has no chroma siting field, and a sample read of a subsampled channel gives the block of the pixel. If a YCbCr format is selected, must the descriptor record chroma siting for the explicit conversion?
 
 TODO:
 
@@ -315,7 +322,7 @@ TODO:
 
 ### 51. Qualify capture adapters and compare output
 
-Requires: 32, 35, 36, 38, 47, 48, plus the applicable adapter from 39, 40, 41. Windows profile comparisons also require 43, 50.
+Requires: 32, 35, 36, 38, 47, 48, 62, plus the applicable adapter from 39, 40, 41. Windows profile comparisons also require 43, 50.
 
 TODO:
 

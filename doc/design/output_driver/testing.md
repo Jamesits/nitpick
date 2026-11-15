@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. Capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts) exist with synthetic-capture tests. No host has a capture adapter or an artifact directory. Capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -215,11 +215,11 @@ Requests (field `request`):
 | `query` | `display`: `DisplayId` text | `query`: each `Support` as `state` and `reason`, and the mode |
 | `open` | `display`, `depth` (10 or 12) | `surface` with `state: open` |
 | `show` | `frame`, `fixture`; optional `delay_ms` and `metadata` | `submitted` after the driver acknowledgement, then `ready` after the delay |
-| `capture` | `frame` | `captured` |
+| `capture` | `frame` | `captured`; with an `artifact` name, `saved` or `error` with kind `artifact` follows later |
 | `close` | | `surface` with `state: closed` |
 | `quit` | | `stopped` |
 
-Other events are `display` (a driver-side change: `connected`, `authenticated`, `ready`, `changed` or `disconnected`), `listening` and `pairing_code` (browser host), `cancelled` with a `cause`, and `error` with a `kind` and, where one applies, the frame. The Rust types in `protocol.rs` define all fields. The tests parse the lines with these types.
+Other events are `display` (a driver-side change: `connected`, `authenticated`, `ready`, `changed` or `disconnected`), `listening` and `pairing_code` (browser host), `cancelled` with a `cause`, `saved` with the frame and the artifact name, and `error` with a `kind` and, where one applies, the frame. The Rust types in `protocol.rs` define all fields. The tests parse the lines with these types.
 
 Rules:
 - Invalid JSON, an unknown request, a missing or unknown field or an invalid depth gives `error` with kind `malformed`. It changes no state.
@@ -230,13 +230,60 @@ Rules:
 - A display change of the surface (browser: a viewport change) makes the surface `stale`. Then `show` fails with `stale_surface` until the next `open`. A disconnect, or a pattern window that closes outside the host (for example by Esc), makes the surface `closed`.
 - A disconnect or a display change during a presentation gives `error` with the driver error for that change: kind `disconnected`, or kind `platform` with the driver text. The host gives the same event if it handles the driver result first or the change first; see the decision table above. A new `show`, `open`, `close` or `quit` gives `cancelled`.
 - A disconnect or a display change during the measurement delay gives `cancelled`.
-- `capture` applies only to the frame of the last `submitted` on the open surface; another frame gives `stale_frame`. The `CaptureAdapter` trait of `nitpick-test-host` is the capture boundary. Neither host has a capture adapter: `captured` gives `result: unavailable` and the reason.
+- `capture` applies only to the frame of the last `submitted` on the open surface; another frame gives `stale_frame`. The result is in [Capture interface and artifacts](#capture-interface-and-artifacts). Neither host has a capture adapter: `captured` gives `result: unavailable` and the reason.
+- The host sends `stopped` only after each queued artifact has its `saved` or `error` event.
 
 For device tests, add device enumeration and query, profile preparation, assignment and restoration through `DisplayDeviceControl`. Keep these separate from output requests. Save the prepared recovery record before assignment. A profile change invalidates the current measurement and capture generation under [the device lifecycle](../display_device.md#identity-and-execution).
 
-Keep capture outside `OutputDriver`. A capture adapter returns raw planes plus a descriptor: width, height, row pitch, plane layout, channel order, bit depth, alpha, transfer, primaries, white point, range, luminance scale, timestamps and source identity. Preserve raw API metadata too. Unknown fields stay unknown. FP16 storage alone does not establish scRGB or 80 cd/m².
+### Capture interface and artifacts
 
-For each capture, save the fixture and frame IDs, surface generation, submitted format, OS/build, GPU/driver, Qt/backend or browser/engine version, display ID and EDID hash, HDR state, scale/zoom, profile hash, metadata, measurement delay and capture configuration. Save unmodified samples and a machine-readable result. Previews are separate and labelled as tone mapped.
+Capture is outside `OutputDriver`. The `capture` module of `nitpick-test-host` has the interface; the `artifact` module writes and reads the results. Neither depends on an OS capture API.
+
+The `CaptureAdapter` trait gets the display, frame and generation of the acknowledged frame. It returns a `Capture` or the reason why no capture is available (for example permission or API failure). A `Capture` has:
+- The raw planes, with the row padding of the API.
+- A descriptor: width, height, planes, alpha meaning, colour, timestamps and source identity.
+- Raw API metadata as a JSON object, and binary API metadata as named blobs. A blob name has 1 to 64 characters of `a`–`z`, `0`–`9`, `_` and `-`, because it is a part of a file name.
+- The adapter configuration, as a JSON object.
+- An optional preview PNG, tone mapped by the adapter or the OS. It is never a sample source.
+
+Each colour field (transfer, primaries, white point, range, YCbCr matrix, luminance scale) is `null` if the API does not give it. Nothing fills an unknown field. FP16 storage alone does not establish scRGB or 80 cd/m². The luminance scale gives the cd/m² of a linear value 1.0 after the transfer decode, or `relative`. A timestamp keeps the raw ticks, the tick rate and its time base (QPC, `mach_absolute_time` or `CLOCK_MONOTONIC`); compare only timestamps of one time base.
+
+Plane layout. A plane is rows of blocks. A block is 1 to 16 bytes, read as one integer in the byte order of the plane. Each channel is a bit field of that integer: shift, width and kind (unsigned integer up to 32 bits, or binary16 or binary32 float). This one model covers interleaved bytes (BGRA8, RGBA FP16), packed words (`R10G10B10A2`), samples in the high bits of a 16-bit word (P010) and big-endian components. **Deviation from per-component byte order:** a big-endian block of 16-bit components has its first component in the highest bits. A plane has subsampling 1 or 2 in each direction; only `Cb` and `Cr` can be subsampled. A sample read of a subsampled channel gives the block that holds the pixel; there is no chroma siting or interpolation. A binary16 sample is widened to binary32 without other change.
+
+Validation rejects a descriptor that does not describe its planes. It does not change the descriptor. Rules:
+- Width and height above 0. One data plane for each descriptor plane.
+- Fields inside the block, not overlapping, not of zero width. Integer fields at most 32 bits; float fields 16 or 32 bits.
+- The row pitch at least the row size. The data length from $p\,(h-1) + r$ to $p\,h$, with $p$ the row pitch, $r$ the row size and $h$ the plane rows: the last row can end without its padding.
+- The channels are R, G, B, or Y, Cb, Cr, each set with an optional A. Each channel in one field only.
+- All colour channels have the same kind and width; A can differ. **Restriction:** formats with unequal colour widths, for example RGB565, are rejected.
+- An alpha meaning only with an A field. A range only for integer samples. A YCbCr matrix only for YCbCr.
+- Custom chromaticities finite, with $x \ge 0$, $y > 0$ and $x + y \le 1$. An absolute luminance scale finite and above 0. **Deviation:** PQ with a relative scale or an absolute scale other than 10000 cd/m² is rejected, because ST 2084 fixes the scale.
+- A tick rate above 0. Valid blob names.
+
+`captured` gives one result:
+
+| Result | Condition | `artifact` |
+|---|---|---|
+| `unavailable` | No adapter, the adapter returned a reason, or a valid capture in a host without an artifact directory | none |
+| `fail` | Invalid descriptor (the reason is the first defect), or the artifact queue is full | the artifact name if queued |
+| `pass` | Valid descriptor and the artifact is queued | the artifact name |
+
+**Deviation:** a capture with an invalid descriptor is saved too, so its raw data can be examined. `pass` checks only the descriptor; stale captures and comparisons are separate checks.
+
+Each artifact records the check result, the capture and a run record: driver, display ID, surface generation and size, the mode of the query before `open` (HDR state, gamut, scale and luminance values), frame ID, fixture ID, submitted format, submitted metadata (`null`: none), measurement delay and the host environment. The environment fields (OS and build, GPU and driver, Qt and backend or browser and engine, EDID hash, profile hash) are `null` where the host does not read them.
+
+An `ArtifactWriter` writes on its own thread. At most a set number of artifacts are queued or in progress; an artifact counts until the host takes its result. A full queue gives `fail`, so memory does not grow without a limit. The host reports each result in submission order as `saved` or `error` with kind `artifact`. The writer starts only in an empty root directory, so names from an earlier run cannot repeat. The capture call and the descriptor check run on the host thread; the adapter interface is synchronous.
+
+Artifact directory `<root>/<nnnnnn>-frame-<frame>`, with `nnnnnn` the submission number from 1. The writer writes the files to `.<name>.partial` and then renames it, so another process sees only complete artifacts:
+
+| File | Content |
+|---|---|
+| `result.json` | version (1), check, run record, descriptor, file names and sizes, raw JSON metadata, configuration |
+| `plane-<i>.bin` | the bytes of plane $i$, unchanged |
+| `raw-<name>.bin` | a raw metadata blob |
+| `preview-tone-mapped.png` | the preview, if any |
+
+The reader rejects another version, unknown JSON fields, other file names and other file sizes.
 
 ### Timing and frame identity
 

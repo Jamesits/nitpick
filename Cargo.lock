@@ -2520,10 +2520,12 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
+ "half",
  "nitpick-core",
  "nitpick-fixtures",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

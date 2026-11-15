@@ -173,6 +173,7 @@ pub fn main() -> ExitCode {
             states: states.clone(),
         }),
         capture: Box::new(NoCapture(NO_CAPTURE.into())),
+        artifacts: None,
         fixtures: Rc::new(fixtures),
         delay_ms: DEFAULT_DELAY_MS,
     };

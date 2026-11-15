@@ -140,7 +140,18 @@ pub enum Event {
     Captured {
         frame: u64,
         result: CaptureOutcome,
-        reason: String,
+        /// Always with `fail` and `unavailable`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// The name of the queued artifact; [`Event::Saved`] follows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
+    },
+    /// The artifact is complete. A failed write gives `error` with kind
+    /// `artifact` instead.
+    Saved {
+        frame: u64,
+        artifact: String,
     },
     /// Always the last event.
     Stopped {
@@ -233,6 +244,8 @@ pub enum ErrorKind {
     StaleFrame,
     /// The measurement delay timer stopped.
     Timer,
+    /// An artifact write failed.
+    Artifact,
     /// [`OutputError::Unsupported`].
     Unsupported,
     /// [`OutputError::Disconnected`].
@@ -255,10 +268,16 @@ impl ErrorKind {
     }
 }
 
-/// Result of a capture check. Raw captures are not implemented.
+/// Result of a capture check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureOutcome {
+    /// The descriptor describes the planes; the artifact is queued.
+    Pass,
+    /// An invalid descriptor, or the artifact queue is full.
+    Fail,
+    /// No capture adapter, no capture from the adapter, or no artifact
+    /// directory.
     Unavailable,
 }
 

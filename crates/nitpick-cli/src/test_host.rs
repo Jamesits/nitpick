@@ -100,6 +100,7 @@ pub async fn run(
         clock: Box::new(TokioClock),
         hooks: Box::new(BrowserHooks),
         capture: Box::new(NoCapture(NO_CAPTURE.into())),
+        artifacts: None,
         fixtures: Rc::new(fixtures),
         delay_ms,
     };

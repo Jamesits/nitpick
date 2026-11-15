@@ -129,9 +129,27 @@ fn events_have_a_fixed_form() {
             Event::Captured {
                 frame: 7,
                 result: CaptureOutcome::Unavailable,
-                reason: "none".into(),
+                reason: Some("none".into()),
+                artifact: None,
             },
             json!({"event": "captured", "frame": 7, "result": "unavailable", "reason": "none"}),
+        ),
+        (
+            Event::Captured {
+                frame: 7,
+                result: CaptureOutcome::Pass,
+                reason: None,
+                artifact: Some("000001-frame-7".into()),
+            },
+            json!({"event": "captured", "frame": 7, "result": "pass",
+                   "artifact": "000001-frame-7"}),
+        ),
+        (
+            Event::Saved {
+                frame: 7,
+                artifact: "000001-frame-7".into(),
+            },
+            json!({"event": "saved", "frame": 7, "artifact": "000001-frame-7"}),
         ),
         (Event::Stopped { error: None }, json!({"event": "stopped"})),
     ];
