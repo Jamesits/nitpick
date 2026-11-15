@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts), the frame marker, frame acceptance and region selection of [Timing and frame identity](#timing-and-frame-identity) exist with synthetic-capture tests. The [reference metric](#reference-metric) and the per-case limits of [Pass criteria](#pass-criteria) exist in `nitpick-compare` with unit tests; no runner uses them yet. The offscreen draw of [QRhi readback](#qrhi-readback) passes on D3D11 and on Vulkan, on Windows only; the swap-chain readback is not implemented. No host has a capture adapter or an artifact directory. Capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts), the frame marker, frame acceptance and region selection of [Timing and frame identity](#timing-and-frame-identity) exist with synthetic-capture tests. The [reference metric](#reference-metric) and the per-case limits of [Pass criteria](#pass-criteria) exist in `nitpick-compare` with unit tests; no runner uses them yet. The offscreen draw of [QRhi readback](#qrhi-readback) and the [swap-chain checks](#swap-chain-checks) pass on D3D11 and on Vulkan, on Windows only. No host has a capture adapter or an artifact directory. Capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -63,6 +63,8 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 | Expected values | call production conversion or Little CMS; independent reference | Checked-in vectors from a separate f64 reference. Shared conversion code can hide the same error twice. |
 | QRhi check | upload-texture dump; draw readback | Read back after the draw. An upload dump misses shader and render-target errors. |
 | QRhi readback draw path | a copy of the draw code in the test; one renderer for the window and the readback, in the application library | One renderer. A copy can differ from the window. Cost: the application binary contains the offscreen readback code, which only tests use. |
+| Swap-chain test window | a separate test window; a probe in the production pattern window | A probe in the production window, so that the test runs the real render and submission path. Cost: global probe state and a few branches in each render. Only the probe sets the transfer-source flag of the swap chain. |
+| Swap-chain failure cases | induce them on the device (device removal, TDR, resize); inject them at the `QRhi` frame results | Inject. D3D11 has no call that removes one device; a TDR resets the GPU for all processes. Qt 6.12 D3D11 never gives an out-of-date swap chain. The injection checks the handling of each result in the window and the driver, not the cause. |
 | Capture interface | Windows-only scripts; common result with OS adapters | Common result. Each adapter must report its format and colour contract. |
 | Error limit | exact bytes everywhere; perceptual error everywhere | Exact transport checks plus numeric and perceptual checks at later boundaries. |
 | Profile handling | custom ICC/MHC2 parser; Little CMS through a Rust binding | Little CMS for profile reading, MHC2 extraction and conventional ICC transforms. Use the library's existing profile support. The adapter also checks and decodes the raw `MHC2` tag, because the Little CMS reader does not check bounds; see [MHC2 profile adapter](#mhc2-profile-adapter). |
@@ -428,7 +430,7 @@ Use the production upload, shader and pipeline on D3D11, Metal and Vulkan. First
 
 An offscreen pass checks the draw path. It does not prove the actual swap-chain format or tag. Record native format and colour-space setup separately. Fail a claimed swap-chain test if it only read the upload texture. Normalize row pitch and image origin as stated below, without colour conversion. Exact stored values and geometry are required for this copy shader. A format conversion needs a separate test with its stated rounding bound.
 
-**Offscreen pass.** The pattern window and the offscreen check use the same `PatternRenderer` (`cpp/pattern_renderer.cpp`): texture upload, copy shader, pipeline and pass. `nitpick_app::readback` (`cpp/readback.cpp`) creates a `QRhi` without a window. It draws into a texture of the requested swap chain format (`RGB10A2` for HDR10, `RGBA16F` for FP16 scRGB) in one offscreen frame and reads that texture back. **Unverified:** that each native swap chain uses the same format and channel order; record it separately, as stated above. `QRhi` documents that the readback is complete when `endOffscreenFrame` returns.
+**Offscreen pass.** The pattern window and the offscreen check use the same `PatternRenderer` (`cpp/pattern_renderer.cpp`): texture upload, copy shader, pipeline and pass. `nitpick_app::readback` (`cpp/readback.cpp`) creates a `QRhi` without a window. It draws into a texture of the requested swap chain format (`RGB10A2` for HDR10, `RGBA16F` for FP16 scRGB) in one offscreen frame and reads that texture back. The native swap chain formats have the same channel order; see the record in [Output report](qt.md#output-report). `QRhi` documents that the readback is complete when `endOffscreenFrame` returns.
 
 Normalization (`normalize` in `readback.rs`):
 - **Deviation from a documented layout:** `QRhiReadbackResult` gives only the format, the pixel size and the bytes. The Qt documentation states no row pitch. The row pitch is the byte count divided by the height. It must hold one tightly packed row; the padding is removed. All runs below gave tightly packed rows.
@@ -455,7 +457,49 @@ A one-time mutation check on WARP moved the drawn origin down by one row; all 96
 
 **Not verified:** Metal on macOS; Vulkan on Linux; a Vulkan software device (no CPU Vulkan device was installed).
 
-Exercise `beginFrame`/`endFrame` failures, out-of-date surfaces, device loss, close during upload, delayed render events and two rapid replacements. Success must refer to this frame's successful submission. No early success after `requestUpdate()` is allowed.
+### Swap-chain checks
+
+`tests/qrhi_swap_chain.rs` of `nitpick-app` drives the real pattern window through `QrhiDriver` on the first screen, which must have HDR on. It polls the `present` future and runs the Qt event loop between the polls. A test probe (`swap_chain_probe.rs`, implemented in `cpp/pattern_window.cpp`) gives:
+- Swap-chain readback. From the next `open`, the swap chain has `QRhiSwapChain::UsedAsTransferSource`. Each render that takes a frame for upload reads back the swap-chain image (`QRhiReadbackDescription` without a texture) at the end of the pass, before the present. `QRhi::finish` after `endFrame` completes the readback. The result has the frame ID of that render. The launcher and the test host do not enable it.
+- The native swap-chain record of [Output report](qt.md#output-report), the swap-chain size, the pattern area and the transfer-source flag.
+- The frame IDs that the window queued and uploaded since the last `open`, and the bytes of the last native metadata structure as passed to the native call.
+- Render hold: renders do nothing until the release, as in a window without updates.
+- Faults at the `QRhi` frame results: `beginFrame` gives device loss, an error or an out-of-date swap chain without a call; `endFrame` runs and its result becomes device loss or an error; the texture upload fails.
+
+A swap-chain readback that Qt skips (no transfer-source support of the surface, or a format without a readback format) gives an error with the reason. The check then fails; it does not use the offscreen pass instead.
+
+Checks. Each frame is a full-surface image. The expected swap chain is the production CPU output in the pattern area and opaque black elsewhere, byte for byte. A readback must have the frame ID of the acknowledged frame.
+
+| Check | Pass condition |
+|---|---|
+| Native swap chain (10 and 12 bits) | The record of the request in [Output report](qt.md#output-report), no fallback; the surface description names the format and the colour space |
+| Geometry (10 and 12 bits) | Tiles of 61×59 colours over the surface: a flip, an offset, a scale or a channel swap changes the readback. The prime periods also limit the FP16 conversion time, which grows with the number of colours. Also the fixture frames `state-frame-a` and `state-frame-b` at the top-left corner. |
+| Metadata | A request with a different value in each field: the native structure equals the code-unit values (DXGI: maximum mastering luminance in whole cd/m²), and the status line gives them. Metadata off: D3D11 calls `SetHDRMetaData(NONE)`; Vulkan reports that the earlier metadata stays. |
+| Delayed submission | Renders held: no acknowledgement in 500 ms and no upload. After the release: the acknowledgement and the readback of that frame. |
+| Rapid replacement | Two frames queued before one render; the first future is dropped, as the host does. Only the second uploads, completes and is in the readback. |
+| Out-of-date swap chain | Once: the render resizes the swap chain and begins again. Twice: the next update uploads. At each call: `Timeout`, and the frame does not upload or read back later. |
+| Device loss and errors | `beginFrame` device loss or error: `Platform` with the text of the window; the frame does not upload later. `endFrame` device loss or error: `Platform`; the upload ran. Upload failure: `Platform`; the readback of that render holds the previous pattern. Then the next frame shows. |
+| Close | `deleteLater`, as Esc does, while the frame waits for its render, and (12 bits) while the worker converts: `Disconnected`; no frame queued in the closed window |
+
+Limits of the method:
+- The injection replaces `QRhi` results; it does not remove the device or resize the surface. The behaviour after a real device loss (each later `beginFrame` fails) is from the Qt 6.12 source, not from a test.
+- "Close during upload": upload, draw and `endFrame` run in one synchronous render on the GUI thread, so a close cannot come between them. The test closes before the render and during the conversion.
+- The swap chain of this test has the transfer-source flag; the production swap chain does not. Qt 6.12 D3D11 ignores the flag; Vulkan adds `VK_IMAGE_USAGE_TRANSFER_SRC_BIT`.
+- DXGI and Vulkan have no call that reads HDR metadata back. The metadata check covers the structure at the native call, not the swap chain or the wire.
+- The test makes the `QGuiApplication` on a test thread and sets `QT_D3D_NO_VBLANK_THREAD`, as the [test host](qt.md#test-host) does.
+
+Run with `cargo nextest run -p nitpick-app --test qrhi_swap_chain --run-ignored only`. On Windows, the Vulkan test needs `VULKAN_SDK` at build time, as the [QRhi readback](#qrhi-readback) tests do.
+
+Results: Windows 11 build 26200, Qt 6.12.0, debug build, NVIDIA GeForce RTX 5090 with driver 616.92, Vulkan-Headers 1.4.363. One 3840×2160 screen (Atomos Ninja V recorder) with HDR on and an 8 bpc wire. Each test took about 57 s.
+
+| Backend | Native swap chain | Result |
+|---|---|---|
+| D3D11 | as in the record table | pass |
+| Vulkan (Windows) | as in the record table; `VK_EXT_hdr_metadata` available | pass |
+
+A one-time mutation check on D3D11 moved the drawn origin down by one row. The first readback then differed in all 8294400 pixels.
+
+**Not verified:** Metal on macOS; Vulkan on Linux; the record and the warning of a fallback swap chain (HDR off); a real device loss, out-of-date swap chain or resize.
 
 ### Browser integration
 

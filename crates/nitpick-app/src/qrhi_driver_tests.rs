@@ -49,6 +49,7 @@ pub(crate) struct WindowLog {
     pub(crate) size: Option<(usize, usize)>,
     fallback: String,
     pub(crate) opens: Vec<(i32, bool)>,
+    backends: Vec<Backend>,
     pub(crate) closes: usize,
     pub(crate) queued: Vec<(FrameId, Vec<u8>)>,
     /// `set` or `clear`, in call order, with the number of frames queued
@@ -100,9 +101,15 @@ impl PatternWindow for FakeWindow {
         Ok(self.0.borrow().size.unwrap_or(SIZE))
     }
 
-    fn open(&mut self, screen: i32, fp16: bool) -> Result<ffi::PatternSurface, String> {
+    fn open(
+        &mut self,
+        screen: i32,
+        fp16: bool,
+        backend: Backend,
+    ) -> Result<ffi::PatternSurface, String> {
         let mut log = self.0.borrow_mut();
         log.opens.push((screen, fp16));
+        log.backends.push(backend);
         let size = log.size.unwrap_or(SIZE);
         Ok(ffi::PatternSurface {
             fallback: log.fallback.clone(),
@@ -243,6 +250,7 @@ fn displays_use_the_native_screen_key() {
     s.driver.open(&s.display, BitDepth::Ten).unwrap();
     assert_eq!(s.window.0.borrow().opens[2], (0, false));
     assert_eq!(s.driver.query(&id(0)), Err(OutputError::Disconnected));
+    assert_eq!(s.window.0.borrow().backends, vec![Backend::D3d11; 3]);
 }
 
 #[test]
@@ -413,6 +421,41 @@ fn render_failures_and_close_complete_the_future() {
         assert!(flag.take());
         assert_eq!(poll(&mut future, &flag), Poll::Ready(Err(expected)));
     }
+}
+
+#[test]
+fn a_window_closed_during_conversion_disconnects() {
+    let mut s = setup();
+    let surface = open(&mut s);
+    let img = image(100);
+    let req = request();
+    let frame = Frame {
+        image: &img,
+        format: PQ_10,
+        metadata: Some(&req),
+    };
+    let flag = Arc::new(WakeFlag::default());
+    let mut future = s.driver.present(&surface, &frame);
+    assert!(poll(&mut future, &flag).is_pending());
+    // Esc: the C++ window destructor reports the close.
+    submission::closed();
+    s.workers.take()();
+    assert_eq!(
+        poll(&mut future, &flag),
+        Poll::Ready(Err(OutputError::Disconnected))
+    );
+    // Neither the metadata nor the frame went to the closed window.
+    assert_eq!(s.window.0.borrow().metadata, vec![]);
+    assert_eq!(s.window.0.borrow().queued.len(), 0);
+    drop(future);
+
+    // A new open gives a working surface.
+    let surface = s.driver.open(&s.display, BitDepth::Ten).unwrap();
+    let mut future = s.driver.present(&surface, &frame);
+    assert!(poll(&mut future, &flag).is_pending());
+    s.workers.take()();
+    assert!(poll(&mut future, &flag).is_pending());
+    assert_eq!(s.window.0.borrow().queued.len(), 1);
 }
 
 #[test]

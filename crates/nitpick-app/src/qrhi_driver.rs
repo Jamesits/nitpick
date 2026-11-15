@@ -35,8 +35,14 @@ pub trait PatternWindow: MetadataSink {
     /// Replaces any open window.
     ///
     /// # Errors
-    /// The window or its swap chain could not be created.
-    fn open(&mut self, screen: i32, fp16: bool) -> Result<ffi::PatternSurface, String>;
+    /// The window or its swap chain could not be created, or `backend` is
+    /// not built in.
+    fn open(
+        &mut self,
+        screen: i32,
+        fp16: bool,
+        backend: Backend,
+    ) -> Result<ffi::PatternSurface, String>;
     fn close(&mut self);
     /// Queues `pixels` as `frame` and returns. The window reports the
     /// frame to `submission`.
@@ -76,8 +82,13 @@ impl PatternWindow for BridgeWindow {
         Ok((size(width)?, size(height)?))
     }
 
-    fn open(&mut self, screen: i32, fp16: bool) -> Result<ffi::PatternSurface, String> {
-        ffi::open_pattern_window(screen, fp16).map_err(|e| e.to_string())
+    fn open(
+        &mut self,
+        screen: i32,
+        fp16: bool,
+        backend: Backend,
+    ) -> Result<ffi::PatternSurface, String> {
+        ffi::open_pattern_window(screen, fp16, backend.pattern_backend()).map_err(|e| e.to_string())
     }
 
     fn close(&mut self) {
@@ -151,6 +162,9 @@ struct Opened {
     warnings: Vec<String>,
     description: String,
     metadata: SwapChainMetadata,
+    /// `submission::close_count` after the open. A higher count means that
+    /// the window closed outside the driver, for example by Esc.
+    closes: u64,
 }
 
 pub struct QrhiDriver<W = BridgeWindow, J = Threads> {
@@ -252,8 +266,10 @@ impl<W: PatternWindow, J: Workers> OutputDriver for QrhiDriver<W, J> {
         self.opened = None;
         let native = self
             .window
-            .open(screen, fp16)
+            .open(screen, fp16, self.backend)
             .map_err(OutputError::Platform)?;
+        // Read after the open, which closes an earlier window.
+        let closes = submission::close_count();
         let surface = display::surface(id.clone(), &native)?;
         warnings.extend(display::surface_warning(depth, &native));
         self.opened = Some(Opened {
@@ -264,6 +280,7 @@ impl<W: PatternWindow, J: Workers> OutputDriver for QrhiDriver<W, J> {
             warnings,
             description: surface.description.clone(),
             metadata: SwapChainMetadata::default(),
+            closes,
         });
         Ok(surface)
     }
@@ -316,6 +333,11 @@ impl<W: PatternWindow, J: Workers> OutputDriver for QrhiDriver<W, J> {
                 .await
                 .map_err(|_| OutputError::Platform("the conversion worker stopped".into()))??;
 
+            // A window that closed during the conversion has no completion
+            // to fail yet; its queue call would give a platform error.
+            if submission::close_count() != open.closes {
+                return Err(OutputError::Disconnected);
+            }
             // No await from here to the queue: the metadata applies to the
             // frame queued next.
             let md = open

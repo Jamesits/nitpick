@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 namespace nitpick {
 
@@ -55,16 +56,56 @@ std::uint32_t displayIdOf(QScreen *screen) {
     }
 }
 
+namespace {
+
+// The NSView layer is a container; the CAMetalLayer is its content
+// sublayer. QRhi's Metal swap chain gets the layer the same way.
+CAMetalLayer *metalLayerOf(QWindow *window) {
+    auto *cocoa = window->nativeInterface<QNativeInterface::Private::QCocoaWindow>();
+    CALayer *content = cocoa ? cocoa->contentLayer() : nil;
+    if (![content isKindOfClass:[CAMetalLayer class]]) {
+        throw std::runtime_error("the pattern window has no CAMetalLayer");
+    }
+    return (CAMetalLayer *)content;
+}
+
+std::string pixelFormatName(MTLPixelFormat f) {
+    switch (f) {
+    case MTLPixelFormatRGB10A2Unorm:
+        return "MTLPixelFormatRGB10A2Unorm";
+    case MTLPixelFormatRGBA16Float:
+        return "MTLPixelFormatRGBA16Float";
+    case MTLPixelFormatBGRA8Unorm:
+        return "MTLPixelFormatBGRA8Unorm";
+    default:
+        return "MTLPixelFormat " + std::to_string(static_cast<unsigned long>(f));
+    }
+}
+
+} // namespace
+
+MetalLayerFormat metalLayerFormat(QWindow *window, bool fp16) {
+    @autoreleasepool {
+        CAMetalLayer *layer = metalLayerOf(window);
+        MetalLayerFormat out;
+        out.pixelFormat = pixelFormatName(layer.pixelFormat);
+        CGColorSpaceRef space = layer.colorspace;
+        CFStringRef name = space ? CGColorSpaceCopyName(space) : nullptr;
+        out.colourSpace = name ? [(__bridge NSString *)name UTF8String] : "none";
+        const CFStringRef want = fp16 ? kCGColorSpaceExtendedLinearSRGB : kCGColorSpaceITUR_2100_PQ;
+        const MTLPixelFormat wantFormat =
+            fp16 ? MTLPixelFormatRGBA16Float : MTLPixelFormatRGB10A2Unorm;
+        out.matches = layer.pixelFormat == wantFormat && name && CFEqual(name, want);
+        if (name) {
+            CFRelease(name);
+        }
+        return out;
+    }
+}
+
 void setLayerHdrMetadata(QWindow *window, const MetalHdrMetadata *md) {
     @autoreleasepool {
-        // The NSView layer is a container; the CAMetalLayer is its content
-        // sublayer. QRhi's Metal swap chain gets the layer the same way.
-        auto *cocoa = window->nativeInterface<QNativeInterface::Private::QCocoaWindow>();
-        CALayer *content = cocoa ? cocoa->contentLayer() : nil;
-        if (![content isKindOfClass:[CAMetalLayer class]]) {
-            throw std::runtime_error("the pattern window has no CAMetalLayer");
-        }
-        CAMetalLayer *layer = (CAMetalLayer *)content;
+        CAMetalLayer *layer = metalLayerOf(window);
         if (@available(macOS 10.15, *)) {
             if (!md) {
                 layer.EDRMetadata = nil;

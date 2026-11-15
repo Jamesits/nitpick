@@ -143,6 +143,12 @@ impl Hooks for QtHooks {
     }
 }
 
+/// Windows: makes `requestUpdate` use its timer, as in the test host. Call
+/// before the application object exists. See `ffi::use_timer_update_requests`.
+pub fn use_timer_update_requests() {
+    ffi::use_timer_update_requests();
+}
+
 fn exit_code(exit: &Exit) -> i32 {
     match exit {
         Exit::Quit | Exit::Stopped(None) => 0,

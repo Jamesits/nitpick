@@ -7,6 +7,7 @@
 namespace nitpick {
 
 // Shared structs, defined by the generated display.cxx.h.
+enum class PatternBackend : std::uint8_t;
 struct DxgiHdrMetadata;
 struct MetalHdrMetadata;
 struct VulkanHdrMetadata;
@@ -18,7 +19,7 @@ std::int32_t screenCount();
 std::int32_t screenPixelWidth(std::int32_t screen);
 std::int32_t screenPixelHeight(std::int32_t screen);
 ScreenIdentity screenIdentity(std::int32_t screen);
-PatternSurface openPatternWindow(std::int32_t screen, bool fp16);
+PatternSurface openPatternWindow(std::int32_t screen, bool fp16, PatternBackend backend);
 void closePatternWindow();
 void presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
                     std::int32_t height, std::uint64_t frame, std::int32_t timeoutMs);

@@ -20,6 +20,7 @@ graph LR
     W --> PR[pattern_renderer.cpp<br/>upload, shader, pipeline]
     PR -->|HDR10 or FP16 scRGB| GPU[GPU output] --> Scope[vectorscope]
     RB[readback.rs, readback.cpp<br/>offscreen QRhi, tests only] --> PR
+    P[swap_chain_probe.rs<br/>tests only] --> W
 ```
 
 `pattern_renderer.cpp` holds the draw path. The pattern window draws it into the swap chain; the [QRhi readback](testing.md#qrhi-readback) check draws it into an offscreen texture.
@@ -30,7 +31,7 @@ Mapping to `OutputDriver`:
 |---|---|
 | `displays` | List the Qt screens by native screen key (see [Screen to device mapping](#screen-to-device-mapping)); get the pattern area size from Qt |
 | `query` | Combine the cached native device report with QRhi path support and conversion limits; report a remapped path, such as an FP16 path without a known luminance scale, as `Unknown` |
-| `open` | `openPatternWindow(screen, fp16)`; `fp16` from the bit depth (see [Swap chain output](#swap-chain-output)) |
+| `open` | `openPatternWindow(screen, fp16, backend)`; `fp16` from the bit depth (see [Swap chain output](#swap-chain-output)); `backend` is the `Backend` of the driver |
 | `present` | Convert on a worker (see [Asynchronous presentation](#asynchronous-presentation)). Then send the [HDR10 static metadata](#hdr10-static-metadata) and `presentPattern(pixels, width, height)`; wait for successful submission of this frame |
 
 The pattern window closes on Esc, Q, Space or a double click.
@@ -112,6 +113,20 @@ The window checks the swap chain format with `QRhiSwapChain::isFormatSupported`.
 - Vulkan: the first surface format of the compositor.
 - Metal: the requested format. Without EDR headroom, macOS clips at SDR white.
 
+After `createOrResize`, the window reads the native format and colour space of the swap chain. The surface description, and thus the status line, names both. A native swap chain other than the one in the table below is also a fallback with a warning. Reason: Qt 6.12 D3D11 also falls back to an 8-bit swap chain if the creation of an accepted HDR format fails; `isFormatSupported` does not show this.
+
+| Backend | Source of the record | 10-bit | 12-bit |
+|---|---|---|---|
+| D3D11 | `IDXGISwapChain1::GetDesc1`; the colour space is set again, see below | `DXGI_FORMAT_R10G10B10A2_UNORM`, `DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020` | `DXGI_FORMAT_R16G16B16A16_FLOAT`, `DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709` |
+| Vulkan | `QVkSwapChain::colorFormat` and `colorSpace` (Qt private header) | `VK_FORMAT_A2B10G10R10_UNORM_PACK32`, `VK_COLOR_SPACE_HDR10_ST2084_EXT` | `VK_FORMAT_R16G16B16A16_SFLOAT`, `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT` |
+| Metal | `CAMetalLayer.pixelFormat` and `colorspace` | `MTLPixelFormatRGB10A2Unorm`, `kCGColorSpaceITUR_2100_PQ` | `MTLPixelFormatRGBA16Float`, `kCGColorSpaceExtendedLinearSRGB` |
+
+The Vulkan HDR10 format has red in the low 10 bits, as `DXGI_FORMAT_R10G10B10A2_UNORM` and the packed CPU output.
+
+**Deviation from Qt:** DXGI has no call that reads the colour space of a swap chain. The window calls `IDXGISwapChain3::SetColorSpace1` again with the colour space of the actual DXGI format: PQ BT.2020 for `R10G10B10A2_UNORM`, linear BT.709 for `R16G16B16A16_FLOAT`, gamma 2.2 BT.709 otherwise. Thus the recorded tag is the tag of the swap chain. Qt 6.12 sets the HDR colour space also on its 8-bit fallback after a failed HDR creation; the second call replaces it with the SDR colour space that the fallback warning states.
+
+**Unverified:** the Metal record; it was not built or run on macOS. The Vulkan record on Linux.
+
 If `SetHDRMetaData` fails on Windows, the status line shows that the metadata was not sent. The pattern stays on the screen.
 
 The bridge queues the frame and returns to the Qt event loop. It reports the frame ID after its texture upload and a successful `endFrame`. This callback resolves the `present` future. `requestUpdate()` alone is not an acknowledgement. The bridge does not run a nested event loop. This does not confirm physical scanout. The launcher then applies the [measurement delay](overview.md#measurement-delay).
@@ -121,11 +136,11 @@ The bridge queues the frame and returns to the Qt event loop. It reports the fra
 | Event | Result |
 |---|---|
 | Render uploads the queued frame, `endFrame` succeeds | Success |
-| `beginFrame` gives an error or device loss | `Platform` error for the queued frame; it does not upload later |
+| `beginFrame` gives an error or device loss | `Platform` error for the queued frame; it does not upload later. After a device loss, Qt 6.12 gives device loss for each later `beginFrame`, so each frame fails until a new `open`; the window does not create a new `QRhi`. |
 | `beginFrame` gives an out-of-date swap chain after one resize | The window retries at the next update |
 | Texture or pipeline creation fails, or `endFrame` fails | `Platform` error for the uploaded frame; the previous pattern stays |
 | 10 s from queueing without an upload | `Timeout`; the frame does not upload later |
-| The window closes or is replaced | `Disconnected` for the pending completion |
+| The window closes or is replaced | `Disconnected` for the pending completion. A close during the conversion, before the frame is queued, also gives `Disconnected`: the driver compares the close count with its value after `open`. |
 | A new frame before the render | The new frame replaces the old pixels; only the new frame uploads |
 
 Cancellation removes the completion. A cancelled frame that is queued can still upload, because the window can show it until a replacement. Late events of other frame IDs do nothing. The timeout timer of a cancelled frame stays in Qt until it expires or the window closes; it then does nothing.
@@ -153,7 +168,7 @@ The unit tests of `qrhi_driver.rs` and `session.rs` use a simulated event loop w
 `nitpick --test-host` runs the [test-host protocol](testing.md#host-boundary) without QML. `test_host.rs` makes a `QGuiApplication` and three `QrhiDriver` values on the shared device cache. The first opens and presents. The second answers `displays` and `query` while a presentation borrows the first. The third lists the screen identities for `refresh`. The state machine runs as one `gui_executor.rs` task. The test host has no `QObject` for `CxxQtThread::queue`, so it posts task steps with `QMetaObject::invokeMethod` on the application object (`cpp/test_host.cpp`). After `stopped`, it ends the event loop. The `submission.rs` close count gives a pattern window that closes outside the host, as in the launcher.
 
 Counter-intuitive:
-- On Windows, the test host sets `QT_D3D_NO_VBLANK_THREAD=1` through `qputenv`, unless the variable is set. Without it, Qt 6.12 sent no `UpdateRequest` to the pattern window when no Qt Quick window existed, and each frame timed out after 10 s. With the variable, `requestUpdate` uses its timer. `std::env::set_var` is not sufficient: Qt reads the C runtime copy of the environment. **Unverified:** the cause, and whether the launcher depends on its Qt Quick window for its update requests.
+- On Windows, the test host sets `QT_D3D_NO_VBLANK_THREAD=1` through `qputenv`, unless the variable is set. Without it, Qt 6.12 sent no `UpdateRequest` to the pattern window when no Qt Quick window existed, and each frame timed out after 10 s. With the variable, `requestUpdate` uses its timer. `std::env::set_var` is not sufficient: Qt reads the C runtime copy of the environment. The [swap-chain checks](testing.md#swap-chain-checks) set it in the same way. **Unverified:** the cause, and whether the launcher depends on its Qt Quick window for its update requests.
 - `nitpick-app` is a library and a binary. The build script links the generated C++ into every target, and that C++ calls the Rust side of the bridges. An integration test gets these Rust symbols only from a library.
 
 ## Signalling
@@ -181,7 +196,7 @@ On Linux, the display state comes from the [screen to device mapping](#screen-to
 
 On macOS, Qt's linear HDR path uses 1.0 for the current SDR white. Its luminance varies with display settings and is not known to the driver. See [Qt's luminance behaviour](https://github.com/qt/qtbase/blob/6.12/src/gui/rhi/qrhi.cpp). Thus macOS reports `available = Unknown` and `exact = No` for 12-bit output, with the reason "absolute FP16 luminance scale unavailable". The window shows the pattern with the 80 cd/m² conversion, so the luminance is wrong by the ratio of SDR white to 80 cd/m². Use it only for a visual check. Do not claim an absolute scale with 80, 100 or Qt's placeholder SDR-white value, or reduce the output to 10 bits. HDR10 10-bit output remains available when the swap chain supports it.
 
-A fragment shader copies one texel per pixel with `texelFetch` (no filtering, no blending). Thus the swap chain gets the texture values unchanged. The [QRhi readback](testing.md#qrhi-readback) check confirms this for an offscreen texture of the swap chain format on D3D11 and Vulkan on Windows. **Unverified:** a readback of the swap chain image itself, and Metal.
+A fragment shader copies one texel per pixel with `texelFetch` (no filtering, no blending). Thus the swap chain gets the texture values unchanged. The [QRhi readback](testing.md#qrhi-readback) check confirms this for an offscreen texture of the swap chain format, and the [swap-chain checks](testing.md#swap-chain-checks) for the swap-chain image itself, on D3D11 and Vulkan on Windows. **Unverified:** Metal, and Vulkan on Linux.
 
 For the supported 80 cd/m² path, convert the code triple $(R', G', B')$ at depth $n$:
 1. Each code is a full-range PQ code on the wire: $L = \mathrm{EOTF}_{PQ}(D / (2^n - 1))$ in cd/m².
@@ -231,7 +246,8 @@ Automatic light levels use $D / (2^n - 1)$ as full-range PQ for every input enco
 | Swap chain | HDR10 for 10-bit; FP16 scRGB for 12-bit | as listed | No API has a 12-bit integer swap chain. FP16 is the only format with more than 10 bits. The window checks the format first, because QRhi falls back without an error. |
 | FP16 luminance scale | assume 80 on all platforms; calibrate each display; reject paths without a known scale; warn on paths without a known scale | warn on paths without a known scale | A guessed scale changes PQ luminance and codes, so `exact` is `No`. The pattern stays usable for a visual check. Calibration is outside the current scope. |
 | Remapped output (HDR off, QRhi format fallback) | fail; show the pattern with a warning | show the pattern with a warning | The OS or the compositor remaps the output, but the pattern stays usable for a visual check. `exact` and the warnings prevent a false claim of exact output. |
-| Adapter (Windows) | default adapter; adapter of the monitor | adapter of the monitor | Prevents a cross-adapter copy on hybrid-GPU systems. QRhi gets the adapter LUID. |
+| Adapter (Windows) | default adapter; adapter of the monitor | adapter of the monitor | Prevents a cross-adapter copy on hybrid-GPU systems. QRhi gets the adapter LUID. Only D3D11 does this; the Windows Vulkan window of the swap-chain tests uses the device that QRhi selects. |
+| Window backend | fixed per OS in the C++ window; `Backend` of the driver passed to `open` | `Backend` of the driver | One value selects the swap chain and the native metadata structure. The swap-chain tests open the same window with Vulkan on Windows. The launcher and the test host use `Backend::current()`: D3D11 on Windows, Metal on macOS, Vulkan elsewhere. |
 | Metadata on Linux | Qt private API; none | Qt private API | QRhi exposes no `VkSwapchainKHR`. Cost: the binary must use the exact Qt version of its private headers. |
 | GUI-thread executor | `qmetaobject` `execute_async`; a C++ bridge that posts with `QMetaObject::invokeMethod`; `async-task` with `CxxQtThread::queue` | `async-task` with `CxxQtThread::queue` | `qmetaobject` is a different Qt binding. `CxxQtThread::queue` is the existing cxx-qt path to the GUI thread and accepts jobs from any thread. `async-task` gives the task state and wakers; the glue code is only the post and the drop handle. |
 | Wake channels | custom wakers in `submission.rs`; `futures-channel` oneshot | `futures-channel` oneshot | The receiver wakes the task on send. A dropped receiver tells the worker that the result is not needed. |

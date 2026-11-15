@@ -50,6 +50,16 @@ pub mod ffi {
         optical_output_scale: f32,
     }
 
+    /// `QRhi` backend of the pattern window. A backend that is not built in
+    /// for the target OS fails the open.
+    #[namespace = "nitpick"]
+    #[repr(u8)]
+    enum PatternBackend {
+        D3d11,
+        Vulkan,
+        Metal,
+    }
+
     /// The open pattern window: pattern area size in pixels and a description
     /// of the swap chain. The pattern area is the swap chain without the
     /// safe-area margins of the window.
@@ -106,11 +116,16 @@ pub mod ffi {
         fn screen_identity(screen: i32) -> Result<ScreenIdentity>;
 
         /// Opens a full-screen window on `screen` with an HDR10 swap chain, or
-        /// an FP16 scRGB swap chain if `fp16`, and replaces any open pattern
-        /// window. Blocks until the swap chain exists.
+        /// an FP16 scRGB swap chain if `fp16`, through `backend`, and
+        /// replaces any open pattern window. Blocks until the swap chain
+        /// exists.
         #[namespace = "nitpick"]
         #[cxx_name = "openPatternWindow"]
-        fn open_pattern_window(screen: i32, fp16: bool) -> Result<PatternSurface>;
+        fn open_pattern_window(
+            screen: i32,
+            fp16: bool,
+            backend: PatternBackend,
+        ) -> Result<PatternSurface>;
 
         /// Closes the open pattern window, if any.
         #[namespace = "nitpick"]
@@ -219,7 +234,9 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// The backend that `pattern_window.cpp` selects for the target OS.
+    /// The backend of the launcher and the test host on the target OS.
+    /// Windows can also open the window with Vulkan, if the build finds
+    /// the Vulkan headers; only the swap-chain tests use it.
     #[must_use]
     pub const fn current() -> Self {
         if cfg!(windows) {
@@ -228,6 +245,15 @@ impl Backend {
             Self::Metal
         } else {
             Self::Vulkan
+        }
+    }
+
+    #[must_use]
+    pub const fn pattern_backend(self) -> ffi::PatternBackend {
+        match self {
+            Self::D3d11 => ffi::PatternBackend::D3d11,
+            Self::Metal => ffi::PatternBackend::Metal,
+            Self::Vulkan => ffi::PatternBackend::Vulkan,
         }
     }
 }
@@ -282,6 +308,7 @@ struct States {
 
 impl DeviceStates {
     /// Starts a refresh and gives its number for [`Self::apply`].
+    #[must_use]
     pub fn begin(&self) -> u64 {
         let mut s = self.0.borrow_mut();
         s.started += 1;
@@ -291,6 +318,7 @@ impl DeviceStates {
     /// Replaces all reports with those of refresh `refresh`, so a removed
     /// or changed screen loses its old report. A refresh older than the
     /// applied one does nothing. Returns whether the reports changed.
+    #[allow(clippy::must_use_candidate, reason = "a refresh can ignore the change")]
     pub fn apply(&self, refresh: u64, reports: DeviceReports) -> bool {
         let mut s = self.0.borrow_mut();
         if refresh <= s.applied {
@@ -302,6 +330,9 @@ impl DeviceStates {
     }
 
     /// The report of the screen with key `key`.
+    ///
+    /// # Errors
+    /// The reason that the screen has no device report.
     pub fn report(&self, key: &str) -> DeviceReport {
         self.0
             .borrow()

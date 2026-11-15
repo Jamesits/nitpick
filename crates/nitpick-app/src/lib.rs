@@ -12,9 +12,14 @@ mod hdr_metadata;
 // attributes on the bridge module itself.
 #[allow(clippy::unnecessary_box_returns)]
 mod launcher;
-mod qrhi_driver;
+pub mod qrhi_driver;
 pub mod readback;
 mod session;
 mod settings;
 mod submission;
+pub mod swap_chain_probe;
 pub mod test_host;
+
+// For the swap-chain tests, which drive the real window through
+// `qrhi_driver`.
+pub use display::{Backend, DeviceStates, device_reports};

@@ -100,7 +100,7 @@ Open questions:
 
 TODO:
 
-- Without `QT_D3D_NO_VBLANK_THREAD`, `nitpick --test-host` on Windows 11 with Qt 6.12.0 got no `UpdateRequest` in the pattern window, and each frame timed out; see [Test host](../design/output_driver/qt.md#test-host). Find the cause, for example the adapter of the Qt vsync service, the screen (an HDR recorder with an 8 bpc wire), or the missing Qt Quick window. If the cause is in `pattern_window.cpp`, correct it there and remove the variable from the test host.
+- Without `QT_D3D_NO_VBLANK_THREAD`, `nitpick --test-host` on Windows 11 with Qt 6.12.0 got no `UpdateRequest` in the pattern window, and each frame timed out; see [Test host](../design/output_driver/qt.md#test-host). Find the cause, for example the adapter of the Qt vsync service, the screen (an HDR recorder with an 8 bpc wire), or the missing Qt Quick window. If the cause is in `pattern_window.cpp`, correct it there and remove the variable from the test host and from `tests/qrhi_swap_chain.rs`.
 - Check whether the launcher depends on its Qt Quick window for the update requests: show a pattern with the QML window minimized, and with the QML window on another screen. A timeout of a frame is a failure.
 
 ### 62. Connect capture artifacts to the hosts
@@ -143,10 +143,19 @@ TODO:
 
 Requires: 17, 33, 37.
 
+The native swap-chain record, the swap-chain readback and the failure checks with injected `QRhi` results are in [Swap-chain checks](../design/output_driver/testing.md#swap-chain-checks). D3D11 and Vulkan passed on Windows.
+
 TODO:
 
-- Record native swap-chain format and colour space. Read back the actual swap-chain image after draw where supported. Keep an unavailable swap-chain readback distinct from an offscreen pass.
-- On each backend, verify supported depths, geometry, metadata sink values, delayed submission, out-of-date surfaces, device loss, close during upload and rapid replacement. Success must name the submitted frame; an upload-texture dump cannot pass this check.
+- On a Mac with an EDR display, run `cargo nextest run -p nitpick-app --test qrhi_swap_chain --run-ignored only`. The Metal record (`metalLayerFormat` in `cpp/macos.mm`) and the Metal branches of `cpp/pattern_window.cpp` have not been built. Expect `metal_swap_chain` to pass. Check that `CGColorSpaceCopyName` gives the names of the record table in [Output report](../design/output_driver/qt.md#output-report); correct the table or the test if not. Record the macOS version and the GPU in the design.
+- On the Linux desktop (GNOME 50, Wayland and xcb) with an HDR display, run the same command. Expect `vulkan_swap_chain` to pass at 10 bits. Record whether Qt accepts the `QGuiApplication` on a test thread, and whether the surface supports the swap-chain readback.
+- With HDR off on Windows, open each depth (for example with the test host) and check the fallback record: `DXGI_FORMAT_R8G8B8A8_UNORM` with `DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709`, and the fallback warning in the status. The swap-chain test requires HDR on, so it does not cover this path. Do not change the display settings of a developer machine without its owner.
+
+Open questions:
+
+- GNOME 50 on Wayland gives no extended-linear sRGB colour space, so the 12-bit swap chain falls back there and the 12-bit part of `vulkan_swap_chain` fails at the record check. Must the test expect the fallback on such a compositor, or skip 12 bits with the reason?
+- Must the window create a new `QRhi` after a device loss? Qt 6.12 gives device loss for each later `beginFrame`, so each frame fails with `Platform` until the host opens the window again. Neither host reopens by itself.
+- Is a check with a real device loss or a real out-of-date swap chain necessary? The checks inject the `QRhi` results. A D3D11 device removal needs a TDR, which resets the GPU for all processes. A real out-of-date swap chain needs a resize of the full-screen window or a mode change.
 
 ### 39. Add Windows FP16 capture
 

@@ -134,6 +134,7 @@ fn main() {
                 "src/delay.rs",
                 "src/test_host.rs",
                 "src/readback.rs",
+                "src/swap_chain_probe.rs",
             ])
             .cpp_file("cpp/pattern_renderer.cpp")
             .cpp_file("cpp/pattern_window.cpp")
