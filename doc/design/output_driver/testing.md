@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts) exist with synthetic-capture tests. No host has a capture adapter or an artifact directory. Capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts), the frame marker, frame acceptance and region selection of [Timing and frame identity](#timing-and-frame-identity) exist with synthetic-capture tests. No host has a capture adapter or an artifact directory. Capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -70,6 +70,9 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 | IDD dependency | required for unit tests; optional lab tool | Optional lab tool. Signing and HDR hardware must not block normal CI. |
 | Browser automation | screenshots as an HDR reference; protocol tests and qualified OS capture | Protocol tests on all hosts; HDR checks only on a qualified engine and OS. |
 | Pending frame at a disconnect or a display change | report a cancellation; report the driver error; accept both | The driver error. The state fixtures expect an error, and the result does not depend on the order in which the host sees the driver result and the change. |
+| Capture call | one synchronous frame per request; a session that delivers a frame stream | A session. The bounded wait, the three matching frames and the heartbeat need several frames, and the Qt GUI thread must not wait. |
+| Frame identity | the frame ID in the marker; the `show` sequence number in the marker | The sequence number modulo 256. Consecutive `show` requests then always have different markers; frame IDs can skip values. |
+| Marker threshold | fixed code thresholds; reference cells in the marker | Reference cells. The capture colour contract can be unknown; the read needs only an increasing conversion. |
 
 ## Fixtures and test interface
 
@@ -214,8 +217,8 @@ Requests (field `request`):
 | `refresh` | | `displays` after the host reads the display state again. QRhi: the device read of the launcher, on a worker. Browser: at once. |
 | `query` | `display`: `DisplayId` text | `query`: each `Support` as `state` and `reason`, and the mode |
 | `open` | `display`, `depth` (10 or 12) | `surface` with `state: open` |
-| `show` | `frame`, `fixture`; optional `delay_ms` and `metadata` | `submitted` after the driver acknowledgement, then `ready` after the delay |
-| `capture` | `frame` | `captured`; with an `artifact` name, `saved` or `error` with kind `artifact` follows later |
+| `show` | `frame`, `fixture`; optional `delay_ms`, `metadata` and `marker` (default `false`) | `submitted` after the driver acknowledgement, then `ready` after the delay |
+| `capture` | `frame`; optional `heartbeat_ms` and `deadline_ms` (default 30000) | `captured` when the capture session ends; with an `artifact` name, `saved` or `error` with kind `artifact` follows later |
 | `close` | | `surface` with `state: closed` |
 | `quit` | | `stopped` |
 
@@ -230,7 +233,9 @@ Rules:
 - A display change of the surface (browser: a viewport change) makes the surface `stale`. Then `show` fails with `stale_surface` until the next `open`. A disconnect, or a pattern window that closes outside the host (for example by Esc), makes the surface `closed`.
 - A disconnect or a display change during a presentation gives `error` with the driver error for that change: kind `disconnected`, or kind `platform` with the driver text. The host gives the same event if it handles the driver result first or the change first; see the decision table above. A new `show`, `open`, `close` or `quit` gives `cancelled`.
 - A disconnect or a display change during the measurement delay gives `cancelled`.
-- `capture` applies only to the frame of the last `submitted` on the open surface; another frame gives `stale_frame`. The result is in [Capture interface and artifacts](#capture-interface-and-artifacts). Neither host has a capture adapter: `captured` gives `result: unavailable` and the reason.
+- With `marker`, the host draws the [frame marker](#timing-and-frame-identity) below the fixture. A surface without room for it gives `fixture_too_large`.
+- `capture` applies only to the frame of the last `submitted` on the open surface; another frame gives `stale_frame`. A frame without `marker` gives `no_marker`. A second `capture` during a capture session gives `capture_pending`; the first session continues. A `heartbeat_ms` or `deadline_ms` of 0 gives `malformed`. The result is in [Capture interface and artifacts](#capture-interface-and-artifacts). Neither host has a capture adapter: `captured` gives `result: unavailable` and the reason.
+- A capture session continues through `ready`. A new `show`, `open`, `close`, display change, disconnect, external close and `quit` end it before they end the pending frame: `captured` with `result: cancelled` and the `cause` of the frame. A rejected request does not end it.
 - The host sends `stopped` only after each queued artifact has its `saved` or `error` event.
 
 For device tests, add device enumeration and query, profile preparation, assignment and restoration through `DisplayDeviceControl`. Keep these separate from output requests. Save the prepared recovery record before assignment. A profile change invalidates the current measurement and capture generation under [the device lifecycle](../display_device.md#identity-and-execution).
@@ -239,9 +244,13 @@ For device tests, add device enumeration and query, profile preparation, assignm
 
 Capture is outside `OutputDriver`. The `capture` module of `nitpick-test-host` has the interface; the `artifact` module writes and reads the results. Neither depends on an OS capture API.
 
-The `CaptureAdapter` trait gets the display, frame and generation of the acknowledged frame. It returns a `Capture` or the reason why no capture is available (for example permission or API failure). A `Capture` has:
+The `CaptureAdapter` trait has two calls:
+- `now`: the current time in the time base of its frame timestamps, or none. The host reads it before each presentation; it is the submission time of [frame acceptance](#timing-and-frame-identity).
+- `start`: gets the display, frame and generation of the acknowledged frame. It returns a capture session, or the reason why no capture is available (for example permission or API failure). The session is a stream of `Capture` values in arrival order; an item can be the reason of a session failure. Dropping the stream ends the session. The adapter must not block the host thread.
+
+A `Capture` has:
 - The raw planes, with the row padding of the API.
-- A descriptor: width, height, planes, alpha meaning, colour, timestamps and source identity.
+- A descriptor: width, height, planes, content rectangle, cursor, alpha meaning, colour, timestamps and source identity. The content rectangle is the part of the image that shows the source (without window chrome, a capture border or unused texture area); none is the whole image. The cursor is hidden (the adapter told the API not to draw it), shown in a rectangle, or unknown.
 - Raw API metadata as a JSON object, and binary API metadata as named blobs. A blob name has 1 to 64 characters of `a`–`z`, `0`–`9`, `_` and `-`, because it is a part of a file name.
 - The adapter configuration, as a JSON object.
 - An optional preview PNG, tone mapped by the adapter or the OS. It is never a sample source.
@@ -259,26 +268,32 @@ Validation rejects a descriptor that does not describe its planes. It does not c
 - An alpha meaning only with an A field. A range only for integer samples. A YCbCr matrix only for YCbCr.
 - Custom chromaticities finite, with $x \ge 0$, $y > 0$ and $x + y \le 1$. An absolute luminance scale finite and above 0. **Deviation:** PQ with a relative scale or an absolute scale other than 10000 cd/m² is rejected, because ST 2084 fixes the scale.
 - A tick rate above 0. Valid blob names.
+- A content rectangle not empty and inside the image. A shown cursor rectangle not empty; it can extend past the image.
 
 `captured` gives one result:
 
 | Result | Condition | `artifact` |
 |---|---|---|
-| `unavailable` | No adapter, the adapter returned a reason, or a valid capture in a host without an artifact directory | none |
-| `fail` | Invalid descriptor (the reason is the first defect), or the artifact queue is full | the artifact name if queued |
-| `pass` | Valid descriptor and the artifact is queued | the artifact name |
+| `unavailable` | No adapter, the adapter returned a reason, the session failed or ended, or an accepted frame in a host without an artifact directory | none |
+| `fail` | The adapter gave no submission time, an invalid descriptor (the reason is the first defect), a rejected frame, the deadline, a heartbeat failure, or the artifact queue is full | the artifact name if queued |
+| `pass` | An accepted frame, and the artifact is queued | the artifact name |
+| `cancelled` | A request or a driver change ended the session; `cause` gives which | none |
 
-**Deviation:** a capture with an invalid descriptor is saved too, so its raw data can be examined. `pass` checks only the descriptor; stale captures and comparisons are separate checks.
+**Deviation:** a `fail` with a frame saves that frame too, so its raw data can be examined: the invalid or rejected frame, or at the deadline the last frame that was not a repeat. `pass` checks the descriptor and frame acceptance; comparisons are separate checks.
 
-Each artifact records the check result, the capture and a run record: driver, display ID, surface generation and size, the mode of the query before `open` (HDR state, gamut, scale and luminance values), frame ID, fixture ID, submitted format, submitted metadata (`null`: none), measurement delay and the host environment. The environment fields (OS and build, GPU and driver, Qt and backend or browser and engine, EDID hash, profile hash) are `null` where the host does not read them.
+Each artifact records the check result, the capture, an acceptance record and a run record:
+- Acceptance: the submission time, the marker value and position, the frame times of the matching run (fewer than three after a `fail`), the number of received frames, the deadline and the heartbeat interval.
+- Run: driver, display ID, surface generation and size, the mode of the query before `open` (HDR state, gamut, scale and luminance values), frame ID, fixture ID, submitted format, submitted metadata (`null`: none), measurement delay and the host environment. The environment fields (OS and build, GPU and driver, Qt and backend or browser and engine, EDID hash, profile hash) are `null` where the host does not read them.
 
-An `ArtifactWriter` writes on its own thread. At most a set number of artifacts are queued or in progress; an artifact counts until the host takes its result. A full queue gives `fail`, so memory does not grow without a limit. The host reports each result in submission order as `saved` or `error` with kind `artifact`. The writer starts only in an empty root directory, so names from an earlier run cannot repeat. The capture call and the descriptor check run on the host thread; the adapter interface is synchronous.
+An `ArtifactWriter` writes on its own thread. At most a set number of artifacts are queued or in progress; an artifact counts until the host takes its result. A full queue gives `fail`, so memory does not grow without a limit. The host reports each result in submission order as `saved` or `error` with kind `artifact`. The writer starts only in an empty root directory, so names from an earlier run cannot repeat.
+
+The host checks each frame on its own thread (the Qt GUI thread for the QRhi host): descriptor validation, the marker read and the comparison with the previous frame. The comparison reads each sample of the fixture area, so its time increases with the fixture area. **Unverified:** that this time is acceptable on the GUI thread for full-screen fixtures; no adapter delivers real frames yet.
 
 Artifact directory `<root>/<nnnnnn>-frame-<frame>`, with `nnnnnn` the submission number from 1. The writer writes the files to `.<name>.partial` and then renames it, so another process sees only complete artifacts:
 
 | File | Content |
 |---|---|
-| `result.json` | version (1), check, run record, descriptor, file names and sizes, raw JSON metadata, configuration |
+| `result.json` | version (1), check, run record, acceptance record, descriptor, file names and sizes, raw JSON metadata, configuration |
 | `plane-<i>.bin` | the bytes of plane $i$, unchanged |
 | `raw-<name>.bin` | a raw metadata blob |
 | `preview-tone-mapped.png` | the preview, if any |
@@ -292,6 +307,38 @@ The reader rejects another version, unknown JSON fields, other file names and ot
 Show a small binary frame marker outside the sample rectangles. Require a capture timestamp after submission, the current marker and three successive matching frames within the numeric limit. Use a bounded capture deadline of 30 s for the initial harness. A static source that emits fewer frames can be prompted with a separate heartbeat pixel; keep the frame marker and patches fixed. Record the accepted frame timestamps.
 
 Crop to valid content bounds. Exclude the cursor, capture border, window chrome, marker and patch edges. For flat patches use an inset sample rectangle and report maximum and median error. Test one-pixel geometry separately without an inset. Never resize the capture to make it fit. Reject a resize, stale frame, missing colour contract or changed display state instead of comparing it to the old expected image.
+
+The modules `marker`, `gate` and `region` of `nitpick-test-host` implement these rules as follows.
+
+**Frame marker.** One row of 11 cells of 4×4 surface pixels, at the bottom-left corner of the surface, below the fixture. Its row is even, so that cells start on 2×2 chroma blocks if the surface starts on one. Left to right: a set reference cell, a clear reference cell, 8 value bits (most significant first) and the heartbeat cell. The value is the number of `show` requests that started a presentation, modulo 256. A set cell has the code at half of the nominal signal range (`code_from_signal(0.5)`); a clear cell has nominal black. This marker is separate from the markers inside the state fixtures.
+
+The read takes the mean of $R + G + B$ (or of $Y$) over each cell without its 1-pixel edge. With $s$ and $c$ the set and clear references, a cell gives $t = (v - c)/(s - c)$. It is a 1 for $t \ge 0.75$ and a 0 for $t \le 0.25$. Other values, $s \le c$, a cell outside the capture and a non-finite sample make the marker unreadable.
+
+**Deviations:**
+- The marker is opt-in (`show` with `marker`), because it changes the frame: automatic light levels include it. The set level is far below peak, so it changes `MaxCLL` only for a fixture that is darker than that level. `MaxFALL` changes for each marked frame.
+- The submission time is the adapter time before the presentation starts, not the acknowledgement. A frame of the new content can be composed before the acknowledgement arrives. The marker rejects old content after this time.
+
+**Frame acceptance.** The gate checks each frame in this order. A *rejected* frame ends the session with `fail`. A *stale* frame does not count and restarts the matching run. A *repeat* does not count and does not restart the run.
+
+| Check | Result if it fails |
+|---|---|
+| Valid descriptor | rejected |
+| The source equals the source of the first frame | rejected |
+| A frame timestamp exists, in the time base of the submission time | rejected |
+| The frame time is after the submission time | stale |
+| The frame time is after the last frame | repeat |
+| The content rectangle has the surface size | rejected (a resize) |
+| The cursor is not unknown | rejected |
+| A shown cursor does not cover the read cells of the marker | stale |
+| The marker reads the current value | stale |
+
+A frame that passes continues the matching run if its fixture area matches the previous frame of the run, else it starts a new run. Matching compares the stored colour samples outside the cursor rectangles of both frames: the largest difference must not be above 0 sample units. A non-finite sample or other colour channels never match. Three frames in one run accept the capture. Outside the fixture area, the black fill and the heartbeat cell can change.
+
+The gate does not need the colour contract. A missing colour contract must make a later comparison unavailable; no comparison exists yet.
+
+**Deadline and heartbeat.** The deadline timer starts with the session; at the deadline the capture fails with the number of received frames and the last reason. With `heartbeat_ms`, the host presents the acknowledged frame again after each interval, with the heartbeat cell changed. It uses the same surface, format and metadata request. It sends no `submitted` event and does not change the readiness. With automatic light levels the driver computes them again for each heartbeat presentation, so `MaxFALL` can change; whether a capture with metadata checks must avoid this is an open question. A failed heartbeat presentation fails the capture. **Unverified:** that a heartbeat presentation makes WGC, ScreenCaptureKit or PipeWire deliver a new frame on each platform.
+
+**Region selection.** Surface pixel $(0, 0)$ is at the origin of the content rectangle; the fixture is at the top-left corner of the surface. The sample pixels of a palette entry are the fixture pixels whose neighbours within the inset (also diagonally) are in the fixture and have the same entry, outside the excluded rectangles (the cursor). Flat patches use an inset of 1 pixel, which skips 2×2 chroma blocks shared with a neighbour patch. One-pixel geometry uses an inset of 0, which samples every fixture pixel. `ErrorStats` gives the maximum and the median of per-sample errors (the mean of the two middle values for an even count) and rejects non-finite errors. The error metric is in [Reference metric](#reference-metric).
 
 ## Unit tests
 
@@ -334,11 +381,11 @@ Use a mock driver, controlled clock and controlled worker completions. Check eac
 
 Readiness must follow acknowledgement plus the selected delay. Zero adds no delay. Errors start no timer. New frames, closure, display changes and disconnect cancel old work and timers. An old callback cannot complete a new request. Drop pending futures and check that callback and timer registrations are released. Run the contract with the command-line executor and the Qt executor; Qt timers and controls must continue to run during conversion, presentation and the delay.
 
-`nitpick-test-host` has this contract over the [test-host protocol](#host-boundary) (`contract.rs`, feature `contract`). It uses a mock driver, a controlled clock, controlled presentation results, a controlled device read and a controlled surface close. It runs on the Tokio current-thread executor of the command-line host (`controller_tests.rs`) and on `gui_executor.rs` with a simulated event loop (`nitpick-app`, `test_host_tests.rs`). The command-line host unit tests and the `session.rs` tests cover the interactive hosts.
+`nitpick-test-host` has this contract over the [test-host protocol](#host-boundary) (`contract.rs`, feature `contract`). It uses a mock driver, a controlled clock, controlled presentation results, a controlled device read, a controlled surface close and a controlled capture adapter. The capture scenarios (`contract/capture.rs`) replay frames of the presented images (`replay.rs`): stale, earlier-marker, repeated and differing frames before three matching frames, the deadline, a resize, a session failure, the heartbeat, and the end of a session by each request and driver change. `gate_tests.rs`, `marker_tests.rs` and `region_tests.rs` check the rules of [Timing and frame identity](#timing-and-frame-identity) without a host, also with FP16 and YCbCr samples. The contract runs on the Tokio current-thread executor of the command-line host (`controller_tests.rs`) and on `gui_executor.rs` with a simulated event loop (`nitpick-app`, `test_host_tests.rs`). The command-line host unit tests and the `session.rs` tests cover the interactive hosts.
 
 Process tests drive the real hosts through the protocol:
 - `nitpick-cli`, `tests/test_host.rs`: the real service and the mock page of the [browser process tests](browser.md#testing). They check `query`, `open`, the PNG samples of the placed fixture against the reference sample table, replacement, a late `applied`, the delay, `capture`, `close`, malformed input, the frame order, a disconnect during presentation in three rounds, and a viewport change with a new generation.
-- `nitpick-app`, `tests/test_host.rs`: with the Qt `offscreen` platform, the protocol on the real Qt event loop. That platform has no screen with a native identity, so no window opens. An ignored test opens full-screen windows on the first screen: 10-bit replacement and delay, a 12-bit fixture on a 10-bit surface, a 12-bit surface, `capture` and `close`. Run it with `cargo nextest run -p nitpick-app --test test_host --run-ignored only`.
+- `nitpick-app`, `tests/test_host.rs`: with the Qt `offscreen` platform, the protocol on the real Qt event loop. That platform has no screen with a native identity, so no window opens. An ignored test opens full-screen windows on the first screen: 10-bit replacement and delay, a frame with the marker, a 12-bit fixture on a 10-bit surface, a 12-bit surface, `capture` and `close`. Run it with `cargo nextest run -p nitpick-app --test test_host --run-ignored only`.
 
 Results: all pass on Windows 11 build 26200 with Qt 6.12.0. The ignored screen test ran on one 3840×2160 HDR screen with an 8 bpc wire. **Not verified:** macOS and Linux; a pattern window closed by Esc in the real Qt event loop (only the contract checks it, with a controlled close).
 
@@ -385,6 +432,8 @@ For HDR pixels, capture the displayed page with the same qualified OS adapter us
 | Linux Wayland | ScreenCast portal and PipeWire; compositor-specific adapter if needed | Pin compositor, portal backend and versions. Negotiate high-precision samples and obtain the transfer, primaries, range and luminance scale. Missing colour information makes absolute HDR comparison unavailable. |
 | Linux X11 | Existing screenshot path for geometry only | Do not use an unqualified X11 screenshot as the HDR reference. Use QRhi readback and external measurement for colour. |
 | Remote browser, including iPad | Host-side PNG checks and client state; local capture only if qualified on that device | A capture of the server desktop does not test the remote display. Use a probe for remote display light. |
+
+Each adapter gives `now` in the time base of its frame timestamps, tells the API not to draw the cursor where the API allows it, and gives the content rectangle where the API reports one (for example `ContentSize` of a WGC frame). The [frame acceptance](#timing-and-frame-identity) rejects a frame without a timestamp or with an unknown cursor.
 
 On Windows, Desktop Duplication is an optional second adapter. [DuplicateOutput1](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_5/nf-dxgi1_5-idxgioutput5-duplicateoutput1) permits format negotiation; the older method converts fullscreen surfaces to BGRA. Inspect the returned format and mode. Do not presume DDA always returns the same FP16 scRGB values as WGC. It captures an output, so crop and rotation must be explicit.
 

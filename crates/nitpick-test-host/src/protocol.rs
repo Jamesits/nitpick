@@ -42,9 +42,19 @@ pub enum Request {
             skip_serializing_if = "Option::is_none"
         )]
         metadata: Option<Option<MetadataRequest>>,
+        /// Draws the frame marker below the fixture; `capture` needs it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        marker: bool,
     },
     Capture {
         frame: u64,
+        /// Presents the frame again at this interval, with the heartbeat
+        /// cell changed, until the capture ends.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat_ms: Option<u32>,
+        /// Absent: [`crate::gate::DEADLINE_MS`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline_ms: Option<u32>,
     },
     Close {},
     Quit {},
@@ -137,12 +147,16 @@ pub enum Event {
         kind: ErrorKind,
         message: String,
     },
+    /// The end of a `capture` request.
     Captured {
         frame: u64,
         result: CaptureOutcome,
         /// Always with `fail` and `unavailable`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// Always with `cancelled`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<Cause>,
         /// The name of the queued artifact; [`Event::Saved`] follows.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         artifact: Option<String>,
@@ -242,6 +256,10 @@ pub enum ErrorKind {
     FixtureTooLarge,
     /// `capture` of a frame that is not the current acknowledged frame.
     StaleFrame,
+    /// `capture` of a frame shown without the frame marker.
+    NoMarker,
+    /// `capture` while another capture is in progress.
+    CapturePending,
     /// The measurement delay timer stopped.
     Timer,
     /// An artifact write failed.
@@ -272,13 +290,17 @@ impl ErrorKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureOutcome {
-    /// The descriptor describes the planes; the artifact is queued.
+    /// A valid frame with the current marker was accepted; the artifact
+    /// is queued.
     Pass,
-    /// An invalid descriptor, or the artifact queue is full.
+    /// An invalid descriptor, a frame that the host rejected, the deadline,
+    /// or a full artifact queue.
     Fail,
     /// No capture adapter, no capture from the adapter, or no artifact
     /// directory.
     Unavailable,
+    /// The host ended the capture; `cause` gives why.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

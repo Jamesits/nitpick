@@ -3,8 +3,8 @@
 //! a mock driver, a controlled clock and controlled presentation results.
 //! Each host runs [`run_all`] with its own executor.
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::future::{self, Future};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -21,17 +21,15 @@ use nitpick_core::image::Image;
 use nitpick_core::signal::{BitDepth, Encoding, Format, Rgb};
 use nitpick_fixtures::{LightLevelRequest, MetadataRequest};
 
-use crate::artifact::{Artifact, ArtifactSink, Artifacts, Check, Environment, FormatRecord, Saved};
-use crate::capture::{
-    ByteOrder, Capture, CaptureAdapter, CaptureDescriptor, CaptureTarget, Channel, Colour, Field,
-    PlaneLayout, SampleKind, Source, SourceKind, Timestamps,
-};
+use crate::artifact::{Artifact, ArtifactSink, Artifacts, Environment, Saved};
+use crate::capture::{Capture, CaptureAdapter, CaptureFrames, CaptureTarget, Timestamp};
 use crate::controller::{Clock, DriverEvent, Hooks, LocalFuture, NO_ARTIFACTS, TestHost};
 use crate::fixture::{Fixtures, hdr10_request};
 use crate::protocol::{
-    CaptureOutcome, Cause, DisplayEntry, DisplayState, ErrorKind, Event, ModeReport, Request,
-    SupportState, SurfaceState, VERSION,
+    CaptureOutcome, Cause, DisplayEntry, DisplayState, ErrorKind, Event, Request, SupportState,
+    SurfaceState, VERSION,
 };
+use crate::replay;
 
 /// Runs the host and the test script of one scenario.
 pub trait LocalExecutor {
@@ -82,12 +80,6 @@ pub const SCENARIOS: &[Scenario] = scenarios![
     display_change_cancels_the_delay,
     external_close_fails_the_presentation,
     external_close_cancels_the_delay,
-    capture_without_adapter_is_unavailable,
-    valid_capture_passes_and_is_saved,
-    invalid_capture_fails_and_is_saved,
-    failed_artifact_write_is_an_error,
-    full_artifact_queue_fails_the_capture,
-    quit_waits_for_artifact_writes,
     refresh_lists_displays_after_the_read,
     metadata_follows_the_request,
     driver_notices_pass_through,
@@ -96,13 +88,15 @@ pub const SCENARIOS: &[Scenario] = scenarios![
     driver_stop_ends_the_host,
 ];
 
-/// Scenarios of a host without [`Artifacts`].
-pub const SCENARIOS_WITHOUT_ARTIFACTS: &[Scenario] = scenarios![
-    valid_capture_without_artifacts_is_unavailable,
-    invalid_capture_without_artifacts_fails,
-];
+mod capture;
 
-/// Runs every scenario of [`SCENARIOS`] and
+/// Capture sessions, frame acceptance and artifacts.
+pub const CAPTURE_SCENARIOS: &[Scenario] = capture::SCENARIOS;
+
+/// Scenarios of a host without [`Artifacts`].
+pub const SCENARIOS_WITHOUT_ARTIFACTS: &[Scenario] = capture::WITHOUT_ARTIFACTS;
+
+/// Runs every scenario of [`SCENARIOS`], [`CAPTURE_SCENARIOS`] and
 /// [`SCENARIOS_WITHOUT_ARTIFACTS`] with `exec`.
 ///
 /// # Panics
@@ -111,6 +105,7 @@ pub fn run_all(exec: &mut impl LocalExecutor) {
     let fixtures = Rc::new(Fixtures::load().expect("output fixtures"));
     let all = SCENARIOS
         .iter()
+        .chain(CAPTURE_SCENARIOS)
         .map(|s| (s, true))
         .chain(SCENARIOS_WITHOUT_ARTIFACTS.iter().map(|s| (s, false)));
     for ((name, scenario), artifacts) in all {
@@ -322,29 +317,6 @@ impl Hooks for HeldHooks {
 }
 
 #[derive(Default)]
-struct CaptureState {
-    /// Replies in order; none left: unavailable with [`NO_CAPTURE`].
-    replies: VecDeque<Result<Capture, String>>,
-    /// Display, frame and generation of each call.
-    targets: Vec<(String, u64, u64)>,
-}
-
-struct HeldCapture(Rc<RefCell<CaptureState>>);
-
-impl CaptureAdapter for HeldCapture {
-    fn capture(&mut self, target: &CaptureTarget<'_>) -> Result<Capture, String> {
-        let mut state = self.0.borrow_mut();
-        state
-            .targets
-            .push((target.display.to_string(), target.frame, target.generation));
-        state
-            .replies
-            .pop_front()
-            .unwrap_or_else(|| Err(NO_CAPTURE.into()))
-    }
-}
-
-#[derive(Default)]
 struct SinkState {
     submitted: Vec<Artifact>,
     /// Submitted and not yet returned by `poll_saved`.
@@ -383,61 +355,68 @@ impl ArtifactSink for HeldSink {
     }
 }
 
-/// 2×1 px, interleaved RGBA binary16, no colour description.
-fn synthetic_capture() -> Capture {
-    let fields = [Channel::R, Channel::G, Channel::B, Channel::A]
-        .into_iter()
-        .zip((0..).step_by(16))
-        .map(|(channel, shift)| Field {
-            channel,
-            shift,
-            bits: 16,
-            kind: SampleKind::Float,
-        })
-        .collect();
-    Capture {
-        descriptor: CaptureDescriptor {
-            width: 2,
-            height: 1,
-            planes: vec![PlaneLayout {
-                row_pitch: 16,
-                subsampling: [1, 1],
-                block_bytes: 8,
-                byte_order: ByteOrder::Little,
-                fields,
-            }],
-            alpha: None,
-            colour: Colour {
-                transfer: None,
-                primaries: None,
-                white: None,
-                range: None,
-                matrix: None,
-                luminance: None,
-            },
-            timestamps: Timestamps {
-                frame: None,
-                arrival: None,
-            },
-            source: Source {
-                kind: SourceKind::Window,
-                native: "mock-window".into(),
-            },
-        },
-        planes: vec![(0..16).collect()],
-        raw: serde_json::Map::new(),
-        raw_blobs: BTreeMap::new(),
-        config: serde_json::Map::new(),
-        preview: None,
+type FrameSender = mpsc::UnboundedSender<Result<Capture, String>>;
+
+#[derive(Default)]
+struct CaptureState {
+    /// `false`: `start` fails with [`NO_CAPTURE`].
+    available: bool,
+    /// The adapter clock in milliseconds; `None`: no clock.
+    now: Option<u64>,
+    /// Display, frame and generation of each `start`.
+    targets: Vec<(String, u64, u64)>,
+    /// One per session; `None` after the script ended the session.
+    sessions: Vec<Option<FrameSender>>,
+    /// Sessions whose stream is not dropped.
+    live: usize,
+}
+
+type Captures = Rc<RefCell<CaptureState>>;
+
+/// Sessions deliver the frames that the script sends.
+struct HeldCapture(Captures);
+
+impl CaptureAdapter for HeldCapture {
+    fn now(&self) -> Option<Timestamp> {
+        self.0.borrow().now.map(replay::time)
+    }
+
+    fn start(&mut self, target: &CaptureTarget<'_>) -> Result<CaptureFrames, String> {
+        let mut state = self.0.borrow_mut();
+        state
+            .targets
+            .push((target.display.to_string(), target.frame, target.generation));
+        if !state.available {
+            return Err(NO_CAPTURE.into());
+        }
+        let (tx, frames) = mpsc::unbounded();
+        state.sessions.push(Some(tx));
+        state.live += 1;
+        Ok(Box::pin(Session {
+            frames,
+            captures: Rc::clone(&self.0),
+        }))
     }
 }
 
-/// [`synthetic_capture`] with a row pitch below the row size.
-fn invalid_capture() -> Capture {
-    let mut c = synthetic_capture();
-    c.descriptor.planes[0].row_pitch = 8;
-    c.planes[0].truncate(8);
-    c
+/// Counts the session from `start` to drop.
+struct Session {
+    frames: mpsc::UnboundedReceiver<Result<Capture, String>>,
+    captures: Captures,
+}
+
+impl futures_core::Stream for Session {
+    type Item = Result<Capture, String>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.frames.poll_next_unpin(cx)
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.captures.borrow_mut().live -= 1;
+    }
 }
 
 fn environment() -> Environment {
@@ -472,8 +451,10 @@ pub struct Harness {
     timers: Timers,
     refreshes: Senders,
     watches: Senders,
-    captures: Rc<RefCell<CaptureState>>,
+    captures: Captures,
     sink: Rc<RefCell<SinkState>>,
+    /// The adapter time of the next frame of [`Self::accept`].
+    ticks: Cell<u64>,
 }
 
 fn setup(fixtures: &Rc<Fixtures>, with_artifacts: bool) -> (LocalFuture<()>, Harness) {
@@ -520,6 +501,7 @@ fn setup(fixtures: &Rc<Fixtures>, with_artifacts: bool) -> (LocalFuture<()>, Har
         watches,
         captures,
         sink,
+        ticks: Cell::new(10_000),
     };
     (host, harness)
 }
@@ -610,18 +592,99 @@ impl Harness {
 
     /// Sends `show` and waits for its `present` call.
     async fn show(&mut self, frame: u64, fixture: &str, delay_ms: Option<u32>) {
+        self.show_with(frame, fixture, delay_ms, false).await;
+    }
+
+    async fn show_with(&mut self, frame: u64, fixture: &str, delay_ms: Option<u32>, marker: bool) {
         let before = self.mock.borrow().presented.len();
         self.send(&Request::Show {
             frame,
             fixture: fixture.into(),
             delay_ms,
             metadata: None,
+            marker,
         });
         self.until("present", |m| m.presented.len() > before).await;
     }
 
-    fn queue_capture(&self, reply: Result<Capture, String>) {
-        self.captures.borrow_mut().replies.push_back(reply);
+    /// Lets the host run until `done` holds.
+    async fn wait(&self, what: &str, done: impl Fn(&Self) -> bool) {
+        for _ in 0..1000 {
+            if done(self) {
+                return;
+            }
+            YieldNow(false).await;
+        }
+        panic!("not reached: {what}");
+    }
+
+    /// Makes `start` succeed, with the adapter clock at `ms`.
+    fn adapter(&self, ms: u64) {
+        let mut c = self.captures.borrow_mut();
+        c.available = true;
+        c.now = Some(ms);
+    }
+
+    fn set_now(&self, ms: u64) {
+        self.captures.borrow_mut().now = Some(ms);
+    }
+
+    /// The image of the `n`-th `present` call.
+    fn image(&self, n: usize) -> Image {
+        self.mock.borrow().presented[n].image.clone()
+    }
+
+    /// Sends `request` and waits for the session that it starts.
+    async fn start_capture(&self, request: &Request) {
+        let before = self.captures.borrow().sessions.len();
+        self.send(request);
+        self.wait("capture session", |h| {
+            h.captures.borrow().sessions.len() > before
+        })
+        .await;
+    }
+
+    /// Delivers `frame` in the last session. `false`: the host dropped
+    /// the session.
+    fn deliver(&self, frame: Result<Capture, String>) -> bool {
+        let c = self.captures.borrow();
+        let tx = c
+            .sessions
+            .last()
+            .and_then(Option::as_ref)
+            .expect("a session");
+        tx.unbounded_send(frame).is_ok()
+    }
+
+    /// Delivers the `n`-th presented image at `ms`.
+    fn replay(&self, n: usize, ms: u64) -> bool {
+        self.deliver(Ok(replay::frame(&self.image(n), replay::time(ms))))
+    }
+
+    /// Ends the last session from the adapter side.
+    fn end_session(&self) {
+        let tx = self
+            .captures
+            .borrow_mut()
+            .sessions
+            .last_mut()
+            .and_then(Option::take);
+        drop(tx);
+    }
+
+    fn sessions_live(&self) -> usize {
+        self.captures.borrow().live
+    }
+
+    /// Captures `frame` and delivers three current frames of the `n`-th
+    /// presented image. `captured` follows.
+    async fn accept(&mut self, frame: u64, n: usize) {
+        self.start_capture(&capture(frame)).await;
+        for _ in 0..3 {
+            let ms = self.ticks.get() + 10;
+            self.ticks.set(ms);
+            assert!(self.replay(n, ms));
+        }
     }
 
     /// Completes the oldest write in progress.
@@ -640,12 +703,16 @@ impl Harness {
         }
     }
 
-    /// Completes the writes in progress, which have frame 1 and `names`.
+    /// Completes the writes in progress, which have the names `names`.
     async fn finish_saved(&mut self, names: &[&str]) {
         for name in names {
+            let frame = {
+                let s = self.sink.borrow();
+                s.submitted[s.finished].run.frame
+            };
             self.finish_write(Ok(()));
             self.expect(Event::Saved {
-                frame: 1,
+                frame,
                 artifact: (*name).into(),
             })
             .await;
@@ -654,10 +721,37 @@ impl Harness {
 
     /// Shows `frame`, acknowledges it and checks `submitted`.
     async fn acknowledged(&mut self, frame: u64, generation: u64, delay_ms: u32) {
+        self.acknowledge(frame, FRAME_A, generation, delay_ms, false)
+            .await;
+    }
+
+    /// [`Self::acknowledged`] of `fixture` with the frame marker.
+    async fn marked(&mut self, frame: u64, fixture: &str, generation: u64, delay_ms: u32) {
+        self.acknowledge(frame, fixture, generation, delay_ms, true)
+            .await;
+    }
+
+    async fn acknowledge(
+        &mut self,
+        frame: u64,
+        fixture: &str,
+        generation: u64,
+        delay_ms: u32,
+        marker: bool,
+    ) {
         let n = self.mock.borrow().presented.len();
-        self.show(frame, FRAME_A, Some(delay_ms)).await;
+        self.show_with(frame, fixture, Some(delay_ms), marker).await;
         assert!(self.reply(n, Ok(format!("ack {frame}"))));
         self.expect(submitted(frame, generation, delay_ms)).await;
+    }
+}
+
+/// `capture` with the default deadline and no heartbeat.
+fn capture(frame: u64) -> Request {
+    Request::Capture {
+        frame,
+        heartbeat_ms: None,
+        deadline_ms: None,
     }
 }
 
@@ -795,6 +889,7 @@ async fn show_rejects_invalid_requests_without_presenting(mut h: Harness) {
         fixture: fixture.into(),
         delay_ms: None,
         metadata,
+        marker: false,
     };
     h.send(&show(1, FRAME_A, None));
     assert_eq!(error_kind(&h.next().await), (Some(1), ErrorKind::NoSurface));
@@ -839,6 +934,7 @@ async fn frame_ids_must_increase(mut h: Harness) {
             fixture: FRAME_B.into(),
             delay_ms: None,
             metadata: None,
+            marker: false,
         });
         assert_eq!(
             error_kind(&h.next().await),
@@ -1024,6 +1120,7 @@ async fn close_cancels_and_closes(mut h: Harness) {
         fixture: FRAME_B.into(),
         delay_ms: None,
         metadata: None,
+        marker: false,
     });
     assert_eq!(error_kind(&h.next().await), (Some(2), ErrorKind::NoSurface));
 }
@@ -1124,6 +1221,7 @@ async fn display_change_fails_the_presentation_and_needs_open(mut h: Harness) {
         fixture: FRAME_B.into(),
         delay_ms: None,
         metadata: None,
+        marker: false,
     });
     assert_eq!(
         error_kind(&h.next().await),
@@ -1185,38 +1283,6 @@ async fn external_close_cancels_the_delay(mut h: Harness) {
     assert!(!h.fire(0));
 }
 
-async fn capture_without_adapter_is_unavailable(mut h: Harness) {
-    h.send(&Request::Capture { frame: 1 });
-    assert_eq!(
-        error_kind(&h.next().await),
-        (Some(1), ErrorKind::StaleFrame)
-    );
-    h.open().await;
-    h.show(1, FRAME_A, Some(1000)).await;
-    // Not acknowledged yet.
-    h.send(&Request::Capture { frame: 1 });
-    assert_eq!(
-        error_kind(&h.next().await),
-        (Some(1), ErrorKind::StaleFrame)
-    );
-    assert!(h.reply(0, Ok("ack 1".into())));
-    h.expect(submitted(1, 1, 1000)).await;
-    h.send(&Request::Capture { frame: 1 });
-    h.expect(captured(
-        1,
-        CaptureOutcome::Unavailable,
-        Some(NO_CAPTURE),
-        None,
-    ))
-    .await;
-    assert_eq!(h.captures.borrow().targets, [(DISPLAY.to_owned(), 1, 1)]);
-    h.send(&Request::Capture { frame: 2 });
-    assert_eq!(
-        error_kind(&h.next().await),
-        (Some(2), ErrorKind::StaleFrame)
-    );
-}
-
 fn captured(
     frame: u64,
     result: CaptureOutcome,
@@ -1228,207 +1294,8 @@ fn captured(
         result,
         reason: reason.map(Into::into),
         artifact: artifact.map(Into::into),
+        cause: None,
     }
-}
-
-async fn valid_capture_passes_and_is_saved(mut h: Harness) {
-    h.open().await;
-    h.acknowledged(1, 1, 1000).await;
-    h.queue_capture(Ok(synthetic_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    h.expect(captured(1, CaptureOutcome::Pass, None, Some("artifact-1")))
-        .await;
-    {
-        let sink = h.sink.borrow();
-        let artifact = &sink.submitted[0];
-        assert_eq!(
-            artifact.check,
-            Check {
-                result: CaptureOutcome::Pass,
-                reason: None
-            }
-        );
-        assert_eq!(artifact.capture, synthetic_capture());
-        let fixtures = Fixtures::load().expect("output fixtures");
-        let run = &artifact.run;
-        assert_eq!(
-            (run.driver.as_str(), run.display.as_str(), run.generation),
-            ("mock", DISPLAY, 1)
-        );
-        assert_eq!(run.surface_size, [SIZE.0, SIZE.1]);
-        assert_eq!(run.mode, ModeReport::from(&query().mode));
-        assert_eq!((run.frame, run.fixture.as_str()), (1, FRAME_A));
-        assert_eq!(
-            run.format,
-            FormatRecord {
-                encoding: "pq-full".into(),
-                depth: 10
-            }
-        );
-        assert_eq!(run.metadata, fixtures.get(FRAME_A).unwrap().metadata);
-        assert_eq!(run.delay_ms, 1000);
-        assert_eq!(run.environment, environment());
-    }
-    // The write ends after the delay; the frame stays capturable.
-    assert!(h.fire(0));
-    h.expect(Event::Ready {
-        frame: 1,
-        delay_ms: 1000,
-    })
-    .await;
-    h.finish_write(Ok(()));
-    h.expect(Event::Saved {
-        frame: 1,
-        artifact: "artifact-1".into(),
-    })
-    .await;
-    h.queue_capture(Ok(synthetic_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    h.expect(captured(1, CaptureOutcome::Pass, None, Some("artifact-2")))
-        .await;
-    h.finish_saved(&["artifact-2"]).await;
-}
-
-async fn invalid_capture_fails_and_is_saved(mut h: Harness) {
-    h.open().await;
-    h.acknowledged(1, 1, 0).await;
-    h.expect(Event::Ready {
-        frame: 1,
-        delay_ms: 0,
-    })
-    .await;
-    h.queue_capture(Ok(invalid_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    let reason = invalid_capture().validate().unwrap_err().to_string();
-    h.expect(captured(
-        1,
-        CaptureOutcome::Fail,
-        Some(&reason),
-        Some("artifact-1"),
-    ))
-    .await;
-    let check = h.sink.borrow().submitted[0].check.clone();
-    assert_eq!(check.result, CaptureOutcome::Fail);
-    assert_eq!(check.reason, Some(reason));
-    h.finish_write(Ok(()));
-    h.expect(Event::Saved {
-        frame: 1,
-        artifact: "artifact-1".into(),
-    })
-    .await;
-}
-
-async fn failed_artifact_write_is_an_error(mut h: Harness) {
-    h.open().await;
-    h.acknowledged(1, 1, 1000).await;
-    h.queue_capture(Ok(synthetic_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    h.expect(captured(1, CaptureOutcome::Pass, None, Some("artifact-1")))
-        .await;
-    h.finish_write(Err("disk full".into()));
-    let event = h.next().await;
-    assert_eq!(error_kind(&event), (Some(1), ErrorKind::Artifact));
-    let Event::Error { message, .. } = event else {
-        unreachable!()
-    };
-    assert!(message.contains("artifact-1") && message.contains("disk full"));
-}
-
-async fn full_artifact_queue_fails_the_capture(mut h: Harness) {
-    h.open().await;
-    h.acknowledged(1, 1, 1000).await;
-    for n in 1..=QUEUE {
-        h.queue_capture(Ok(synthetic_capture()));
-        h.send(&Request::Capture { frame: 1 });
-        let name = format!("artifact-{n}");
-        h.expect(captured(1, CaptureOutcome::Pass, None, Some(&name)))
-            .await;
-    }
-    h.queue_capture(Ok(synthetic_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    h.expect(captured(
-        1,
-        CaptureOutcome::Fail,
-        Some("mock queue full"),
-        None,
-    ))
-    .await;
-    // An invalid capture keeps its own reason.
-    h.queue_capture(Ok(invalid_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    let reason = invalid_capture().validate().unwrap_err().to_string();
-    h.expect(captured(
-        1,
-        CaptureOutcome::Fail,
-        Some(&format!("{reason}; not saved: mock queue full")),
-        None,
-    ))
-    .await;
-    h.finish_write(Ok(()));
-    h.expect(Event::Saved {
-        frame: 1,
-        artifact: "artifact-1".into(),
-    })
-    .await;
-    h.queue_capture(Ok(synthetic_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    h.expect(captured(1, CaptureOutcome::Pass, None, Some("artifact-3")))
-        .await;
-    // The host waits for queued writes before it stops.
-    h.finish_saved(&["artifact-2", "artifact-3"]).await;
-}
-
-async fn quit_waits_for_artifact_writes(mut h: Harness) {
-    h.open().await;
-    h.acknowledged(1, 1, 0).await;
-    h.expect(Event::Ready {
-        frame: 1,
-        delay_ms: 0,
-    })
-    .await;
-    h.queue_capture(Ok(synthetic_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    h.expect(captured(1, CaptureOutcome::Pass, None, Some("artifact-1")))
-        .await;
-    h.send(&Request::Quit {});
-    h.expect(surface(1, SurfaceState::Closed, Cause::Stopped))
-        .await;
-    for _ in 0..10 {
-        YieldNow(false).await;
-    }
-    assert!(h.out.try_recv().is_err(), "`stopped` before the write");
-    h.finish_write(Ok(()));
-    h.expect(Event::Saved {
-        frame: 1,
-        artifact: "artifact-1".into(),
-    })
-    .await;
-    h.expect(Event::Stopped { error: None }).await;
-}
-
-async fn valid_capture_without_artifacts_is_unavailable(mut h: Harness) {
-    h.open().await;
-    h.acknowledged(1, 1, 1000).await;
-    h.queue_capture(Ok(synthetic_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    h.expect(captured(
-        1,
-        CaptureOutcome::Unavailable,
-        Some(NO_ARTIFACTS),
-        None,
-    ))
-    .await;
-    assert_eq!(h.sink.borrow().submitted.len(), 0);
-}
-
-async fn invalid_capture_without_artifacts_fails(mut h: Harness) {
-    h.open().await;
-    h.acknowledged(1, 1, 1000).await;
-    h.queue_capture(Ok(invalid_capture()));
-    h.send(&Request::Capture { frame: 1 });
-    let reason = invalid_capture().validate().unwrap_err().to_string();
-    h.expect(captured(1, CaptureOutcome::Fail, Some(&reason), None))
-        .await;
 }
 
 async fn refresh_lists_displays_after_the_read(mut h: Harness) {
@@ -1471,6 +1338,7 @@ async fn metadata_follows_the_request(mut h: Harness) {
             fixture: WITH_METADATA.into(),
             delay_ms: Some(0),
             metadata,
+            marker: false,
         });
         let n = usize::try_from(frame).unwrap();
         h.until("present", |m| m.presented.len() == n).await;

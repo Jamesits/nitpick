@@ -14,8 +14,9 @@ use nitpick_fixtures::{CASE_GROUPS, CaseInput, LightLevelRequest, MetadataReques
 pub struct FixtureFrame {
     pub format: Format,
     pub size: (usize, usize),
-    /// Row-major.
-    pixels: Vec<Rgb>,
+    pub palette: Vec<Rgb>,
+    /// Palette index of each pixel, row-major.
+    raster: Vec<usize>,
     pub metadata: Option<MetadataRequest>,
 }
 
@@ -38,12 +39,20 @@ impl FixtureFrame {
         Ok(Self {
             format: Format::new(encoding, depth),
             size: (input.size[0], input.size[1]),
-            pixels: nitpick_fixtures::raster(input)
-                .into_iter()
-                .map(|i| palette[i])
-                .collect(),
+            palette,
+            raster: nitpick_fixtures::raster(input),
             metadata: input.metadata.clone(),
         })
+    }
+
+    /// The palette index at `(x, y)` of the fixture.
+    ///
+    /// # Panics
+    /// The position is outside the fixture.
+    #[must_use]
+    pub fn index(&self, x: usize, y: usize) -> usize {
+        assert!(x < self.size.0 && y < self.size.1, "inside the fixture");
+        self.raster[y * self.size.0 + x]
     }
 
     /// The frame at the surface size: the fixture at the top-left corner,
@@ -64,8 +73,8 @@ impl FixtureFrame {
             ));
         }
         let mut image = Image::new(surface.0, surface.1, Rgb::grey(self.format.black()));
-        for (i, &p) in self.pixels.iter().enumerate() {
-            image.set(i % w, i / w, p);
+        for (i, &p) in self.raster.iter().enumerate() {
+            image.set(i % w, i / w, self.palette[p]);
         }
         Ok(image)
     }

@@ -103,19 +103,9 @@ TODO:
 - Without `QT_D3D_NO_VBLANK_THREAD`, `nitpick --test-host` on Windows 11 with Qt 6.12.0 got no `UpdateRequest` in the pattern window, and each frame timed out; see [Test host](../design/output_driver/qt.md#test-host). Find the cause, for example the adapter of the Qt vsync service, the screen (an HDR recorder with an 8 bpc wire), or the missing Qt Quick window. If the cause is in `pattern_window.cpp`, correct it there and remove the variable from the test host.
 - Check whether the launcher depends on its Qt Quick window for the update requests: show a pattern with the QML window minimized, and with the QML window on another screen. A timeout of a frame is a failure.
 
-### 35. Reject stale captures and sample valid regions
-
-Requires: 34.
-
-TODO:
-
-- Add the binary frame marker, optional heartbeat, bounded capture wait and region selection from [Timing and frame identity](../design/output_driver/testing.md#timing-and-frame-identity).
-- `CaptureAdapter::capture` is synchronous, and the host calls it and checks the descriptor on its own thread (the Qt GUI thread for the QRhi host); see [Capture interface and artifacts](../design/output_driver/testing.md#capture-interface-and-artifacts). Make the capture asynchronous for the bounded wait. Define and test what a new `show`, `open`, `close`, display change, disconnect and `quit` do to a pending capture, in the shared host contract on both executors.
-- Replay synthetic frame streams. Verify timestamps, current marker, three matching frames, deadline, resize and display-state changes. Test inset patch sampling separately from one-pixel geometry. Do not resize a capture to pass comparison.
-
 ### 62. Connect capture artifacts to the hosts
 
-Requires: 34. Do this with the first capture adapter (39, 40 or 41); before it, both hosts give `unavailable` for every capture.
+Requires: 34. Do this with the first capture adapter (39, 40 or 41); before it, both hosts give `unavailable` for every capture of a frame shown with the marker.
 
 TODO:
 
@@ -189,6 +179,24 @@ TODO:
 
 - Add the ScreenCast portal/PipeWire adapter, or the required compositor adapter, from [Platform capture adapters](../design/output_driver/testing.md#platform-capture-adapters). Record negotiated samples and colour state.
 - Verify layout, timestamps, resize and missing-field handling. Missing transfer, primaries, range or scale must make absolute HDR comparison unavailable. Keep X11 screenshots limited to geometry.
+
+### 63. Qualify frame acceptance with a real capture adapter
+
+Requires: the first adapter of 39, 40 or 41, and 62.
+
+The frame marker, the gate, the heartbeat and region selection pass only with replayed synthetic frames; see [Timing and frame identity](../design/output_driver/testing.md#timing-and-frame-identity).
+
+TODO:
+
+- With the adapter, capture marked fixtures in both hosts. Check that the marker reads through the real capture conversion, also with YCbCr chroma subsampling, and that three matching frames arrive before the deadline. Record the frame time base of the adapter (for example whether WGC frame times are QPC values) and check it against `now`.
+- Capture a static frame without and with `heartbeat_ms`. Record whether the platform delivers new frames for a static window and for each heartbeat presentation.
+- Measure the time of the per-frame checks on the Qt GUI thread with a full-screen fixture. If Qt controls stop responding, move the checks to a worker and update the design.
+
+Open questions:
+
+- Matching frames must have equal stored samples (limit 0). Is this correct for real captures, for example with temporal dithering or capture noise? If not, which limit, and in which units?
+- A frame of another size after the submission fails the capture at once. Can a transient resize after the submission occur, for example while a window becomes full screen? If yes, must such a frame be stale instead?
+- The marker and each heartbeat presentation change the frame, so automatic `MaxFALL` (and `MaxCLL` of a fixture darker than the marker) changes; with automatic light levels each heartbeat can send new HDR metadata. Must a capture with metadata checks use explicit light levels, or must the heartbeat keep the metadata of the first presentation?
 
 ### 43. Add and qualify the Little CMS profile adapter
 
@@ -322,7 +330,7 @@ TODO:
 
 ### 51. Qualify capture adapters and compare output
 
-Requires: 32, 35, 36, 38, 47, 48, 62, plus the applicable adapter from 39, 40, 41. Windows profile comparisons also require 43, 50.
+Requires: 32, 35, 36, 38, 47, 48, 62, 63, plus the applicable adapter from 39, 40, 41. Windows profile comparisons also require 43, 50.
 
 TODO:
 

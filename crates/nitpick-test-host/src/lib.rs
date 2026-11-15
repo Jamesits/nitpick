@@ -11,10 +11,15 @@ pub mod capture;
 pub mod contract;
 pub mod controller;
 pub mod fixture;
+pub mod gate;
+pub mod marker;
 pub mod protocol;
+pub mod region;
+#[cfg(any(test, feature = "contract"))]
+pub mod replay;
 
 pub use artifact::{ArtifactSink, ArtifactWriter, Artifacts, Environment};
-pub use capture::{Capture, CaptureAdapter, CaptureTarget, NoCapture};
+pub use capture::{Capture, CaptureAdapter, CaptureFrames, CaptureTarget, NoCapture};
 pub use controller::{Clock, DriverEvent, Exit, Hooks, LocalFuture, TestHost};
 pub use fixture::{FixtureFrame, Fixtures};
 pub use protocol::{Event, Request};

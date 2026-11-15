@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use half::f16;
@@ -55,6 +56,8 @@ fn capture(width: usize, height: usize, planes: Vec<(PlaneLayout, Vec<u8>)>) -> 
             width,
             height,
             planes: layouts,
+            content: None,
+            cursor: Cursor::Hidden,
             alpha: None,
             colour: unknown_colour(),
             timestamps: Timestamps {
@@ -506,6 +509,26 @@ fn invalid_descriptors_are_rejected() {
             },
             E::BlobName("../x".into()),
         ),
+        (
+            |c| c.descriptor.content = Some(Rect::new(1, 0, 3, 2)),
+            E::Content,
+        ),
+        (
+            |c| c.descriptor.content = Some(Rect::new(0, 0, 3, 0)),
+            E::Content,
+        ),
+        (
+            |c| c.descriptor.content = Some(Rect::new(usize::MAX, 0, 1, 1)),
+            E::Content,
+        ),
+        (
+            |c| {
+                c.descriptor.cursor = Cursor::Shown {
+                    rect: Rect::new(0, 0, 0, 4),
+                };
+            },
+            E::Cursor,
+        ),
     ];
     for (i, (mutate, want)) in rgba.into_iter().enumerate() {
         let (mut c, _) = padded_rgba16f();
@@ -557,4 +580,59 @@ fn blob_names() {
     ] {
         assert_eq!(valid_blob_name(name), valid, "{name:?}");
     }
+}
+
+#[test]
+fn content_and_cursor_are_checked_but_not_clipped() {
+    let (mut c, _) = padded_rgba16f();
+    c.descriptor.content = Some(Rect::new(1, 1, 2, 1));
+    // A cursor can extend past the image.
+    c.descriptor.cursor = Cursor::Shown {
+        rect: Rect::new(2, 1, 32, 32),
+    };
+    let before = c.descriptor.clone();
+    c.validate().unwrap();
+    assert_eq!(c.descriptor, before);
+    c.descriptor.cursor = Cursor::Unknown;
+    c.validate().unwrap();
+}
+
+#[test]
+fn timestamps_compare_across_tick_rates_of_one_base() {
+    let t = |base, ticks, ticks_per_second| Timestamp {
+        base,
+        ticks,
+        ticks_per_second,
+    };
+    let qpc = t(TimeBase::Qpc, 10_000_000, 10_000_000);
+    assert_eq!(
+        qpc.cmp_time(&t(TimeBase::Qpc, 1000, 1000)),
+        Some(Ordering::Equal)
+    );
+    assert_eq!(
+        qpc.cmp_time(&t(TimeBase::Qpc, 1001, 1000)),
+        Some(Ordering::Less)
+    );
+    // No overflow at the largest values.
+    let max = t(TimeBase::Qpc, u64::MAX, u64::MAX);
+    assert_eq!(max.cmp_time(&qpc), Some(Ordering::Equal));
+    assert_eq!(qpc.cmp_time(&t(TimeBase::Monotonic, 1, 1)), None);
+    assert_eq!(qpc.cmp_time(&t(TimeBase::Qpc, 1, 0)), None);
+}
+
+#[test]
+fn rectangles() {
+    let r = Rect::new(2, 3, 4, 5);
+    assert!(r.contains(2, 3) && r.contains(5, 7));
+    assert!(!r.contains(6, 7) && !r.contains(5, 8) && !r.contains(1, 3));
+    assert!(r.intersects(&Rect::new(5, 7, 1, 1)));
+    assert!(r.intersects(&Rect::new(0, 0, 3, 4)));
+    assert!(!r.intersects(&Rect::new(6, 3, 1, 1)));
+    assert!(!r.intersects(&Rect::new(0, 0, 2, 10)));
+    assert!(!r.intersects(&Rect::new(3, 4, 0, 1)));
+    assert_eq!(r.inset(1), Some(Rect::new(3, 4, 2, 3)));
+    assert_eq!(r.inset(2), None);
+    assert_eq!(r.relative_to((3, 1)), Some(Rect::new(0, 2, 3, 5)));
+    assert_eq!(r.relative_to((6, 0)), None);
+    assert_eq!(Rect::new(usize::MAX, 0, 1, 1).end(), None);
 }

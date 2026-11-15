@@ -113,12 +113,29 @@ impl Drop for Host {
     }
 }
 
+fn capture(frame: u64) -> Request {
+    Request::Capture {
+        frame,
+        heartbeat_ms: None,
+        deadline_ms: None,
+    }
+}
+
+/// `show` with the frame marker.
+fn marked(mut request: Request) -> Request {
+    if let Request::Show { marker, .. } = &mut request {
+        *marker = true;
+    }
+    request
+}
+
 fn show(frame: u64, fixture: &str, delay_ms: u32) -> Request {
     Request::Show {
         frame,
         fixture: fixture.into(),
         delay_ms: Some(delay_ms),
         metadata: None,
+        marker: false,
     }
 }
 
@@ -137,7 +154,7 @@ fn protocol_runs_on_the_qt_event_loop() {
     assert_eq!(host.error(), (Some(1), ErrorKind::NoSurface));
     host.send(&show(1, "state-frame-a-pq-full-10", 0));
     assert_eq!(host.error(), (Some(1), ErrorKind::FrameOrder));
-    host.send(&Request::Capture { frame: 1 });
+    host.send(&capture(1));
     assert_eq!(host.error(), (Some(1), ErrorKind::StaleFrame));
     host.send(&Request::Quit {});
     host.expect(&Event::Stopped { error: None });
@@ -185,7 +202,7 @@ fn presents_fixtures_on_a_screen() {
 
     open(&mut host, &display, 10, 1);
     host.send(&show(1, "state-frame-a-pq-full-10", 0));
-    host.send(&show(2, "state-frame-b-pq-full-10", 300));
+    host.send(&marked(show(2, "state-frame-b-pq-full-10", 300)));
     host.expect(&Event::Cancelled {
         frame: 1,
         cause: Cause::Replaced,
@@ -198,7 +215,7 @@ fn presents_fixtures_on_a_screen() {
         delay_ms: 300,
     });
     assert!(start.elapsed() >= Duration::from_millis(250));
-    host.send(&Request::Capture { frame: 2 });
+    host.send(&capture(2));
     assert!(matches!(
         host.next(),
         Event::Captured {

@@ -16,7 +16,7 @@ use nitpick_fixtures::MetadataRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::capture::{Capture, CaptureDescriptor, valid_blob_name};
+use crate::capture::{Capture, CaptureDescriptor, Timestamp, valid_blob_name};
 use crate::protocol::{CaptureOutcome, ModeReport};
 
 /// Of `result.json`.
@@ -76,10 +76,30 @@ pub struct Check {
     pub reason: Option<String>,
 }
 
+/// The frame acceptance of the capture session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Acceptance {
+    /// The adapter time before the host submitted the frame.
+    pub submitted: Timestamp,
+    pub marker: u8,
+    /// The top-left corner of the frame marker on the surface.
+    pub marker_origin: [usize; 2],
+    /// Frame times of the matching run, oldest first. Fewer than three
+    /// after a failure.
+    pub frames: Vec<Timestamp>,
+    /// Frames that the adapter delivered.
+    pub received: usize,
+    pub deadline_ms: u32,
+    pub heartbeat_ms: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Artifact {
     pub check: Check,
     pub run: RunRecord,
+    pub acceptance: Acceptance,
+    /// The accepted frame, or the last frame of a failed session.
     pub capture: Capture,
 }
 
@@ -249,6 +269,7 @@ struct ResultFile {
     version: u32,
     check: Check,
     run: RunRecord,
+    acceptance: Acceptance,
     descriptor: CaptureDescriptor,
     planes: Vec<FileRef>,
     raw: Map<String, Value>,
@@ -329,6 +350,7 @@ fn write_files(dir: &Path, artifact: &Artifact) -> io::Result<()> {
         version: VERSION,
         check: artifact.check.clone(),
         run: artifact.run.clone(),
+        acceptance: artifact.acceptance.clone(),
         descriptor: c.descriptor.clone(),
         planes,
         raw: c.raw.clone(),
@@ -381,6 +403,7 @@ pub fn read(dir: &Path) -> io::Result<Artifact> {
     Ok(Artifact {
         check: r.check,
         run: r.run,
+        acceptance: r.acceptance,
         capture: Capture {
             descriptor: r.descriptor,
             planes,

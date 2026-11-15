@@ -10,7 +10,7 @@ The host coordinates three separate interfaces:
 
 - [`OutputDriver`](output_driver/overview.md#interface) presents pattern pixels and reports output capabilities.
 - `DisplayDeviceControl` enumerates physical display capabilities and reads or changes device profile assignments.
-- The [capture adapter](output_driver/testing.md#host-boundary) reads samples for verification.
+- The [capture adapter](output_driver/testing.md#capture-interface-and-artifacts) reads samples for verification.
 
 The [Little CMS profile adapter](output_driver/testing.md#colour-library-boundary) reads profile contents and performs colour calculations. It does not install or assign an OS profile. `nitpick-display` does not evaluate the MHC2 matrix or LUT. OS acceptance of a profile does not prove that its calibration reached the display.
 

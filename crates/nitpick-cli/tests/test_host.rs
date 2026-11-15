@@ -145,11 +145,16 @@ impl Host {
     }
 
     async fn show(&mut self, frame: u64, fixture: &str, delay_ms: u32) {
+        self.show_with(frame, fixture, delay_ms, false).await;
+    }
+
+    async fn show_with(&mut self, frame: u64, fixture: &str, delay_ms: u32, marker: bool) {
         self.send(&Request::Show {
             frame,
             fixture: fixture.into(),
             delay_ms: Some(delay_ms),
             metadata: None,
+            marker,
         })
         .await;
     }
@@ -168,6 +173,14 @@ fn display_event(state: DisplayState, display: Option<&str>) -> Event {
         state,
         display: display.map(Into::into),
         reason: None,
+    }
+}
+
+fn capture(frame: u64) -> Request {
+    Request::Capture {
+        frame,
+        heartbeat_ms: None,
+        deadline_ms: None,
     }
 }
 
@@ -296,7 +309,7 @@ async fn reports_capture_readiness_and_close() {
     let mut host = Host::start().await;
     let (mut page, display) = host.ready().await;
     host.open(&display, 1, VIEWPORT).await;
-    host.show(3, FRAME_B, 0).await;
+    host.show_with(3, FRAME_B, 0, true).await;
     let (id, size) = page.expect_show().await;
     page.applied(id, size).await;
     assert!(matches!(
@@ -309,18 +322,19 @@ async fn reports_capture_readiness_and_close() {
     })
     .await;
 
-    host.send(&Request::Capture { frame: 3 }).await;
+    host.send(&capture(3)).await;
     let Event::Captured {
         frame: 3,
         result: CaptureOutcome::Unavailable,
         reason: Some(reason),
         artifact: None,
+        cause: None,
     } = host.next().await
     else {
         panic!("expected `captured`");
     };
     assert!(reason.contains("no capture adapter"), "{reason}");
-    host.send(&Request::Capture { frame: 2 }).await;
+    host.send(&capture(2)).await;
     assert_eq!(
         error_kind(&host.next().await),
         (Some(2), ErrorKind::StaleFrame)

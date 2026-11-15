@@ -8,12 +8,21 @@ use serde_json::json;
 
 use super::*;
 use crate::capture::{
-    ByteOrder, Channel, Colour, Field, PlaneLayout, Primaries, SampleKind, Source, SourceKind,
-    TimeBase, Timestamp, Timestamps, Transfer, WhitePoint,
+    ByteOrder, Channel, Colour, Cursor, Field, PlaneLayout, Primaries, Rect, SampleKind, Source,
+    SourceKind, TimeBase, Timestamp, Timestamps, Transfer, WhitePoint,
 };
 use crate::protocol::GamutReport;
 
+fn qpc(ticks: u64) -> Timestamp {
+    Timestamp {
+        base: TimeBase::Qpc,
+        ticks,
+        ticks_per_second: 10_000_000,
+    }
+}
+
 /// 2×2 px RGBA binary16 with 4 padding bytes per row, every API field.
+#[allow(clippy::too_many_lines)] // One literal.
 fn artifact(frame: u64) -> Artifact {
     let fields = [Channel::R, Channel::G, Channel::B, Channel::A]
         .into_iter()
@@ -72,6 +81,15 @@ fn artifact(frame: u64) -> Artifact {
                 ..Environment::default()
             },
         },
+        acceptance: Acceptance {
+            submitted: qpc(123_000_000),
+            marker: 0xA5,
+            marker_origin: [0, 36],
+            frames: vec![qpc(123_400_000), qpc(123_456_789)],
+            received: 4,
+            deadline_ms: 30_000,
+            heartbeat_ms: Some(100),
+        },
         capture: Capture {
             descriptor: CaptureDescriptor {
                 width: 2,
@@ -83,6 +101,10 @@ fn artifact(frame: u64) -> Artifact {
                     byte_order: ByteOrder::Little,
                     fields,
                 }],
+                content: Some(Rect::new(0, 0, 2, 1)),
+                cursor: Cursor::Shown {
+                    rect: Rect::new(1, 1, 32, 32),
+                },
                 alpha: None,
                 colour: Colour {
                     transfer: Some(Transfer::Linear),
@@ -94,11 +116,7 @@ fn artifact(frame: u64) -> Artifact {
                     luminance: None,
                 },
                 timestamps: Timestamps {
-                    frame: Some(Timestamp {
-                        base: TimeBase::Qpc,
-                        ticks: 123_456_789,
-                        ticks_per_second: 10_000_000,
-                    }),
+                    frame: Some(qpc(123_456_789)),
                     arrival: None,
                 },
                 source: Source {
@@ -151,6 +169,11 @@ fn artifact_round_trip() {
     assert_eq!(result["version"], json!(VERSION));
     assert_eq!(result["preview"], json!({"file": PREVIEW, "bytes": 12}));
     assert_eq!(result["descriptor"]["colour"]["luminance"], Value::Null);
+    assert_eq!(
+        result["descriptor"]["cursor"],
+        json!({"state": "shown", "rect": {"x": 1, "y": 1, "width": 32, "height": 32}})
+    );
+    assert_eq!(result["acceptance"]["frames"].as_array().unwrap().len(), 2);
 }
 
 #[test]

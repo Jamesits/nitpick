@@ -1,14 +1,17 @@
 //! Raw captures: the planes of an OS capture adapter with a descriptor of
-//! their memory layout and colour. See "Host boundary" in
-//! `doc/design/output_driver/testing.md`.
+//! their memory layout and colour. See "Capture interface and artifacts"
+//! in `doc/design/output_driver/testing.md`.
 //!
 //! A descriptor field that the API does not give stays `None`. Nothing in
 //! this module derives a colour value from the sample format: FP16 storage
 //! does not imply linear scRGB or 80 cd/m².
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::pin::Pin;
 
+use futures_core::Stream;
 use nitpick_core::driver::DisplayId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -21,12 +24,23 @@ pub struct CaptureTarget<'a> {
     pub generation: u64,
 }
 
+/// The frames of one capture session in arrival order. `Err`: the session
+/// failed, with the reason. Dropping the stream ends the session.
+pub type CaptureFrames = Pin<Box<dyn Stream<Item = Result<Capture, String>>>>;
+
 /// An OS capture adapter. It is not part of `OutputDriver`.
 pub trait CaptureAdapter {
+    /// The current time in the time base of the frame timestamps. The host
+    /// reads it before each presentation. `None`: the adapter has no clock.
+    fn now(&self) -> Option<Timestamp>;
+
+    /// Starts a capture session of `target`. The adapter must not block
+    /// the host thread: it delivers frames through the stream.
+    ///
     /// # Errors
     /// No capture is available, for example without permission or after an
     /// API failure; the reason.
-    fn capture(&mut self, target: &CaptureTarget<'_>) -> Result<Capture, String>;
+    fn start(&mut self, target: &CaptureTarget<'_>) -> Result<CaptureFrames, String>;
 }
 
 /// A host without a capture adapter.
@@ -34,8 +48,75 @@ pub trait CaptureAdapter {
 pub struct NoCapture(pub String);
 
 impl CaptureAdapter for NoCapture {
-    fn capture(&mut self, _: &CaptureTarget<'_>) -> Result<Capture, String> {
+    fn now(&self) -> Option<Timestamp> {
+        None
+    }
+
+    fn start(&mut self, _: &CaptureTarget<'_>) -> Result<CaptureFrames, String> {
         Err(self.0.clone())
+    }
+}
+
+/// Pixels `[x, x + width)` × `[y, y + height)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rect {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Rect {
+    #[must_use]
+    pub const fn new(x: usize, y: usize, width: usize, height: usize) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The end coordinates `(x + width, y + height)`; `None` on overflow.
+    #[must_use]
+    pub fn end(&self) -> Option<(usize, usize)> {
+        Some((
+            self.x.checked_add(self.width)?,
+            self.y.checked_add(self.height)?,
+        ))
+    }
+
+    #[must_use]
+    pub fn contains(&self, x: usize, y: usize) -> bool {
+        x >= self.x && y >= self.y && x - self.x < self.width && y - self.y < self.height
+    }
+
+    #[must_use]
+    pub fn intersects(&self, other: &Self) -> bool {
+        let overlap = |a: usize, aw: usize, b: usize, bw: usize| {
+            aw > 0 && bw > 0 && (a <= b && b - a < aw || b < a && a - b < bw)
+        };
+        overlap(self.x, self.width, other.x, other.width)
+            && overlap(self.y, self.height, other.y, other.height)
+    }
+
+    /// Each edge moved `by` pixels inward; `None` if nothing remains.
+    #[must_use]
+    pub fn inset(&self, by: usize) -> Option<Self> {
+        let width = self.width.checked_sub(by.checked_mul(2)?)?;
+        let height = self.height.checked_sub(by.checked_mul(2)?)?;
+        (width > 0 && height > 0).then(|| Self::new(self.x + by, self.y + by, width, height))
+    }
+
+    /// The part of `self` that the rectangle at `origin` covers, in
+    /// coordinates relative to `origin`.
+    #[must_use]
+    pub fn relative_to(&self, origin: (usize, usize)) -> Option<Self> {
+        let (end_x, end_y) = self.end()?;
+        let (x, y) = (self.x.max(origin.0), self.y.max(origin.1));
+        (end_x > x && end_y > y)
+            .then(|| Self::new(x - origin.0, y - origin.1, end_x - x, end_y - y))
     }
 }
 
@@ -65,11 +146,28 @@ pub struct CaptureDescriptor {
     pub width: usize,
     pub height: usize,
     pub planes: Vec<PlaneLayout>,
+    /// The part of the image that shows the source content, for example
+    /// without window chrome, a capture border or unused texture area.
+    /// `None`: the whole image.
+    pub content: Option<Rect>,
+    pub cursor: Cursor,
     /// The meaning of the `a` field. `None`: unknown, or no `a` field.
     pub alpha: Option<Alpha>,
     pub colour: Colour,
     pub timestamps: Timestamps,
     pub source: Source,
+}
+
+/// The mouse cursor in the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Cursor {
+    /// The adapter told the API not to draw it.
+    Hidden,
+    /// It can cover `rect` of the image.
+    Shown { rect: Rect },
+    /// The API can draw it, at an unknown position.
+    Unknown,
 }
 
 /// One plane: rows of blocks; each block holds one bit field per channel.
@@ -246,6 +344,20 @@ pub struct Timestamp {
     pub ticks_per_second: u64,
 }
 
+impl Timestamp {
+    /// Compares the times exactly, also at different tick rates. `None`:
+    /// another time base, or a tick rate of 0.
+    #[must_use]
+    pub fn cmp_time(&self, other: &Self) -> Option<Ordering> {
+        if self.base != other.base || self.ticks_per_second == 0 || other.ticks_per_second == 0 {
+            return None;
+        }
+        let a = u128::from(self.ticks) * u128::from(other.ticks_per_second);
+        let b = u128::from(other.ticks) * u128::from(self.ticks_per_second);
+        Some(a.cmp(&b))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimeBase {
@@ -278,6 +390,17 @@ pub enum SourceKind {
 pub enum Sample {
     Uint(u32),
     Float(f32),
+}
+
+impl Sample {
+    /// Exact: both kinds fit in binary64.
+    #[must_use]
+    pub fn value(self) -> f64 {
+        match self {
+            Self::Uint(v) => f64::from(v),
+            Self::Float(v) => f64::from(v),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +459,10 @@ pub enum DescriptorError {
     Luminance,
     Timestamp,
     BlobName(String),
+    /// The content rectangle is empty or not inside the image.
+    Content,
+    /// The cursor rectangle is empty.
+    Cursor,
 }
 
 impl fmt::Display for DescriptorError {
@@ -374,6 +501,8 @@ impl fmt::Display for DescriptorError {
             Self::Luminance => write!(f, "invalid luminance scale"),
             Self::Timestamp => write!(f, "zero ticks per second"),
             Self::BlobName(name) => write!(f, "invalid raw blob name {name:?}"),
+            Self::Content => write!(f, "the content rectangle is empty or outside the image"),
+            Self::Cursor => write!(f, "the cursor rectangle is empty"),
         }
     }
 }
@@ -408,6 +537,18 @@ impl Capture {
         let d = &self.descriptor;
         if d.width == 0 || d.height == 0 {
             return Err(DescriptorError::EmptyImage);
+        }
+        if let Some(c) = d.content
+            && (c.width == 0
+                || c.height == 0
+                || c.end().is_none_or(|(x, y)| x > d.width || y > d.height))
+        {
+            return Err(DescriptorError::Content);
+        }
+        if let Cursor::Shown { rect } = d.cursor
+            && (rect.width == 0 || rect.height == 0 || rect.end().is_none())
+        {
+            return Err(DescriptorError::Cursor);
         }
         if d.planes.is_empty() || d.planes.len() != self.planes.len() {
             return Err(DescriptorError::PlaneCount {
@@ -577,6 +718,16 @@ impl<'a> CaptureView<'a> {
 
     fn is_ycbcr(&self) -> bool {
         self.field(Channel::Y).is_some()
+    }
+
+    /// R, G, B, or Y, Cb, Cr.
+    #[must_use]
+    pub fn colour_channels(&self) -> [Channel; 3] {
+        if self.is_ycbcr() {
+            [Channel::Y, Channel::Cb, Channel::Cr]
+        } else {
+            [Channel::R, Channel::G, Channel::B]
+        }
     }
 
     fn check_channels(&self) -> Result<(), DescriptorError> {

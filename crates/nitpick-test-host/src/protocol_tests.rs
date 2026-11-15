@@ -35,20 +35,32 @@ fn requests_round_trip() {
             fixture: "state-frame-a-pq-full-10".into(),
             delay_ms: None,
             metadata: None,
+            marker: false,
         },
         Request::Show {
             frame: 4,
             fixture: "x".into(),
             delay_ms: Some(0),
             metadata: Some(None),
+            marker: false,
         },
         Request::Show {
             frame: 5,
             fixture: "x".into(),
             delay_ms: Some(10),
             metadata: Some(Some(metadata())),
+            marker: true,
         },
-        Request::Capture { frame: 5 },
+        Request::Capture {
+            frame: 5,
+            heartbeat_ms: None,
+            deadline_ms: None,
+        },
+        Request::Capture {
+            frame: 5,
+            heartbeat_ms: Some(100),
+            deadline_ms: Some(5000),
+        },
         Request::Close {},
         Request::Quit {},
     ];
@@ -76,6 +88,24 @@ fn show_separates_absent_and_null_metadata() {
 }
 
 #[test]
+fn optional_capture_fields_default_to_absent() {
+    let line = json!({"request": "capture", "frame": 2}).to_string();
+    assert_eq!(
+        parse_request(&line),
+        Ok(Some(Request::Capture {
+            frame: 2,
+            heartbeat_ms: None,
+            deadline_ms: None
+        }))
+    );
+    let line = json!({"request": "show", "frame": 1, "fixture": "x"}).to_string();
+    let Ok(Some(Request::Show { marker, .. })) = parse_request(&line) else {
+        panic!()
+    };
+    assert!(!marker);
+}
+
+#[test]
 fn rejects_invalid_lines() {
     assert_eq!(parse_request(""), Ok(None));
     assert_eq!(parse_request(" \t"), Ok(None));
@@ -92,6 +122,9 @@ fn rejects_invalid_lines() {
         r#"{"request":"query","display":"d","extra":true}"#,
         r#"{"request":"quit","extra":true}"#,
         r#"{"request":"show","frame":1,"fixture":"x","metadata":{"white":[0.3,0.3]}}"#,
+        r#"{"request":"show","frame":1,"fixture":"x","marker":1}"#,
+        r#"{"request":"capture","frame":1,"heartbeat_ms":-1}"#,
+        r#"{"request":"capture","frame":1,"deadline":10}"#,
     ] {
         assert!(parse_request(line).is_err(), "{line}");
     }
@@ -131,6 +164,7 @@ fn events_have_a_fixed_form() {
                 result: CaptureOutcome::Unavailable,
                 reason: Some("none".into()),
                 artifact: None,
+                cause: None,
             },
             json!({"event": "captured", "frame": 7, "result": "unavailable", "reason": "none"}),
         ),
@@ -140,9 +174,20 @@ fn events_have_a_fixed_form() {
                 result: CaptureOutcome::Pass,
                 reason: None,
                 artifact: Some("000001-frame-7".into()),
+                cause: None,
             },
             json!({"event": "captured", "frame": 7, "result": "pass",
                    "artifact": "000001-frame-7"}),
+        ),
+        (
+            Event::Captured {
+                frame: 7,
+                result: CaptureOutcome::Cancelled,
+                reason: None,
+                artifact: None,
+                cause: Some(Cause::Replaced),
+            },
+            json!({"event": "captured", "frame": 7, "result": "cancelled", "cause": "replaced"}),
         ),
         (
             Event::Saved {
