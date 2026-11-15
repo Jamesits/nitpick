@@ -51,6 +51,30 @@ fn private_include_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Include directories of a Vulkan SDK or a Vulkan-Headers install at
+/// `VULKAN_SDK` (`Include` on Windows, `include` elsewhere). Linux usually
+/// has the headers in the system include path. Without `vulkan/vulkan.h`,
+/// Qt leaves out its Vulkan API and the C++ code builds without Vulkan.
+fn vulkan_include_dirs() -> Vec<PathBuf> {
+    println!("cargo::rerun-if-env-changed=VULKAN_SDK");
+    let Some(sdk) = std::env::var_os("VULKAN_SDK") else {
+        return Vec::new();
+    };
+    let sdk = PathBuf::from(sdk);
+    let dirs: Vec<PathBuf> = ["Include", "include"]
+        .iter()
+        .map(|d| sdk.join(d))
+        .filter(|d| d.join("vulkan").join("vulkan.h").is_file())
+        .take(1)
+        .collect();
+    assert!(
+        !dirs.is_empty(),
+        "VULKAN_SDK is set, but {} has no Include/vulkan/vulkan.h",
+        sdk.display()
+    );
+    dirs
+}
+
 fn qsb() -> PathBuf {
     let name = if cfg!(windows) { "qsb.exe" } else { "qsb" };
     ["QT_HOST_BINS", "QT_HOST_LIBEXECS"]
@@ -98,6 +122,7 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let shader_dir = compile_shaders(&out);
     let private_dirs = private_include_dirs();
+    let vulkan_dirs = vulkan_include_dirs();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     let mut builder =
@@ -108,8 +133,11 @@ fn main() {
                 "src/display.rs",
                 "src/delay.rs",
                 "src/test_host.rs",
+                "src/readback.rs",
             ])
+            .cpp_file("cpp/pattern_renderer.cpp")
             .cpp_file("cpp/pattern_window.cpp")
+            .cpp_file("cpp/readback.cpp")
             .cpp_file("cpp/delay_timer.cpp")
             .cpp_file("cpp/test_host.cpp");
     if target_os == "macos" {
@@ -119,7 +147,7 @@ fn main() {
     let builder = unsafe {
         builder.cc_builder(|cc| {
             cc.include(&shader_dir);
-            for dir in &private_dirs {
+            for dir in private_dirs.iter().chain(&vulkan_dirs) {
                 cc.include(dir);
             }
         })

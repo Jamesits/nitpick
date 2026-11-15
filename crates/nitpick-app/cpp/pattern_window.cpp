@@ -1,4 +1,5 @@
 #include "nitpick-app/cpp/pattern_window.h"
+#include "nitpick-app/cpp/pattern_renderer.h"
 
 #include "nitpick-app/src/display.cxx.h"
 
@@ -22,8 +23,6 @@
 #include <stdexcept>
 #include <string>
 
-#include "pattern_shaders.h"
-
 #if defined(Q_OS_WIN)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -38,7 +37,6 @@ using Microsoft::WRL::ComPtr;
 #elif defined(Q_OS_MACOS)
 #include "nitpick-app/cpp/macos.h"
 #else
-#include <QtGui/QVulkanInstance>
 #include <QtGui/private/qrhivulkan_p.h>
 #endif
 
@@ -64,15 +62,6 @@ QScreen *screenAt(std::int32_t index) {
         throw std::runtime_error("no screen with index " + std::to_string(index));
     }
     return screens.at(index);
-}
-
-QShader loadShader(const unsigned char *data, std::size_t size) {
-    QShader s = QShader::fromSerialized(
-        QByteArray::fromRawData(reinterpret_cast<const char *>(data), qsizetype(size)));
-    if (!s.isValid()) {
-        throw std::runtime_error("embedded shader is not valid");
-    }
-    return s;
 }
 
 #if defined(Q_OS_WIN)
@@ -136,24 +125,6 @@ LUID adapterOf(HMONITOR monitor) {
     throw std::runtime_error("no DXGI output for the selected screen");
 }
 
-#elif !defined(Q_OS_MACOS)
-
-// Created once and never destroyed: windows that use it may live until the
-// application exits. Not named `vulkanInstance`: inside a QWindow subclass
-// that name finds QWindow::vulkanInstance(), which returns null here.
-QVulkanInstance *sharedVulkanInstance() {
-    static QVulkanInstance *instance = [] {
-        auto *inst = new QVulkanInstance;
-        // Includes VK_EXT_swapchain_colorspace, which HDR swap chains need.
-        inst->setExtensions(QRhiVulkanInitParams::preferredInstanceExtensions());
-        if (!inst->create()) {
-            throw std::runtime_error("cannot create a Vulkan instance");
-        }
-        return inst;
-    }();
-    return instance;
-}
-
 #endif
 
 // Pixel size of the pattern area of a full-screen window on `screen`. The
@@ -190,7 +161,7 @@ public:
         setSurfaceType(QSurface::MetalSurface);
 #else
         setSurfaceType(QSurface::VulkanSurface);
-        setVulkanInstance(sharedVulkanInstance());
+        setVulkanInstance(nitpick::sharedVulkanInstance());
 #endif
         setFlags(Qt::Window | Qt::FramelessWindowHint);
         setScreen(screen);
@@ -260,7 +231,7 @@ public:
         if (size != std::size_t(width) * std::size_t(height) * bytesPerPixel) {
             throw std::runtime_error("pixel buffer does not match the image size");
         }
-        if (!m_rhi->isTextureFormatSupported(textureFormat())) {
+        if (!m_rhi->isTextureFormatSupported(nitpick::patternTextureFormat(m_fp16))) {
             throw std::runtime_error("the GPU cannot sample the pattern texture format");
         }
         m_pending = QByteArray(reinterpret_cast<const char *>(data), qsizetype(size));
@@ -310,7 +281,7 @@ public:
         d.maxFrameAverageLightLevel = md.max_frame_average_light_level;
         const auto *handles = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles());
         auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-            sharedVulkanInstance()->getInstanceProcAddr("vkGetDeviceProcAddr"));
+            nitpick::sharedVulkanInstance()->getInstanceProcAddr("vkGetDeviceProcAddr"));
         auto setHdrMetadata =
             getDeviceProcAddr ? reinterpret_cast<PFN_vkSetHdrMetadataEXT>(
                                     getDeviceProcAddr(handles->dev, "vkSetHdrMetadataEXT"))
@@ -394,6 +365,11 @@ private:
     }
 
     void init() {
+        // A second expose after SurfaceAboutToBeDestroyed initializes again.
+        // The resources of the earlier QRhi must go before that QRhi.
+        m_renderer.reset();
+        m_rp.reset();
+        m_sc.reset();
 #if defined(Q_OS_WIN)
         QRhiD3D11InitParams params;
         QRhiD3D11NativeHandles adapter;
@@ -405,7 +381,7 @@ private:
         m_rhi.reset(QRhi::create(QRhi::Metal, &params));
 #else
         QRhiVulkanInitParams params;
-        params.inst = sharedVulkanInstance();
+        params.inst = nitpick::sharedVulkanInstance();
         params.window = this;
         // Unsupported device extensions are ignored; applyMetadata checks.
         params.deviceExtensions = {"VK_EXT_hdr_metadata"};
@@ -439,52 +415,8 @@ private:
         if (!m_sc->createOrResize()) {
             throw std::runtime_error("cannot create the swap chain");
         }
-        m_sampler.reset(m_rhi->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest,
-                                          QRhiSampler::None, QRhiSampler::ClampToEdge,
-                                          QRhiSampler::ClampToEdge));
-        if (!m_sampler->create()) {
-            throw std::runtime_error("cannot create the sampler");
-        }
-        // std140 `ivec2 origin`, padded to 16 bytes.
-        m_area.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 16));
-        if (!m_area->create()) {
-            throw std::runtime_error("cannot create the pattern area buffer");
-        }
-    }
-
-    QRhiTexture::Format textureFormat() const {
-        return m_fp16 ? QRhiTexture::RGBA16F : QRhiTexture::RGB10A2;
-    }
-
-    // Texture, bindings and pipeline for an image of `size`. Builds new
-    // objects first, so that a failure keeps the previous pattern.
-    void preparePattern(QSize size) {
-        std::unique_ptr<QRhiTexture> tex(m_rhi->newTexture(textureFormat(), size));
-        if (!tex->create()) {
-            throw std::runtime_error("cannot create the pattern texture");
-        }
-        std::unique_ptr<QRhiShaderResourceBindings> srb(m_rhi->newShaderResourceBindings());
-        srb->setBindings(
-            {QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::FragmentStage,
-                                                      m_area.get()),
-             QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
-                                                       tex.get(), m_sampler.get())});
-        if (!srb->create()) {
-            throw std::runtime_error("cannot create the shader resource bindings");
-        }
-        std::unique_ptr<QRhiGraphicsPipeline> ps(m_rhi->newGraphicsPipeline());
-        ps->setShaderStages(
-            {{QRhiShaderStage::Vertex, loadShader(kPatternVertQsb, sizeof kPatternVertQsb)},
-             {QRhiShaderStage::Fragment, loadShader(kPatternFragQsb, sizeof kPatternFragQsb)}});
-        ps->setVertexInputLayout({});
-        ps->setShaderResourceBindings(srb.get());
-        ps->setRenderPassDescriptor(m_rp.get());
-        if (!ps->create()) {
-            throw std::runtime_error("cannot create the graphics pipeline");
-        }
-        m_ps = std::move(ps);
-        m_srb = std::move(srb);
-        m_tex = std::move(tex);
+        m_renderer = std::make_unique<nitpick::PatternRenderer>(
+            m_rhi.get(), m_rp.get(), nitpick::patternTextureFormat(m_fp16));
     }
 
     void render() {
@@ -512,35 +444,21 @@ private:
             return;
         }
         QRhiResourceUpdateBatch *updates = m_rhi->nextResourceUpdateBatch();
-        // The safe-area margins can change after the first expose.
-        const QPoint origin = patternArea().topLeft();
-        const std::int32_t area[2] = {origin.x(), origin.y()};
-        updates->updateDynamicBuffer(m_area.get(), 0, sizeof area, area);
         // 0 if no frame is queued, or if the queued frame timed out: its
         // pixels must not appear after the host got the error.
         const std::uint64_t frame = nitpick::frameTakeUpload();
         std::string error;
         if (frame != 0) {
             try {
-                preparePattern(m_pendingSize);
-                updates->uploadTexture(
-                    m_tex.get(), QRhiTextureUploadEntry(
-                                     0, 0, QRhiTextureSubresourceUploadDescription(m_pending)));
+                m_renderer->upload(updates, m_pending, m_pendingSize);
             } catch (const std::exception &e) {
                 error = e.what();
             }
         }
         m_pending.clear();
-        QRhiCommandBuffer *cb = m_sc->currentFrameCommandBuffer();
-        cb->beginPass(m_sc->currentFrameRenderTarget(), Qt::black, {1.0f, 0}, updates);
-        if (m_ps) {
-            const QSize s = m_sc->currentPixelSize();
-            cb->setGraphicsPipeline(m_ps.get());
-            cb->setViewport({0, 0, float(s.width()), float(s.height())});
-            cb->setShaderResources();
-            cb->draw(3);
-        }
-        cb->endPass();
+        // The safe-area margins can change after the first expose.
+        m_renderer->draw(m_sc->currentFrameCommandBuffer(), m_sc->currentFrameRenderTarget(),
+                         patternArea().topLeft(), updates);
         r = m_rhi->endFrame(m_sc.get());
         if (frame != 0) {
             if (error.empty() && r != QRhi::FrameOpSuccess) {
@@ -588,11 +506,7 @@ private:
     std::unique_ptr<QRhi> m_rhi;
     std::unique_ptr<QRhiSwapChain> m_sc;
     std::unique_ptr<QRhiRenderPassDescriptor> m_rp;
-    std::unique_ptr<QRhiSampler> m_sampler;
-    std::unique_ptr<QRhiBuffer> m_area;
-    std::unique_ptr<QRhiTexture> m_tex;
-    std::unique_ptr<QRhiShaderResourceBindings> m_srb;
-    std::unique_ptr<QRhiGraphicsPipeline> m_ps;
+    std::unique_ptr<nitpick::PatternRenderer> m_renderer;
 };
 
 QPointer<PatternWindow> g_window;

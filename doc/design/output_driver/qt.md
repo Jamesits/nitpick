@@ -17,8 +17,12 @@ graph LR
     Q -->|native metadata| M[hdr_metadata.rs<br/>MetadataSink] --> D
     R -->|device identity, capabilities, mode| N[nitpick-display<br/>DisplayDeviceControl]
     D --> W[pattern_window.cpp<br/>QWindow + QRhi swap chain]
-    W -->|HDR10 or FP16 scRGB| GPU[GPU output] --> Scope[vectorscope]
+    W --> PR[pattern_renderer.cpp<br/>upload, shader, pipeline]
+    PR -->|HDR10 or FP16 scRGB| GPU[GPU output] --> Scope[vectorscope]
+    RB[readback.rs, readback.cpp<br/>offscreen QRhi, tests only] --> PR
 ```
+
+`pattern_renderer.cpp` holds the draw path. The pattern window draws it into the swap chain; the [QRhi readback](testing.md#qrhi-readback) check draws it into an offscreen texture.
 
 Mapping to `OutputDriver`:
 
@@ -177,7 +181,7 @@ On Linux, the display state comes from the [screen to device mapping](#screen-to
 
 On macOS, Qt's linear HDR path uses 1.0 for the current SDR white. Its luminance varies with display settings and is not known to the driver. See [Qt's luminance behaviour](https://github.com/qt/qtbase/blob/6.12/src/gui/rhi/qrhi.cpp). Thus macOS reports `available = Unknown` and `exact = No` for 12-bit output, with the reason "absolute FP16 luminance scale unavailable". The window shows the pattern with the 80 cd/m² conversion, so the luminance is wrong by the ratio of SDR white to 80 cd/m². Use it only for a visual check. Do not claim an absolute scale with 80, 100 or Qt's placeholder SDR-white value, or reduce the output to 10 bits. HDR10 10-bit output remains available when the swap chain supports it.
 
-A fragment shader copies one texel per pixel with `texelFetch` (no filtering, no blending). Thus the swap chain gets the texture values unchanged.
+A fragment shader copies one texel per pixel with `texelFetch` (no filtering, no blending). Thus the swap chain gets the texture values unchanged. The [QRhi readback](testing.md#qrhi-readback) check confirms this for an offscreen texture of the swap chain format on D3D11 and Vulkan on Windows. **Unverified:** a readback of the swap chain image itself, and Metal.
 
 For the supported 80 cd/m² path, convert the code triple $(R', G', B')$ at depth $n$:
 1. Each code is a full-range PQ code on the wire: $L = \mathrm{EOTF}_{PQ}(D / (2^n - 1))$ in cd/m².

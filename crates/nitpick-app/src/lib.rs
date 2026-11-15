@@ -13,6 +13,7 @@ mod hdr_metadata;
 #[allow(clippy::unnecessary_box_returns)]
 mod launcher;
 mod qrhi_driver;
+pub mod readback;
 mod session;
 mod settings;
 mod submission;

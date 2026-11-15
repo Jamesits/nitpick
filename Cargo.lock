@@ -2423,6 +2423,7 @@ dependencies = [
  "futures-util",
  "nitpick-core",
  "nitpick-display",
+ "nitpick-fixtures",
  "nitpick-test-host",
  "serde_json",
  "tempfile",

@@ -121,10 +121,23 @@ Open questions:
 
 Requires: 9, 10, 34.
 
+The offscreen readback and its test are in [QRhi readback](../design/output_driver/testing.md#qrhi-readback). D3D11 (GPU and WARP) and Vulkan passed on Windows.
+
 TODO:
 
-- Add readback after the production upload, shader and pipeline draw to a supported offscreen target. Normalize only the documented row pitch and image origin.
-- On D3D11, Metal and Vulkan, compare exact stored samples and geometry against CPU output. Include asymmetric corners, odd widths, channel ramps and alpha. A software device result covers arithmetic only, as defined by [QRhi readback](../design/output_driver/testing.md#qrhi-readback).
+- On a Mac, run `cargo nextest run -p nitpick-app --test qrhi_readback --run-ignored all`. The Metal branch of `cpp/readback.cpp` and the moved `cpp/pattern_renderer.cpp` have not been built on macOS. Expect `metal_draw_matches_cpu_output` to pass; record the macOS version and the GPU in the design.
+- On the Linux desktop (GNOME 50, Wayland and xcb), run the same command. Expect `vulkan_draw_matches_cpu_output` to pass. If Mesa lavapipe is installed, `vulkan_software_draw_matches_cpu_output` must pass; otherwise it fails because no CPU device exists, and the result is unavailable. Record the driver versions in the design. The test makes the QGuiApplication on a test thread, not on the main thread; record whether Qt accepts this on each platform.
+
+Open questions:
+
+- Must ordinary CI on Linux and macOS run a software readback, as Windows does with WARP? macOS has no software Metal device. On Linux the test needs lavapipe and a Qt platform that gives a Vulkan instance. **Unverified:** whether the Qt `offscreen` platform gives one.
+- Must the Windows build find the Vulkan headers by default, so that the Vulkan backend is always tested on Windows? Now it needs `VULKAN_SDK`; without it the Windows Vulkan tests fail with the reason. The Windows window does not use Vulkan.
+
+### 65. Check the pattern window initialization after a surface loss
+
+TODO:
+
+- `PatternWindow::init` runs again at an expose after `SurfaceAboutToBeDestroyed`. It replaced the `QRhi` before it destroyed the swap chain, the render pass descriptor and the pattern resources of the earlier `QRhi`; now it destroys them first. No test reaches this path. On each OS, hide and show a pattern window, or use another action that destroys its native surface. Check that the window initializes again without a crash or a Qt warning about leaked resources, and that the next frame gets its acknowledgement.
 
 ### 38. Verify QRhi swap-chain setup and failure handling
 

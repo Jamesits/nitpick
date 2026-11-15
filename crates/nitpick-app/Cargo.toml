@@ -30,6 +30,7 @@ cxx-qt-build = "0.10.0"
 workspace = true
 
 [dev-dependencies]
+nitpick-fixtures = { path = "../nitpick-fixtures" }
 nitpick-test-host = { path = "../nitpick-test-host", features = ["contract"] }
 serde_json = "1"
 tempfile = "3.27.0"
