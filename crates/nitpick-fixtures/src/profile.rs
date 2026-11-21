@@ -53,11 +53,26 @@ pub struct ModelCase {
 pub enum ModelCalibration {
     /// The MHC2 values of a profile fixture, read through the adapter.
     Profile { profile: String },
+    /// An enabled IDD 3×4 transform.
+    Idd { idd: IddCalibration },
     /// An XYZ matrix and channel LUTs; `None` selects identity LUTs.
     Inline {
         matrix: [[f64; 3]; 3],
         lut: Option<[Vec<f64>; 3]>,
     },
+}
+
+/// The values of an IDD 3×4 callback; each is a binary32 value. The scalar
+/// multiplies each element; the fourth column is an XYZ offset.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct IddCalibration {
+    /// Three rows of four.
+    pub matrix: [[f64; 4]; 3],
+    pub scalar: f64,
+    /// cd/m² of one unit of the fourth column.
+    pub offset_nits_per_unit: f64,
+    /// `None`: the LUT is disabled.
+    pub lut: Option<[Vec<f64>; 3]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

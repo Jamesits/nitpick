@@ -418,16 +418,6 @@ Open questions:
 - Next to black, 19 entries of 12-bit fixtures have no quantization $\Delta E_{ITP}$, because the FP16 search range reaches below 0 and the metric has no value there. Only the component check applies to them. Is this sufficient?
 - A WGC capture has no colour fields: WGC gives none, and the descriptor must not take scRGB from FP16 storage. Thus the scRGB expectation and its bounds apply to it only with a colour contract from qualification (51). Where does a comparison get that contract, for example a qualified-contract record per runner and display state, kept outside the capture descriptor?
 
-### 52. Model IDD callback state without an installed driver
-
-Requires: 50.
-
-TODO:
-
-- Add portable callback records and state replay from [Instrumented Windows IDD](../design/output_driver/testing.md#instrumented-windows-idd). Model enable flags, the scalar, affine matrix, LUT, transform generation and HDR metadata selection.
-- Extend the [display model](../design/output_driver/testing.md#model-order-and-domain) for the IDD record: `Calibration` in `nitpick-model` has only a 3×3 matrix and LUTs. Add the affine column and the scalar as a separate IDD stage, so that the MHC2 path keeps ignoring the stored fourth column. Verify with independent vectors from the generator.
-- Verify disabled stages, non-unit scalar, nonzero affine terms, replacement, reset and new/previous/default metadata. Reject previous metadata before any exists. Keep the active IDD affine column distinct from the ignored profile matrix column; avoid scaling HDR twice with SDR white.
-
 ### 53. Qualify the optional console IDD runner
 
 Open questions:
@@ -441,16 +431,38 @@ TODO:
 
 ### 54. Instrument IDD surfaces and transform generations
 
-Requires: 34, 52, 53.
+Requires: 34, 53.
 
 TODO:
 
 - Record acquired surface bytes, colour metadata, committed wire mode, gamma callbacks and metadata selection. Copy surfaces before ownership expires. Capture the IDD's own transformed output before its encoder.
+- Log the callbacks and frames as the records of [IDD callback replay](../design/output_driver/testing.md#idd-callback-replay), in processing order. Log each frame record where the driver takes the transform for that frame, with that transform generation. Verify: `nitpick_model::idd::replay` accepts the logged sequences of a run.
 - Verify that each output uses one recorded transform generation, including callback changes during processing. Replay captured input and state against the portable model. A CPU recomputation must not substitute for the driver's transformed artifact.
+
+### 74. Decide the IDD callback semantics that the replay assumes
+
+Requires: 54.
+
+The [IDD callback replay](../design/output_driver/testing.md#idd-callback-replay) uses conservative choices where Microsoft does not define the behaviour.
+
+Open questions:
+
+- Which unit has the fourth column of the 3×4 transform: one scRGB unit (80 cd/m²), 1 cd/m² or another scale? The model takes the unit from `IddContract` without a default. The MHC2 path ignores its fourth column, so Windows can send only zero offsets for a profile. Then the unit stays unverified.
+- Is `IDDCX_GAMMARAMP_TYPE_DEFAULT` identity for a driver with the 3×4 transform? The replay takes identity.
+- Does an FP16 IDD receive `IDDCX_GAMMARAMP_TYPE_RGB256x3x16`, and in which domain does it apply? The replay takes a LUT in the encoded wire domain.
+- Are the 4096 LUT entries at $k/4095$, as in the model, or at another spacing?
+- What does the driver apply before the first gamma callback? The replay gives no model for such a frame.
+- Can unchanged HDR metadata follow a frame without metadata, or a mode commit? If so, which value applies? The replay rejects both.
+- Which primaries has a `G22_P709_WCG` wire? The contract gives them.
+
+TODO:
+
+- With the logged sequences of the qualified runner (54), answer each question. Where the answer differs from the conservative choice, change the replay or the model, and the design section. Verify: the replay accepts the sequences, and `FrameState::model` agrees with the IDD's transformed output within the comparison bound.
+- If Windows sends no nonzero offset on the runner, record this and keep the offset unit unverified.
 
 ### 55. Verify Windows profile loading through the IDD
 
-Requires: 43, 44, 48, 50, 54.
+Requires: 43, 44, 48, 50, 54, 74.
 
 Open questions:
 

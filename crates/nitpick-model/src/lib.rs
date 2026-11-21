@@ -1,16 +1,19 @@
 //! Explicit HDR display model, as test support.
 //!
-//! Predicts the wire code of a colour for a stated source space, an MHC2
-//! calibration (an XYZ matrix and channel LUTs) and a wire mode. Each result
-//! is an ideal f64 calculation under the rules below. It does not describe
-//! GPU precision, clipping order or dithering, and it does not show that an
-//! OS loaded or applied the calibration.
+//! Predicts the wire code of a colour for a stated source space, a
+//! calibration (an MHC2 XYZ matrix or an IDD 3×4 transform, and channel
+//! LUTs) and a wire mode. [`idd`] replays IDD callback records into this
+//! model. Each result is an ideal f64 calculation under the rules below. It
+//! does not describe GPU precision, clipping order or dithering, and it does
+//! not show that an OS loaded or applied the calibration.
 //!
 //! Stage order, with column vectors:
 //! 1. Decode the source to linear RGB in cd/m².
 //! 2. `XYZ = M_src · RGB`, with the SMPTE RP 177 matrix of the primaries
 //!    and their white. There is no D50 adaptation.
-//! 3. `XYZ' = A · XYZ`, with `A` the XYZ matrix of the calibration.
+//! 3. `XYZ' = A · XYZ`, with `A` the XYZ matrix of the calibration. An IDD
+//!    3×4 callback gives `XYZ' = s · (A · XYZ + u · t)` instead; see
+//!    [`Affine`].
 //! 4. `RGB_wire = M_wire⁻¹ · XYZ'`.
 //! 5. Encode the wire transfer function; clip the signal to 0..1.
 //! 6. Apply the LUT of each channel; clamp the result to 0..1.
@@ -24,6 +27,7 @@ use std::fmt;
 
 use nitpick_compare::colour::{self, Matrix};
 
+pub mod idd;
 mod lut;
 mod transfer;
 
@@ -90,36 +94,125 @@ pub struct Wire {
     pub depth: u8,
 }
 
-/// An XYZ matrix and channel LUTs in the encoded wire domain.
+/// The XYZ stage of a calibration.
+#[derive(Debug, Clone, PartialEq)]
+pub enum XyzStage {
+    /// `XYZ' = A · XYZ`: the MHC2 stage.
+    Matrix(Matrix),
+    /// `XYZ' = s · (A · XYZ + u · t)`: an enabled IDD 3×4 callback.
+    Affine(Affine),
+}
+
+impl XyzStage {
+    fn apply(&self, xyz: [f64; 3]) -> [f64; 3] {
+        match self {
+            Self::Matrix(m) => colour::apply(m, xyz),
+            Self::Affine(a) => a.apply(xyz),
+        }
+    }
+}
+
+/// The 3×4 matrix of the IDD gamma callback with its scalar. The scalar
+/// multiplies each element, the fourth column too. Unlike the fourth column
+/// of an MHC2 matrix, the fourth column here is an active XYZ offset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Affine {
+    matrix: [[f64; 4]; 3],
+    scalar: f64,
+    offset_nits_per_unit: f64,
+}
+
+impl Affine {
+    /// `matrix` is three rows of four, `scalar` the scalar multiplier, and
+    /// `offset_nits_per_unit` the cd/m² of one unit of the fourth column.
+    /// The callback does not state that unit, so the caller gives it.
+    ///
+    /// # Errors
+    /// A non-finite element or scalar, or an offset unit that is not finite
+    /// and above 0.
+    pub fn new(
+        matrix: [[f64; 4]; 3],
+        scalar: f64,
+        offset_nits_per_unit: f64,
+    ) -> Result<Self, ModelError> {
+        finite(matrix.as_flattened())?;
+        finite(&[scalar])?;
+        scale(offset_nits_per_unit)?;
+        Ok(Self {
+            matrix,
+            scalar,
+            offset_nits_per_unit,
+        })
+    }
+
+    #[must_use]
+    pub fn matrix(&self) -> &[[f64; 4]; 3] {
+        &self.matrix
+    }
+
+    #[must_use]
+    pub fn scalar(&self) -> f64 {
+        self.scalar
+    }
+
+    #[must_use]
+    pub fn offset_nits_per_unit(&self) -> f64 {
+        self.offset_nits_per_unit
+    }
+
+    /// `xyz` in cd/m².
+    #[must_use]
+    pub fn apply(&self, xyz: [f64; 3]) -> [f64; 3] {
+        self.matrix.map(|r| {
+            let v =
+                r[0] * xyz[0] + r[1] * xyz[1] + r[2] * xyz[2] + r[3] * self.offset_nits_per_unit;
+            self.scalar * v
+        })
+    }
+}
+
+/// An XYZ stage and channel LUTs in the encoded wire domain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Calibration {
-    matrix: Matrix,
+    xyz: XyzStage,
     lut: Option<Lut>,
 }
 
 impl Calibration {
-    /// `matrix` is the 3×3 XYZ adjustment, rows. For MHC2 it is the left
-    /// 3×3 of the stored matrix; the stored fourth column is not an offset.
-    /// `lut: None` selects identity.
+    /// The MHC2 calibration. `matrix` is the 3×3 XYZ adjustment, rows: the
+    /// left 3×3 of the stored matrix; the stored fourth column is not an
+    /// offset. `lut: None` selects identity.
     ///
     /// # Errors
     /// A non-finite matrix element.
     pub fn new(matrix: Matrix, lut: Option<Lut>) -> Result<Self, ModelError> {
         finite(matrix.as_flattened())?;
-        Ok(Self { matrix, lut })
+        Ok(Self {
+            xyz: XyzStage::Matrix(matrix),
+            lut,
+        })
+    }
+
+    /// The IDD callback state. `None` is a disabled stage: identity.
+    #[must_use]
+    pub fn idd(affine: Option<Affine>, lut: Option<Lut>) -> Self {
+        Self {
+            xyz: affine.map_or(XyzStage::Matrix(IDENTITY), XyzStage::Affine),
+            lut,
+        }
     }
 
     #[must_use]
     pub fn identity() -> Self {
         Self {
-            matrix: IDENTITY,
+            xyz: XyzStage::Matrix(IDENTITY),
             lut: None,
         }
     }
 
     #[must_use]
-    pub fn matrix(&self) -> &Matrix {
-        &self.matrix
+    pub fn xyz(&self) -> &XyzStage {
+        &self.xyz
     }
 
     #[must_use]
@@ -215,7 +308,7 @@ impl Model {
             })?,
         };
         let xyz = colour::apply(&self.src_to_xyz, source_nits);
-        let calibrated = colour::apply(&self.calibration.matrix, xyz);
+        let calibrated = self.calibration.xyz.apply(xyz);
         let wire_nits = colour::apply(&self.xyz_to_wire, calibrated);
         // A large finite input can overflow in the matrices.
         finite(&wire_nits)?;

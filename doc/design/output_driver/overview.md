@@ -41,7 +41,7 @@ graph LR
 | `nitpick-webview` | optional local display process | Tauri; connects to the server by URL; no other workspace crate |
 | `nitpick-profile` | test support: the [profile adapter](testing.md#colour-library-boundary) | `lcms2-sys` with its bundled Little CMS; no other workspace crate except `nitpick-fixtures` for its tests |
 | `nitpick-compare` | test support: the [reference metric](testing.md#reference-metric) and the [patch check](testing.md#pass-criteria) | no dependencies; `nitpick-fixtures` and `half` for its tests; no `nitpick-core` (see [Technical decisions](testing.md#technical-decisions)) |
-| `nitpick-model` | test support: the [explicit HDR display model](testing.md#model-order-and-domain) | `nitpick-compare`; `nitpick-fixtures` and `nitpick-profile` for its tests; no `nitpick-core` |
+| `nitpick-model` | test support: the [explicit HDR display model](testing.md#model-order-and-domain) and the [IDD callback replay](testing.md#idd-callback-replay) | `nitpick-compare`; `nitpick-fixtures` and `nitpick-profile` for its tests; no `nitpick-core` |
 
 Dependencies go from each host or driver to the core. The core must not import a driver or host. Its current `output` module does pixel calculations without Qt or a GPU. Each host selects its concrete driver. The command-line host does not build or register QRhi. Build it by package; a workspace build also selects the Qt application and the Tauri shell.
 

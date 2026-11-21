@@ -1,6 +1,6 @@
 use nitpick_fixtures::profile::{
-    self, ClipState, ModelCalibration, ModelCase, ModelEncoding, ModelExpected, ModelSpace,
-    ProfileManifest,
+    self, ClipState, IddCalibration, ModelCalibration, ModelCase, ModelEncoding, ModelExpected,
+    ModelSpace, ProfileManifest,
 };
 
 use super::*;
@@ -79,6 +79,14 @@ fn profile_calibration(m: &ProfileManifest, id: &str) -> Calibration {
 fn calibration(m: &ProfileManifest, c: &ModelCalibration) -> Calibration {
     match c {
         ModelCalibration::Profile { profile } => profile_calibration(m, profile),
+        ModelCalibration::Idd { idd } => {
+            let affine =
+                Affine::new(idd.matrix, idd.scalar, idd.offset_nits_per_unit).expect("affine");
+            Calibration::idd(
+                Some(affine),
+                idd.lut.clone().map(|l| Lut::new(l).expect("LUT")),
+            )
+        }
         ModelCalibration::Inline { matrix, lut } => {
             Calibration::new(*matrix, lut.clone().map(|l| Lut::new(l).expect("LUT")))
                 .expect("calibration")
@@ -338,4 +346,121 @@ fn invalid_spaces_are_rejected() {
         Calibration::new([[f64::NAN, 0.0, 0.0], [0.0; 3], [0.0; 3]], None),
         Err(ModelError::NonFinite(_))
     ));
+}
+
+/// A binary32 value of the callback; the fixtures store only such values.
+fn f32_of(v: f64) -> f32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let f = v as f32;
+    assert_eq!(f64::from(f), v, "{v} is not a binary32 value");
+    f
+}
+
+/// The callback records of an IDD fixture case, through the replay.
+fn idd_events(c: &ModelCase, idd: &IddCalibration) -> Vec<idd::Event> {
+    use idd::{Event, FrameHdrMetadata, FrameRecord, GammaRamp, SurfaceColourSpace, Transform3x4};
+    let surface = match c.source.encoding {
+        ModelEncoding::Linear { nits_per_unit } if nits_per_unit == colour::SCRGB_WHITE_NITS => {
+            SurfaceColourSpace::RgbFullG10P709
+        }
+        _ => panic!("{}: not an scRGB source", c.id),
+    };
+    let colour_space = match c.wire.space.encoding {
+        ModelEncoding::Pq => idd::WireColourSpace::G2084P2020,
+        ModelEncoding::Sdr { .. } => idd::WireColourSpace::G22P709,
+        ModelEncoding::Linear { .. } => panic!("{}: linear wire", c.id),
+    };
+    let lut = idd.lut.as_ref().map(|l| {
+        (0..l[0].len())
+            .map(|k| [f32_of(l[0][k]), f32_of(l[1][k]), f32_of(l[2][k])])
+            .collect()
+    });
+    let ramp = Transform3x4 {
+        matrix_enabled: true,
+        matrix: idd.matrix.map(|r| r.map(f32_of)),
+        scalar: f32_of(idd.scalar),
+        lut_enabled: lut.is_some(),
+        lut: lut.unwrap_or_else(|| vec![[0.0; 3]; idd::LUT_LEN]),
+    };
+    vec![
+        Event::CommitMode(idd::WireMode {
+            colour_space,
+            depth: c.wire.depth,
+        }),
+        Event::SetGammaRamp(GammaRamp::Transform3x4(ramp)),
+        Event::Frame(FrameRecord {
+            frame_number: 1,
+            surface,
+            sdr_white_nits: 80,
+            hdr: FrameHdrMetadata::Absent,
+            generation: 1,
+        }),
+    ]
+}
+
+/// The replay of callback records gives the reference values of each IDD
+/// case: record values, surface and wire colour space and the contract.
+#[test]
+fn idd_records_match_the_reference() {
+    let m = manifest();
+    let mut seen = 0;
+    for c in &m.model {
+        let ModelCalibration::Idd { idd } = &c.calibration else {
+            continue;
+        };
+        seen += 1;
+        let wire_sdr = match wire(c).encoding {
+            WireEncoding::Sdr(s) => Some(s),
+            WireEncoding::Pq => None,
+        };
+        let contract = idd::IddContract {
+            surface_sdr: None,
+            wire_sdr,
+            wcg_wire_primaries: None,
+            offset_nits_per_unit: idd.offset_nits_per_unit,
+        };
+        let frames = idd::replay(&idd_events(c, idd)).unwrap_or_else(|e| panic!("{}: {e}", c.id));
+        let model = frames[0]
+            .model(&contract)
+            .unwrap_or_else(|e| panic!("{}: {e}", c.id));
+        let peak = wire_sdr.map_or(colour::PQ_PEAK_NITS, |s| s.white_nits);
+        for (k, (input, want)) in c.input.iter().zip(&c.expected).enumerate() {
+            check(&c.id, k, peak, &model.predict(*input).unwrap(), want);
+        }
+    }
+    assert_ne!(seen, 0);
+}
+
+/// `mhc2_signed` stores a nonzero fourth column. The MHC2 path ignores it;
+/// the same values as an IDD 3×4 matrix add it as an offset.
+#[test]
+fn mhc2_fourth_column_is_not_an_idd_offset() {
+    let m = manifest();
+    let entry = m.profiles.iter().find(|p| p.id == "mhc2_signed").unwrap();
+    let mhc2 = nitpick_profile::read_mhc2(&entry.bytes().unwrap()).unwrap();
+    let stored = mhc2.matrix.unwrap();
+    assert!(stored.iter().any(|r| r[3] != 0.0));
+    let scrgb = Source {
+        primaries: Primaries::BT709,
+        encoding: SourceEncoding::Linear {
+            nits_per_unit: 80.0,
+        },
+    };
+    let mhc2_model = Model::new(
+        scrgb,
+        Calibration::new(mhc2.xyz_matrix(), None).unwrap(),
+        hdr10(),
+    )
+    .unwrap();
+    let affine = Affine::new(stored, 1.0, 80.0).unwrap();
+    let idd_model = Model::new(scrgb, Calibration::idd(Some(affine), None), hdr10()).unwrap();
+    let to_wire = colour::invert(&colour::rgb_to_xyz(colour::BT2020, colour::D65));
+    let offset = colour::apply(&to_wire, stored.map(|r| r[3] * 80.0));
+    for rgb in [[0.0; 3], [0.5, 1.0, 0.25]] {
+        let a = mhc2_model.predict(rgb).unwrap().wire_nits;
+        let b = idd_model.predict(rgb).unwrap().wire_nits;
+        let diff = std::array::from_fn(|k| b[k] - a[k]);
+        assert_close("mhc2_signed", 0, "offset", diff, offset);
+    }
+    assert_eq!(mhc2_model.predict([0.0; 3]).unwrap().wire_nits, [0.0; 3]);
 }

@@ -25,10 +25,19 @@ def calibration(c):
     return model.Calibration.from_mhc2(CALIBRATIONS[c["calibration"]["profile"]])
 
 
+def wire_space(c):
+    return {k: v for k, v in c["wire"].items() if k != "depth"}
+
+
 def other_codes(c, matrix):
     """Codes of the case with `matrix` in place of $M_{wire}^{-1} A M_{src}$."""
-    cal, wire = calibration(c), {k: v for k, v in c["wire"].items() if k != "depth"}
+    cal, wire = calibration(c), wire_space(c)
     return [model.evaluate(cal, c["source"], wire, c["wire"]["depth"], v, matrix=matrix, check=False)["code"]
+            for v in c["input"]]
+
+
+def codes_with(c, cal):
+    return [model.evaluate(cal, c["source"], wire_space(c), c["wire"]["depth"], v, check=False)["code"]
             for v in c["input"]]
 
 
@@ -119,3 +128,35 @@ def test_srgb_and_gamma22_differ_near_black():
             if v[0] < float(model.SRGB_ENCODE_KNEE):
                 assert a["signal"][0] == pytest.approx(12.92 * v[0], rel=1e-14)
     assert near_black >= 4
+
+
+IDD_CASES = {"idd_affine": model.IDD, "idd_affine_lut": model.IDD_WITH_LUT, "idd_sdr_affine": model.IDD}
+
+
+@pytest.mark.parametrize("cid", list(IDD_CASES))
+def test_idd_cases_find_a_wrong_offset_or_scalar(cid):
+    """Each wrong reading of the 3×4 callback gives other codes: the MHC2
+    reading (fourth column ignored, no scalar), no offset, the scalar only
+    on the 3×3 part, and the scalar only on the offset."""
+    c, t = CASES[cid], IDD_CASES[cid]
+    s, u = t.scalar, t.offset_nits
+    a = tuple(tuple(v for v in row[:3]) for row in t.matrix)
+    scaled = tuple(tuple(s * v for v in row) for row in a)
+    offset = tuple(row[3] * u for row in t.matrix)
+    wrong = {
+        "mhc2": model.Calibration(a, t.luts),
+        "no offset": model.Calibration(scaled, t.luts),
+        "unscaled offset": model.Calibration(scaled, t.luts, offset),
+        "unscaled matrix": model.Calibration(a, t.luts, tuple(s * o for o in offset)),
+    }
+    for name, cal in wrong.items():
+        assert codes_with(c, cal) != codes(c), name
+
+
+def test_idd_black_gives_the_scaled_offset():
+    c, t = CASES["idd_affine"], model.IDD
+    offset = [t.scalar * row[3] * t.offset_nits for row in t.matrix]
+    want = ref.mat_vec(ref.mat_inv(model.npm(c["wire"]["primaries"])), offset)
+    black = c["expected"][c["input"].index([0.0, 0.0, 0.0])]
+    assert black["wire_nits"] == [ref.to_f64(v) for v in want]
+    assert black["code"] != [0, 0, 0]

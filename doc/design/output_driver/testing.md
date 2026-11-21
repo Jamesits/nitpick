@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts), the frame marker, frame acceptance and region selection of [Timing and frame identity](#timing-and-frame-identity) exist with synthetic-capture tests. The [reference metric](#reference-metric) and the per-case limits of [Pass criteria](#pass-criteria) exist in `nitpick-compare` with unit tests; no runner uses them yet. The offscreen draw of [QRhi readback](#qrhi-readback) and the [swap-chain checks](#swap-chain-checks) pass on D3D11 and on Vulkan, on Windows only. The QRhi host has the [Windows capture adapter](#windows-graphics-capture-adapter); the browser host has no capture adapter. No host has an artifact directory. The [display model](#model-order-and-domain) in `nitpick-model` passes its reference cases; it has no OS-dependent code. The macOS and Linux capture adapters are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts), the frame marker, frame acceptance and region selection of [Timing and frame identity](#timing-and-frame-identity) exist with synthetic-capture tests. The [reference metric](#reference-metric) and the per-case limits of [Pass criteria](#pass-criteria) exist in `nitpick-compare` with unit tests; no runner uses them yet. The offscreen draw of [QRhi readback](#qrhi-readback) and the [swap-chain checks](#swap-chain-checks) pass on D3D11 and on Vulkan, on Windows only. The QRhi host has the [Windows capture adapter](#windows-graphics-capture-adapter); the browser host has no capture adapter. No host has an artifact directory. The [display model](#model-order-and-domain) in `nitpick-model` passes its reference cases, also through the [IDD callback replay](#idd-callback-replay); it has no OS-dependent code. No IDD record comes from a driver yet. The macOS and Linux capture adapters are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -718,13 +718,13 @@ The generator does not accept a value that has no inverse in the stored curve: a
 
 The crate `nitpick-model` has the model. It is portable test support: it has no OS, GUI or Little CMS dependency, and it takes owned values. Its transfer functions and primary matrices come from `nitpick-compare` (`colour.rs`). `Model::new` takes three values, without defaults:
 - `Source`: primaries with their white, and the encoding: linear with the cd/m² of 1.0 (scRGB: 80), PQ, or SDR with its transfer and the cd/m² of its white.
-- `Calibration`: the 3×3 XYZ matrix and optional channel LUTs. For MHC2, use the left 3×3 of the stored matrix (`Mhc2::xyz_matrix`) and the stored LUTs, unchanged.
+- `Calibration`: the XYZ stage and optional channel LUTs. For MHC2 (`Calibration::new`), the XYZ stage is the left 3×3 of the stored matrix (`Mhc2::xyz_matrix`), and the LUTs are the stored LUTs, unchanged. For the IDD 3×4 callback (`Calibration::idd`), the XYZ stage is an `Affine`: the 3×4 matrix, the scalar and the cd/m² of one offset unit. [IDD callback replay](#idd-callback-replay) makes this calibration from the callback records.
 - `Wire`: primaries with their white, the encoding (PQ, or SDR with its transfer and white), and the depth (1 to 16 bits).
 
 `Model::predict` gives each stage of one pixel. With column vectors, $M$ the SMPTE RP 177 matrix of the primaries and their white, and $A$ the calibration matrix:
 1. Decode the source to linear RGB in cd/m². A PQ or SDR signal outside 0 to 1 is an error.
 2. $XYZ = M_{src}\,RGB_{src}$.
-3. $RGB_{wire} = M_{wire}^{-1}\,A\,XYZ$, in cd/m².
+3. $RGB_{wire} = M_{wire}^{-1}\,A\,XYZ$, in cd/m². With an `Affine` stage, $RGB_{wire} = M_{wire}^{-1}\,s\,(A\,XYZ + u\,t)$: $A$ the left 3×3 of the callback matrix, $t$ its fourth column, $s$ the scalar and $u$ the cd/m² of one offset unit.
 4. Encode the wire transfer function and clip the signal to 0 to 1. PQ uses the inverse EOTF in absolute units: a value at or below 0 gives signal 0, a value above 10000 cd/m² gives 1. SDR divides by the wire white, clips to 0 to 1 and encodes.
 5. Apply the LUT of each channel in the encoded domain: entry $k$ of $n$ is the output for $k/(n-1)$, with linear interpolation between entries. The LUT input is in 0 to 1 after step 4. Clamp the result to 0 to 1.
 6. Quantize to a full-range code: $\lfloor (2^d - 1)\,v + 1/2 \rfloor$.
@@ -740,13 +740,15 @@ Rules and their reasons:
 - **Deviation from ST 2084:** the PQ inverse EOTF of 0 is $c_1^{m_2} \approx 7.3 \cdot 10^{-7}$, not 0. The model gives signal 0 for 0 cd/m², so it is not continuous at 0. The step is below 0.05 of a 16-bit code and changes no code.
 - The sRGB curve uses the published IEC 61966-2-1 knees: 0.04045 for decoding and 0.0031308 for encoding. They do not map exactly to each other.
 - Codes are full range. Range conversion, RGB-to-YCbCr conversion, chroma subsampling and dithering are not in the model.
-- `Lut` accepts 2 to 4096 entries per channel, all finite, of equal length. Entries outside 0 to 1 stay; the result is clamped. The IDD affine column and scalar are not in `Calibration`.
+- `Lut` accepts 2 to 4096 entries per channel, all finite, of equal length. Entries outside 0 to 1 stay; the result is clamped.
+- **The fourth column has two meanings.** The MHC2 path ignores the stored fourth column. The IDD path applies the fourth column of the callback as an XYZ offset. The scalar multiplies all twelve elements, as the [transform structure](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/iddcx/ns-iddcx-iddcx_gammaramp_3x4_colorspace_transform) states. Thus the two paths have separate constructors and an MHC2 matrix never becomes an `Affine`.
+- **Unverified:** the unit of the IDD offset. Microsoft states only that the matrix transforms colours within CIE XYZ. The caller gives $u$; there is no default. The model XYZ is in cd/m², so $u = 80$ treats one unit as one scRGB unit.
 
 **Model limit:** these clipping, interpolation and rounding rules are explicit ideal choices. They do not show GPU internal precision, clipping order or dithering. A model pass shows only these calculations. First compare in-domain patches, then characterize boundary cases separately.
 
 Do not treat the full OS display path as only this model. Tone mapping, other colour adjustments, output range conversion, RGB-to-YCbCr conversion, subsampling and dithering can be present. Model these only when their parameters are known. Otherwise limit the comparison to the defined boundary.
 
-**Expected values.** `model.py` in `tests/reference` calculates them independently: exact rational matrices, the stored 15.16 calibration values decoded exactly, mpmath transfer functions and the stored binary64 inputs. A linear source stays exact up to the wire encoding, so a value on a clip limit stays on it. The `model` list of the profile manifest has the cases. Each case gives the calibration (a profile ID, or an inline matrix and LUTs), the source, the wire, the inputs and the expected stages. The generator stops if a code is within $10^{-6}$ of a rounding midpoint, or if a wire component of a non-black input is within $10^{-9}$ (relative) of 0. A binary64 calculation cannot decide those results.
+**Expected values.** `model.py` in `tests/reference` calculates them independently: exact rational matrices, the stored 15.16 calibration values decoded exactly, mpmath transfer functions and the stored binary64 inputs. A linear source stays exact up to the wire encoding, so a value on a clip limit stays on it. The `model` list of the profile manifest has the cases. Each case gives the calibration (a profile ID, an inline matrix and LUTs, or an inline IDD transform), the source, the wire, the inputs and the expected stages. The values of an IDD transform are binary32 values, as in the callback; the generator stops on another value. The generator stops if a code is within $10^{-6}$ of a rounding midpoint, or if a wire component of a non-black input is within $10^{-9}$ (relative) of 0. A binary64 calculation cannot decide those results.
 
 | Cases | Check |
 |---|---|
@@ -758,8 +760,10 @@ Do not treat the full OS display path as only this model. Tone mapping, other co
 | `sdr_srgb_identity`, `sdr_gamma22_identity`, `sdr_srgb_white_200` | scRGB to an SDR BT.709 wire at 12 bits, near black and above white. The generator test checks that sRGB and gamma 2.2 give different codes near black. |
 | `sdr_srgb_swap_rg` | `mhc2_swap_rg` on an sRGB wire: red gives green, green gives red. The generator test checks that a transposed matrix, or the XYZ matrix applied to RGB, gives other codes. |
 | `srgb_source_to_pq`, `gamma22_source_to_pq` | SDR sources at a white of 203 cd/m² to HDR10 |
+| `idd_affine`, `idd_sdr_affine` | IDD 3×4 transform with unequal row sums, an offset of both signs, scalar 5/4 and $u = 80$, to HDR10 and to an sRGB wire. The generator test checks that black gives the scaled offset, and that each wrong reading gives other codes: the MHC2 reading, no offset, the scalar only on the 3×3 part, the scalar only on the offset. |
+| `idd_affine_lut` | The same transform with a 4096-entry binary32 LUT; red is below 0 near black, so the output clamp occurs. Same generator test. |
 
-`lib_tests.rs` reads each profile calibration through the profile adapter (`read_mhc2`) and compares each stage. The limit for a float is $10^{-12}$ times the largest component of the expected vector, and at least $10^{-12}$; codes must be equal. A clip state is compared only where the expected value before clipping is farther than that limit from each clip limit: on a limit, f64 roundoff can put the value on either side, with the same result after clipping. The unit tests check the LUT, the transfer functions and the errors with values calculated by hand. All pass on Windows; the model has no OS-dependent code. The `nitpick-model` tests read MHC2 through `nitpick-profile`, so they need the C compiler of its Little CMS build.
+`lib_tests.rs` reads each profile calibration through the profile adapter (`read_mhc2`) and compares each stage. It also replays each IDD case as callback records and compares the result of `FrameState::model`. It checks that the nonzero fourth column of `mhc2_signed` changes nothing on the MHC2 path and adds $M_{wire}^{-1}\,u\,t$ on the IDD path. The limit for a float is $10^{-12}$ times the largest component of the expected vector, and at least $10^{-12}$; codes must be equal. A clip state is compared only where the expected value before clipping is farther than that limit from each clip limit: on a limit, f64 roundoff can put the value on either side, with the same result after clipping. The unit tests check the LUT, the transfer functions and the errors with values calculated by hand. All pass on Windows; the model has no OS-dependent code. The `nitpick-model` tests read MHC2 through `nitpick-profile`, so they need the C compiler of its Little CMS build.
 
 ### Instrumented Windows IDD
 
@@ -776,11 +780,67 @@ Use `IddCxSwapChainReleaseAndAcquireBuffer2` and copy each surface before its ow
 
 For the callback model, apply the enabled scalar to all matrix elements, including the affine column. Honour disabled matrix and LUT flags. Use the surface colour space for source decode and the committed wire colour space for output encode. Do not scale the HDR desktop a second time with SDR white; that value is needed for SDR content such as a separately supplied cursor. These rules follow the [gamma callback](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/iddcx/nc-iddcx-evt_idd_cx_monitor_set_gamma_ramp) and the [transform structure](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/iddcx/ns-iddcx-iddcx_gammaramp_3x4_colorspace_transform).
 
-Replay synthetic callback sequences in unit tests. Cover disabled stages, non-unit scalar, nonzero affine terms, transform replacement and reset, and new/previous/default HDR metadata selection. Test an invalid previous-metadata reference before any metadata exists. These state tests need no installed driver.
-
 Use `DisplayDeviceControl` to assign identity, matrix-only, LUT-only and combined profiles on the IDD device. Compare effective matrix action and sampled curves against the parsed profile, allowing the measured callback representation and LUT resampling. Do not require identical byte arrays. Hold display metadata and other colour controls fixed. Test HDR and SDR WCG separately; record the actual source and wire spaces instead of assuming either is scRGB or native panel RGB. An unexpected composed transform is a failed or unqualified case, not a reason to silently change the reference.
 
 A pass shows what Windows delivered to that IDD and what that IDD computed. It does not validate a physical GPU's display pipeline. The full callback path, profile loading and SDR WCG behaviour remain **unverified** until this experiment runs.
+
+#### IDD callback replay
+
+The module `idd` of `nitpick-model` has portable records of the callbacks and their replay. It follows the callback rules above. It needs no installed driver.
+
+An instrumented IDD logs its records in the order of its own processing. It logs a frame record where it takes the transform for that frame. `replay` runs the records through an explicit state machine. It gives the state of each frame: one transform generation, the committed wire mode, the surface colour space, the SDR white and the selected HDR10 metadata. `FrameState::model` makes a [display model](#model-order-and-domain) of that state.
+
+| Record | IddCx source | Replay |
+|---|---|---|
+| `SetGammaRamp` | `EVT_IDD_CX_MONITOR_SET_GAMMA_RAMP` | Makes the next transform generation. The generation is the count of gamma callbacks, 0 before the first. A callback with equal values is also a new generation. |
+| `SetDefaultHdrMetadata` | `EVT_IDD_CX_MONITOR_SET_DEFAULT_HDR_METADATA` | Replaces the default HDR10 metadata. |
+| `CommitMode` | the monitor path of `EVT_IDD_CX_ADAPTER_COMMIT_MODES2`: `WireFormatInfo.ColorSpace` and the RGB bits per component | Sets the wire mode. Clears the metadata of the last frame. |
+| `Frame` | `IDDCX_METADATA2` of `IddCxSwapChainReleaseAndAcquireBuffer2`, and the generation that the driver used | Gives the frame state. The recorded generation must be the current generation, so a callback during processing cannot mix two states. |
+
+| Gamma ramp type | Transform |
+|---|---|
+| `DEFAULT` | Identity. **Unverified:** Microsoft does not state this for a driver with the 3×4 transform; the default GDI ramp is identity. |
+| `RGB256x3x16` | A 256-entry LUT of $v/65535$ in the encoded wire domain, without a matrix. **Unverified:** the domain of this ramp at an FP16 IDD. |
+| `3x4_COLORSPACE_TRANSFORM` | With `MatrixEnabled`, an `Affine` stage of the matrix and the scalar; else identity. With `LutEnabled`, the 4096-entry LUT; else no LUT. The record keeps the values of a disabled stage; the replay does not read them. |
+| `UNINITIALIZED` | Error. |
+
+HDR10 metadata selection:
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoLast
+    NoLast --> Last: frame with default or new
+    Last --> Last: frame with default, new or unchanged
+    Last --> NoLast: frame without metadata, mode commit
+    NoLast --> [*]: frame with unchanged gives an error
+```
+
+- Default gives the last value of `SetDefaultHdrMetadata`; without one it is an error.
+- New gives its own value. It does not replace the default.
+- Unchanged gives the value of the last frame, also if the default changed after that frame.
+- A frame without the HDR10 valid flag has no metadata.
+
+The selected metadata is not a model input; the model has no OS tone mapping. It is for a comparison with the metadata that the driver sends.
+
+Frame model:
+
+| Field | Value | Model |
+|---|---|---|
+| `SurfaceColorSpace` | `RGB_FULL_G10_NONE_P709` | scRGB: BT.709, linear, 80 cd/m² for 1.0. The SDR white does not change it. |
+| `SurfaceColorSpace` | `RGB_FULL_G2084_NONE_P2020` | BT.2020, PQ |
+| `SurfaceColorSpace` | `RGB_FULL_G22_NONE_P709` | BT.709, SDR transfer and white from the contract |
+| `SurfaceColorSpace` | other | Error |
+| `WireFormatInfo.ColorSpace` | `G2084_P2020` | BT.2020, PQ |
+| `WireFormatInfo.ColorSpace` | `G22_P709` | BT.709, SDR transfer and white from the contract |
+| `WireFormatInfo.ColorSpace` | `G22_P709_WCG` | Primaries, SDR transfer and white from the contract |
+
+`IddContract` holds the values that the records do not state: the SDR transfer and white of a G22 surface and of a G22 wire, the SDR WCG wire primaries and the offset unit $u$. It has no defaults. A frame that needs a missing value gives an error. **Deviation from the name:** `G22_P709_WCG` states P709, but the SDR WCG wire primaries are unverified, so the contract gives them. A frame before the first gamma callback has no model; the replay does not assume identity.
+
+The replay fails early. Each error names the event index and leaves the state unchanged. Errors: an uninitialized type or colour space; a 3×4 LUT without 4096 entries, also when disabled; a non-finite value in an enabled stage; a frame before the first mode commit; a frame with another generation; default metadata before a default; unchanged metadata without metadata on the last frame since the last mode commit.
+
+**Conservative choices:** the replay rejects unchanged metadata after a frame without metadata and after a mode commit. Microsoft does not define these cases. The LUT entry $k$ of $n$ is the output for $k/(n-1)$, as in the model; Microsoft does not state the sample positions. These choices, the default ramp, the legacy ramp domain and the offset unit are open questions in the [output driver plan](../../plan/output_driver.md).
+
+`idd_tests.rs` replays synthetic sequences. They cover disabled stages with non-finite values, a non-unit scalar, nonzero offset terms with scalar and unit, replacement and reset, new, unchanged and default metadata, unchanged and default metadata without a value, generation mismatch, uninitialized records, invalid enabled values, the legacy ramp, the SDR white on an scRGB surface and the contract values. `lib_tests.rs` compares the replay with the reference cases; see [Model order and domain](#model-order-and-domain).
 
 ### Other operating systems
 

@@ -5,7 +5,9 @@ column vectors:
 1. Decode the source signal to linear RGB in cd/m².
 2. $XYZ = M_{src}\\,RGB$, $M$ the RP 177 normalized primary matrix at D65,
    without D50 adaptation.
-3. $XYZ' = A\\,XYZ$, $A$ the left 3×3 of the stored MHC2 matrix.
+3. $XYZ' = A\\,XYZ$, $A$ the left 3×3 of the stored MHC2 matrix. For an
+   IDD 3×4 transform with scalar $s$, $XYZ' = s\\,(A\\,XYZ + u\\,t)$: $t$ is
+   the fourth column and $u$ the cd/m² of one offset unit.
 4. $RGB_{wire} = M_{wire}^{-1}\\,XYZ'$.
 5. Encode the wire transfer function and clip the signal to [0, 1]. PQ:
    luminance at or below 0 gives signal 0, above 10000 cd/m² gives 1.
@@ -19,7 +21,9 @@ are exact rationals; transfer functions use mpmath. Inputs are stored as
 binary64, and each expectation is computed from that stored value.
 """
 
+import struct
 from fractions import Fraction as Q
+from typing import NamedTuple
 
 import mpmath
 
@@ -45,11 +49,28 @@ def stored(v):
     return Q(icc.s15f16(v), 65536)
 
 
-class Calibration:
-    """The XYZ matrix (3×3) and the channel LUTs, or None for identity."""
+def f32_exact(v):
+    """True if the rational `v` is a binary32 value, as the IDD callback stores."""
+    f = float(v)
+    return Q(f) == v and struct.unpack("<f", struct.pack("<f", f))[0] == f
 
-    def __init__(self, matrix, luts):
-        self.matrix, self.luts = matrix, luts
+
+class IddTransform(NamedTuple):
+    """An enabled IDD 3×4 transform: rows of four, the scalar, the cd/m² of
+    one unit of the fourth column, and the channel LUTs or None."""
+
+    matrix: tuple
+    scalar: Q
+    offset_nits: Q
+    luts: tuple | None
+
+
+class Calibration:
+    """The XYZ stage $A\\,XYZ + offset$ and the channel LUTs, or None for
+    identity. `offset` is XYZ in cd/m²; it is 0 for MHC2."""
+
+    def __init__(self, matrix, luts, offset=(Q(0), Q(0), Q(0))):
+        self.matrix, self.luts, self.offset = matrix, luts, offset
 
     @classmethod
     def from_mhc2(cls, m):
@@ -57,6 +78,13 @@ class Calibration:
         matrix = IDENTITY if m.matrix is None else tuple(tuple(stored(v) for v in row[:3]) for row in m.matrix)
         luts = tuple(tuple(stored(v) for v in lut) for lut in m.luts) if m.count else None
         return cls(matrix, luts)
+
+    @classmethod
+    def from_idd(cls, t):
+        """The scalar multiplies each element, the fourth column too."""
+        matrix = tuple(tuple(t.scalar * v for v in row[:3]) for row in t.matrix)
+        offset = tuple(t.scalar * row[3] * t.offset_nits for row in t.matrix)
+        return cls(matrix, t.luts, offset)
 
 
 def npm(space):
@@ -149,7 +177,9 @@ def evaluate(cal, source, wire, depth, rgb, *, matrix=None, check=True):
     # Exact for a linear source, so that a value at a clip boundary stays on it.
     exact = all(isinstance(v, Q) for v in src_nits)
     wire_nits = ref.mat_vec(m if exact else mpf_mat(m), src_nits)
-    if check and any(c != 0 for c in rgb):
+    offset = ref.mat_vec(ref.mat_inv(npm(wire["primaries"])), cal.offset)
+    wire_nits = tuple(w + (o if exact else ref.mpf(o)) for w, o in zip(wire_nits, offset))
+    if check and (any(c != 0 for c in rgb) or any(cal.offset)):
         top = max(abs(ref.mpf(w)) for w in wire_nits)
         for w in map(ref.mpf, wire_nits):
             if abs(w) <= top * ZERO_MARGIN:
@@ -192,19 +222,33 @@ def stored_input(v):
     return [ref.to_f64(c) for c in v]
 
 
+def floats(m):
+    return None if m is None else [[float(c) for c in row] for row in m]
+
+
 def case(cid, calibration, source, wire, depth, inputs, *, calibrations):
-    """`calibration` is a profile ID or `(matrix, luts)` with exact binary64 values."""
+    """`calibration` is a profile ID, an `IddTransform` with exact binary32
+    values, or `(matrix, luts)` with exact binary64 values."""
     if isinstance(calibration, str):
         cal = Calibration.from_mhc2(calibrations[calibration])
         ref_cal = {"profile": calibration}
+    elif isinstance(calibration, IddTransform):
+        t = calibration
+        cal = Calibration.from_idd(t)
+        for v in [*[c for row in t.matrix for c in row], t.scalar, *[c for lut in t.luts or () for c in lut]]:
+            if not f32_exact(v):
+                raise ValueError(f"{v} is not a binary32 value")
+        if Q(float(t.offset_nits)) != t.offset_nits:
+            raise ValueError(f"{t.offset_nits} is not a binary64 value")
+        ref_cal = {"idd": {"matrix": floats(t.matrix), "scalar": float(t.scalar),
+                           "offset_nits_per_unit": float(t.offset_nits), "lut": floats(t.luts)}}
     else:
         matrix, luts = calibration
         cal = Calibration(matrix, luts)
         for v in [*[c for row in matrix for c in row], *[c for lut in luts or () for c in lut]]:
             if Q(float(v)) != v:
                 raise ValueError(f"{v} is not a binary64 value")
-        ref_cal = {"matrix": [[float(c) for c in row] for row in matrix],
-                   "lut": None if luts is None else [[float(c) for c in lut] for lut in luts]}
+        ref_cal = {"matrix": floats(matrix), "lut": floats(luts)}
     stored_in = [stored_input(v) for v in inputs]
     return {
         "id": cid,
@@ -252,6 +296,26 @@ SWAP_IN = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [Q("0.2"), Q("0.5"), Q("0
 HALF = Q(1, 2)
 GAIN = (tuple(tuple(HALF if i == j else Q(0) for j in range(3)) for i in range(3)), None)
 
+# IDD 3×4 transform: unequal row sums and an offset of both signs. All
+# values are binary32, as in the callback. With 80 cd/m² per offset unit,
+# the scaled offset is (1.5625, -0.390625, 3.125) cd/m² XYZ.
+IDD_MATRIX = (
+    (Q(7, 8), Q(1, 16), Q(1, 32), Q(1, 64)),
+    (Q(1, 32), Q(13, 16), Q(1, 16), Q(-1, 256)),
+    (Q(1, 64), Q(1, 16), Q(3, 4), Q(1, 32)),
+)
+IDD_SCALAR = Q(5, 4)
+IDD_OFFSET_NITS = Q(80)
+# 4096 binary32 entries, as in the callback: R below 0 near black (output
+# clamp), G a square, B an inverted square.
+IDD_LUT = (
+    [Q(k, 4096) - Q(1, 64) for k in range(4096)],
+    [Q(k * k, 1 << 24) for k in range(4096)],
+    [1 - Q((4095 - k) ** 2, 1 << 24) for k in range(4096)],
+)
+IDD = IddTransform(IDD_MATRIX, IDD_SCALAR, IDD_OFFSET_NITS, None)
+IDD_WITH_LUT = IDD._replace(luts=IDD_LUT)
+
 
 def cases(calibrations):
     """Model cases in manifest order. `calibrations` maps profile IDs to `profiles.Mhc2`."""
@@ -272,4 +336,7 @@ def cases(calibrations):
         c("sdr_srgb_swap_rg", "mhc2_swap_rg", sdr("srgb", 80), sdr("srgb", 80), 8, SWAP_IN),
         c("srgb_source_to_pq", "mhc2_identity", sdr("srgb", 203), hdr10, 10, SDR_SOURCE_IN),
         c("gamma22_source_to_pq", "mhc2_identity", sdr("gamma22", 203), hdr10, 10, SDR_SOURCE_IN),
+        c("idd_affine", IDD, SCRGB, hdr10, 10, SCRGB_IN),
+        c("idd_affine_lut", IDD_WITH_LUT, SCRGB, hdr10, 12, SCRGB_IN),
+        c("idd_sdr_affine", IDD, SCRGB, sdr("srgb", 80), 12, SDR_IN),
     ]
