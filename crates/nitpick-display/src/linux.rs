@@ -13,11 +13,12 @@ use std::collections::BTreeMap;
 
 use nitpick_core::device::{
     DeviceCapabilities, DeviceError, DeviceId, DeviceInfo, DeviceMode, DeviceQuery,
-    DisplayDeviceControl, IccProfile, PreparedProfileChange, ProfileState, ProfileTarget, Report,
+    DisplayDeviceControl, DisplaySetup, IccProfile, PreparedProfileChange, ProfileState,
+    ProfileTarget, Report,
 };
 use nitpick_core::driver::Gamut;
 
-use crate::common::{Field, NativeFailure, resolve, topology_revision, unsupported};
+use crate::common::{Field, NativeFailure, resolve, topology_revision, unread_setup, unsupported};
 use crate::edid::{self, Edid, HdrBlock, HdrStaticMetadata};
 
 mod profile;
@@ -604,6 +605,17 @@ impl<N: LinuxNative + LinuxProfileNative> DisplayDeviceControl for LinuxDisplay<
             },
             topology_revision: snapshot.revision,
         })
+    }
+
+    fn display_setup(&mut self, device: &DeviceId) -> Result<DisplaySetup, DeviceError> {
+        let snapshot = self.snapshot()?;
+        resolve(&snapshot.entries, device, |e| &e.info)?;
+        // Not read yet. The KMS CRTC properties `GAMMA_LUT`, `DEGAMMA_LUT`
+        // and `CTM` hold the kernel side of these settings.
+        Ok(unread_setup(
+            device,
+            "the Linux backend does not read the display setup",
+        ))
     }
 
     fn profile_targets(&mut self, device: &DeviceId) -> Result<Vec<ProfileTarget>, DeviceError> {

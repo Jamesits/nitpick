@@ -2524,6 +2524,7 @@ dependencies = [
  "objc2-foundation",
  "rustix",
  "serde_json",
+ "tempfile",
  "windows",
  "x11rb",
  "zbus",

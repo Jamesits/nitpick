@@ -174,6 +174,11 @@ impl DisplayDeviceControl for Fake {
         Ok(query)
     }
 
+    fn display_setup(&mut self, device: &DeviceId) -> Result<DisplaySetup, DeviceError> {
+        self.device(device)?;
+        Ok(clean_setup(device))
+    }
+
     fn profile_targets(&mut self, device: &DeviceId) -> Result<Vec<ProfileTarget>, DeviceError> {
         Ok(self
             .device(device)?
@@ -552,6 +557,100 @@ fn content_hash_is_sha256() {
         ContentHash::of(b"abc").to_string(),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
+}
+
+fn clean_setup(device: &DeviceId) -> DisplaySetup {
+    DisplaySetup {
+        device: device.clone(),
+        gamma_ramp: Report::known(GammaRamp::Identity, SOURCE),
+        os_calibration_loader: Report::known(false, SOURCE),
+        external_calibration_loader: Report::known(false, SOURCE),
+        gpu_gamut_clamp: Report::known(false, SOURCE),
+        dithering: Report::known(false, SOURCE),
+    }
+}
+
+#[test]
+fn clean_setup_has_no_findings() {
+    let mut f = fake();
+    let setup = f.display_setup(&id("a")).unwrap();
+    assert_eq!(setup.findings(), vec![]);
+    assert_eq!(
+        f.display_setup(&id("z")),
+        Err(DeviceError::Disconnected(id("z")))
+    );
+}
+
+#[test]
+fn competing_and_unknown_fields_are_findings() {
+    let mut s = clean_setup(&id("a"));
+    s.gamma_ramp = Report::known(GammaRamp::Custom { digest: 0xab }, "GetDeviceGammaRamp");
+    s.os_calibration_loader = Report::known(true, "loader report");
+    s.dithering = Report::known(true, "dither report");
+    // An unsupported vendor call does not show that the clamp is off.
+    s.gpu_gamut_clamp = Report::unknown("NVAPI call unsupported");
+    let fields: Vec<_> = s
+        .findings()
+        .into_iter()
+        .map(|f| match f {
+            SetupFinding::Competing { field, detail } => (field, true, detail),
+            SetupFinding::Unknown { field, reason } => (field, false, reason),
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        vec![
+            (
+                SetupField::GammaRamp,
+                true,
+                "gamma ramp is not identity (digest 00000000000000ab) (GetDeviceGammaRamp)".into()
+            ),
+            (
+                SetupField::OsCalibrationLoader,
+                true,
+                "OS calibration loader is on (loader report)".into()
+            ),
+            (
+                SetupField::GpuGamutClamp,
+                false,
+                "NVAPI call unsupported".into()
+            ),
+            (
+                SetupField::Dithering,
+                true,
+                "dithering is on (dither report)".into()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn setup_changes() {
+    let base = clean_setup(&id("a"));
+    assert_eq!(base.changes(&base.clone()), Ok(vec![]));
+
+    let mut later = base.clone();
+    // A background loader applies a ramp again.
+    later.gamma_ramp = Report::known(GammaRamp::Custom { digest: 1 }, SOURCE);
+    // Another source of the same value is no change.
+    later.os_calibration_loader = Report::known(false, "other report");
+    // A field that becomes unreadable is a change.
+    later.dithering = Report::unknown("driver stopped answering");
+    assert_eq!(
+        base.changes(&later),
+        Ok(vec![SetupField::GammaRamp, SetupField::Dithering])
+    );
+
+    let mut unknown = base.clone();
+    unknown.gpu_gamut_clamp = Report::unknown("first reason");
+    let mut other_reason = base.clone();
+    other_reason.gpu_gamut_clamp = Report::unknown("second reason");
+    assert_eq!(unknown.changes(&other_reason), Ok(vec![]));
+
+    assert!(matches!(
+        base.changes(&clean_setup(&id("b"))),
+        Err(DeviceError::StateConflict(_))
+    ));
 }
 
 #[test]

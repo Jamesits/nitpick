@@ -309,23 +309,55 @@ Open questions:
 - Must the backend read the colord device property `Enabled`? A disabled device keeps its profile list. Whether a compositor then applies the default profile is unknown.
 - Must colord writes have a longer timeout than the 2 s read timeout? A polkit password prompt takes longer, so the write fails with `Timeout` and can take effect later.
 
-### 47. Add display-state restoration and crash recovery
+### 70. Decide the restoration and baseline rules
 
-Requires: 4, 34.
+The recovery store, the profile run and the display setup check are in [Restoration and recovery](../design/display_device.md#restoration-and-recovery) and [Display setup](../design/display_device.md#display-setup). They use the conservative rules below until a decision.
+
+Open questions:
+
+- Must an `Unknown` setup finding fail a run? No backend reads the GPU gamut clamp or dithering, so no run has a clean baseline now. Until a decision, a `Competing` finding fails the run, and each `Unknown` finding stays in the result; the run must not claim a clean baseline.
+- An OS calibration loader that is on is `Competing`. On the checked Windows system it was on. Is it acceptable when the ramp is identity and no assigned profile has `vcgt`?
+- Dithering that is on is `Competing`. Some drivers dither by default. Must it fail light measurements, or only wire-code checks?
+- After a timed-out assignment, the run keeps the record until the next `recover`. How long can a native write take effect after its timeout, for example a colord write behind a polkit prompt? Must the worker wait a stated time and verify again in the same run?
+- A late write after a partial restoration (for example the selection after the association removal) gives a state that no prefix of the assignment steps gives. Restoration then gives `StateConflict` and keeps the record. Must restoration accept such a state?
+- The store holds one record per device, so one run cannot change two targets of a device, for example both Windows roles. Is such a change necessary?
+- On Windows the store does not sync the directory after the rename. Does the record survive a power loss right after `save`?
+
+### 71. Read the GPU vendor controls on Windows
 
 TODO:
 
-- Add ICC restoration and crash recovery through `DisplayDeviceControl`. Save the prepared change before mutation and record other display settings under [Usage and restoration](../design/output_driver/testing.md#usage-and-restoration). Remove only native resources created by the change. Keep automatic mode and vendor-control setters outside this work.
-- Include legacy gamma ramps, external calibration loaders, GPU gamut clamps and dithering in the recorded setup. Establish a baseline without competing transforms. Recheck it after HDR, topology or resume events, because background tools can reapply calibration. Record unreadable state as unknown; do not assume that an unsupported NVAPI call cleared it.
-- With a fake device backend, verify restoration after success, partial failure, timeout and cancellation. Simulate a crash and recover on the next run. Test no prior override, external state conflicts and repeated restoration. A restoration mismatch must fail the run.
+- Read the GPU gamut clamp and dithering on NVIDIA through NVAPI: `NvAPI_GPU_GetColorSpaceConversion` (interface ID `0x8159E87A`) and `NvAPI_GPU_GetDitherControl` (interface ID `0x932AC8FB`, structure version `0x10018`). These IDs are not in the public NVAPI headers. Map the GDI display to the NVAPI display ID. A failure or an unsupported call gives unknown, not off. Verify with injected calls, then on an NVIDIA system without a change of the settings; compare with the NVIDIA control panel.
+- Find the read calls of AMD ADL and Intel IGCL, or keep the fields unknown with the reason.
+
+Open questions:
+
+- Is a binding to undocumented NVAPI interface IDs acceptable? A driver update can change them.
+
+### 72. Read the display setup on macOS and Linux
+
+TODO:
+
+- macOS: read the gamma table with `CGGetDisplayTransferByTable` and define its identity forms. Record whether ColorSync loads the `vcgt` of the assigned profile; that is the OS calibration loader. Keep the GPU gamut clamp and dithering unknown unless macOS reports them.
+- Linux: read the KMS properties `GAMMA_LUT`, `DEGAMMA_LUT` and `CTM` of the CRTC of the connector; a property without a blob is identity. Record which process sets them (the compositor or a colour daemon that loads `vcgt`). KMS does not report dithering; keep it unknown.
+- Verify with injected native calls. Then run the `devices` example on the selected Mac and Linux desktop and record the values in the design.
+
+### 73. Check the Windows display setup read on a runner
+
+TODO:
+
+- On the Windows development system, `GetDeviceGammaRamp` failed for the only active display (an HDMI recorder, HDR off; its device key was the `target:` fallback, so the monitor device path was empty). Find the cause. On the runner, record the ramp of each display with and without a loaded calibration, and which identity form the driver gives.
+- On a dedicated test system, set a ramp with a separate tool and check that `DisplaySetup::changes` reports `gamma_ramp`. With HDR on and in SDR WCG, record whether the GDI ramp changes the output, for example with a WGC capture. Do not change the display settings of a developer machine.
 
 ### 48. Connect device operations to both hosts and tests
 
-Requires: 16, 27, 33, 47. Native checks use the applicable profile backend from 44, 45, 46.
+Requires: 16, 27, 33. Native checks use the applicable profile backend from 44, 45, 46.
 
 TODO:
 
 - Add the shared device worker and test-host requests from [Host boundary](../design/output_driver/testing.md#host-boundary). Use the trait for profile changes in the Qt host, CLI and calibration runner. Keep CLI device control behind an optional feature.
+- Open a `RecoveryStore` in a per-user state directory of each host and call `recover` before the first device request; report each kept record. Make each profile change through `ProfileRun`. A cancellation during `set_icc_profile` waits for the call on the worker and then restores; no other change of that device starts before. Use `nitpick_display::fake` (feature `fake`) in the host tests.
+- Read the display setup before a device run and report its findings. Read it again after HDR, topology and resume events and before a pass; a change fails the run. Put the setup in the artifact environment.
 - Verify responsive event loops, saved recovery records and serialization when a native write outlives a timeout or cancellation. Before profile assignment, cancel presentation and readiness. After readback, refresh device state, reopen as needed and submit a new frame.
 - Test a local display mapping and reject a remote browser client as a local device identity. Verify stale callbacks and captures cannot qualify the new profile state. Build and run the browser-only CLI without the native device feature.
 
@@ -371,7 +403,7 @@ TODO:
 
 ### 51. Qualify capture adapters and compare output
 
-Requires: 32, 35, 36, 38, 47, 48, 63, plus the applicable adapter: 40 or 41 (the Windows adapter exists). Windows profile comparisons also require 43, 50.
+Requires: 32, 35, 36, 38, 48, 63, plus the applicable adapter: 40 or 41 (the Windows adapter exists). Windows profile comparisons also require 43, 50.
 
 TODO:
 
@@ -428,7 +460,7 @@ TODO:
 
 ### 55. Verify Windows profile loading through the IDD
 
-Requires: 43, 44, 47, 48, 50, 54.
+Requires: 43, 44, 48, 50, 54.
 
 Open questions:
 
@@ -451,11 +483,11 @@ TODO:
 
 ### 57. Record physical output qualification
 
-Requires: the relevant host and driver checks, 47, and qualified instruments. Use 51 only for comparisons that include OS capture.
+Requires: the relevant host and driver checks, the display setup reads of that OS (71 and 73 on Windows, 72 on macOS and Linux), and qualified instruments. Use 51 only for comparisons that include OS capture.
 
 TODO:
 
 - Run the pending QRhi checks in [the measurement plan](test_patterns.md). Add release measurements for browser output, including a remote display, using [Pass criteria](../design/output_driver/testing.md#pass-criteria) and [Usage and restoration](../design/output_driver/testing.md#usage-and-restoration).
 - Record wire samples and metadata where a cable exists, repeated probe readings, quantized references, uncertainty, display controls and delay. Check FP16 exceptions and above-peak tone mapping separately. A server capture cannot qualify a remote browser's light output.
-- Record actual wire depth and dithering state separately. Check repeated wire samples for temporal changes; one frame cannot establish code preservation. Keep gamma-ramp, GPU-clamp and MHC2 effects isolated under the baseline from item 47.
+- Record actual wire depth and dithering state separately. Check repeated wire samples for temporal changes; one frame cannot establish code preservation. Keep gamma-ramp, GPU-clamp and MHC2 effects isolated under the [display setup](../design/display_device.md#display-setup) baseline.
 - Store results at their measured boundary, verify restoration, and update only the claims supported by those results. Remove completed plan items without renumbering the remaining items.

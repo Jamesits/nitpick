@@ -1,4 +1,5 @@
-//! Prints every local display device and its query. Read-only.
+//! Prints every local display device, its query and its display setup.
+//! Read-only.
 //!
 //! `cargo run -p nitpick-display --example devices`
 
@@ -16,6 +17,10 @@ fn main() {
         match backend.query_device(&device.id) {
             Ok(query) => println!("{query:#?}"),
             Err(e) => println!("  query failed: {e}"),
+        }
+        match backend.display_setup(&device.id) {
+            Ok(setup) => println!("{setup:#?}\nbaseline findings: {:#?}", setup.findings()),
+            Err(e) => println!("  setup read failed: {e}"),
         }
     }
 }

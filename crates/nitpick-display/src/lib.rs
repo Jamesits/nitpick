@@ -10,9 +10,13 @@ use nitpick_core::device::DisplayDeviceControl;
 
 pub mod common;
 pub mod edid;
+#[cfg(any(test, feature = "fake"))]
+pub mod fake;
 pub mod linux;
 pub mod macos;
 pub mod recovery;
+pub mod restoration;
+pub mod store;
 pub mod windows;
 
 /// The backend for the target OS. On other targets every call fails with

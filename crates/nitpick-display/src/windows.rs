@@ -7,17 +7,20 @@
 
 use nitpick_core::device::{
     DeviceCapabilities, DeviceError, DeviceId, DeviceInfo, DeviceMode, DeviceQuery,
-    DisplayDeviceControl, IccProfile, PreparedProfileChange, ProfileState, ProfileTarget, Report,
+    DisplayDeviceControl, DisplaySetup, IccProfile, PreparedProfileChange, ProfileState,
+    ProfileTarget, Report,
 };
 use nitpick_core::driver::Gamut;
 
 use crate::common::{Field, NativeFailure, resolve, topology_revision, unsupported};
 
 mod profile;
+mod setup;
 #[cfg(windows)]
 mod system;
 
 pub use profile::{DisplayAddress, INSTALLED_PREFIX, WindowsProfileNative};
+pub use setup::{RAMP_LEN, WindowsSetupNative};
 
 pub const BACKEND: &str = "windows";
 
@@ -481,7 +484,9 @@ fn find_desc1<'a>(
     output.desc1.as_ref().map_err(ToString::to_string)
 }
 
-impl<N: WindowsNative + WindowsProfileNative> DisplayDeviceControl for WindowsDisplay<N> {
+impl<N: WindowsNative + WindowsProfileNative + WindowsSetupNative> DisplayDeviceControl
+    for WindowsDisplay<N>
+{
     fn devices(&mut self) -> Result<Vec<DeviceInfo>, DeviceError> {
         Ok(self
             .snapshot()?
@@ -508,6 +513,10 @@ impl<N: WindowsNative + WindowsProfileNative> DisplayDeviceControl for WindowsDi
             mode: mode(&entry.path, desc1, active),
             topology_revision: snapshot.revision,
         })
+    }
+
+    fn display_setup(&mut self, device: &DeviceId) -> Result<DisplaySetup, DeviceError> {
+        self.setup_of(device)
     }
 
     fn profile_targets(&mut self, device: &DeviceId) -> Result<Vec<ProfileTarget>, DeviceError> {

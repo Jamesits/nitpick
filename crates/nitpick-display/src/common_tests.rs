@@ -3,7 +3,7 @@ use nitpick_core::device::{
     ProfileTarget, UserScope,
 };
 
-use super::{NativeFailure, Unavailable, resolve, topology_revision};
+use super::{NativeFailure, Unavailable, fnv1a64_bytes, resolve, topology_revision};
 
 fn info(key: &str, evidence: &[(&str, &str)]) -> DeviceInfo {
     DeviceInfo {
@@ -92,6 +92,14 @@ fn unavailable_service_fails_every_call_with_reason() {
     };
     check(b.devices().unwrap_err());
     check(b.query_device(&id).unwrap_err());
+    check(b.display_setup(&id).unwrap_err());
     check(b.profile_targets(&id).unwrap_err());
     check(b.profile_state(&target).unwrap_err());
+}
+
+/// Published FNV-1a 64 test vectors (draft-eastlake-fnv): "" and "a".
+#[test]
+fn fnv1a64_bytes_vectors() {
+    assert_eq!(fnv1a64_bytes(b""), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(fnv1a64_bytes(b"a"), 0xaf63_dc4c_8601_ec8c);
 }

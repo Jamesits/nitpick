@@ -68,7 +68,7 @@ static MSCMS: OnceLock<Result<Mscms, String>> = OnceLock::new();
 ///
 /// # Safety
 /// `F` must be the `extern "system"` signature of the export `name`.
-unsafe fn proc<F: Copy>(
+pub(super) unsafe fn proc<F: Copy>(
     module: ::windows::Win32::Foundation::HMODULE,
     name: PCSTR,
 ) -> Result<F, String> {
@@ -132,7 +132,7 @@ fn check(api: &str, hr: HRESULT) -> Result<(), DeviceError> {
 }
 
 /// For the `BOOL` functions, which report through `GetLastError`.
-fn check_bool(api: &str, ok: BOOL) -> Result<(), DeviceError> {
+pub(super) fn check_bool(api: &str, ok: BOOL) -> Result<(), DeviceError> {
     if ok.as_bool() {
         return Ok(());
     }

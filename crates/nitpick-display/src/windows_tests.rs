@@ -9,8 +9,8 @@ use nitpick_core::driver::{Gamut, Support};
 
 use super::{
     AdvancedColorInfo, AdvancedColorInfo2, DisplayAddress, DxgiOutput, OutputDesc1, PathReport,
-    TargetName, WindowsDisplay, WindowsNative, WindowsProfileNative, color_mode, dxgi_color_space,
-    info_2_flags, info_flags,
+    TargetName, WindowsDisplay, WindowsNative, WindowsProfileNative, WindowsSetupNative,
+    color_mode, dxgi_color_space, info_2_flags, info_flags,
 };
 use crate::common::{Field, NativeFailure};
 
@@ -120,6 +120,16 @@ impl WindowsProfileNative for Fake {
         no_api()
     }
     fn uninstall(&mut self, _: &str) -> Result<(), DeviceError> {
+        no_api()
+    }
+}
+
+/// The setup read has its own fake in `windows/setup_tests.rs`.
+impl WindowsSetupNative for Fake {
+    fn gamma_ramp(&mut self, _: &str) -> Result<Vec<u16>, DeviceError> {
+        no_api()
+    }
+    fn calibration_management(&mut self) -> Result<bool, DeviceError> {
         no_api()
     }
 }

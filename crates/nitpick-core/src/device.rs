@@ -394,6 +394,173 @@ impl PreparedProfileChange {
     }
 }
 
+/// Legacy per-channel gamma ramp of the video card, applied before scanout.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GammaRamp {
+    /// One of the identity forms that the backend accepts.
+    Identity,
+    /// Another ramp. `digest` identifies its entries, so a later read can
+    /// detect a change; it is not a colour value.
+    Custom { digest: u64 },
+}
+
+/// Display settings outside the profile assignment that can change the
+/// output signal. Read-only: no backend sets them. Unreadable fields are
+/// [`Report::Unknown`]; an unknown field is never taken as off.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplaySetup {
+    pub device: DeviceId,
+    pub gamma_ramp: Report<GammaRamp>,
+    /// The OS loads profile calibration (`vcgt`) into the gamma ramp, for
+    /// example Windows "Use Windows display calibration".
+    pub os_calibration_loader: Report<bool>,
+    /// A process outside the OS loads calibration, for example a vendor
+    /// tool. Such a process can load it again at any time.
+    pub external_calibration_loader: Report<bool>,
+    /// A GPU colour-space conversion or gamut clamp before scanout, for
+    /// example the NVAPI colour-space conversion.
+    pub gpu_gamut_clamp: Report<bool>,
+    /// Spatial or temporal dithering of the output signal.
+    pub dithering: Report<bool>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SetupField {
+    GammaRamp,
+    OsCalibrationLoader,
+    ExternalCalibrationLoader,
+    GpuGamutClamp,
+    Dithering,
+}
+
+/// Why a [`DisplaySetup`] field prevents a clean baseline.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupFinding {
+    /// A known transform that competes with the transform under test.
+    Competing { field: SetupField, detail: String },
+    /// The backend cannot read the field.
+    Unknown { field: SetupField, reason: String },
+}
+
+fn finding<T>(
+    field: SetupField,
+    report: &Report<T>,
+    competing: impl Fn(&T) -> Option<String>,
+) -> Option<SetupFinding> {
+    match report {
+        Report::Known { value, source } => competing(value).map(|detail| SetupFinding::Competing {
+            field,
+            detail: format!("{detail} ({source})"),
+        }),
+        Report::Unknown(reason) => Some(SetupFinding::Unknown {
+            field,
+            reason: reason.clone(),
+        }),
+    }
+}
+
+/// Both known with equal values, or both unknown. A field that becomes
+/// readable or unreadable counts as changed: its earlier value cannot be
+/// confirmed.
+fn same_report<T: PartialEq>(a: &Report<T>, b: &Report<T>) -> bool {
+    match (a, b) {
+        (Report::Known { value: a, .. }, Report::Known { value: b, .. }) => a == b,
+        (Report::Unknown(_), Report::Unknown(_)) => true,
+        _ => false,
+    }
+}
+
+impl DisplaySetup {
+    /// Every field that prevents a clean baseline. Empty for a clean
+    /// baseline.
+    ///
+    /// **Conservative rule:** an active OS calibration loader and active
+    /// dithering are competing, also when the ramp is identity: the loader
+    /// can load a ramp after a profile change, and dithering changes wire
+    /// codes over time.
+    #[must_use]
+    pub fn findings(&self) -> Vec<SetupFinding> {
+        fn on(what: &'static str) -> impl Fn(&bool) -> Option<String> {
+            move |v| v.then(|| format!("{what} is on"))
+        }
+        [
+            finding(SetupField::GammaRamp, &self.gamma_ramp, |r| match r {
+                GammaRamp::Identity => None,
+                GammaRamp::Custom { digest } => {
+                    Some(format!("gamma ramp is not identity (digest {digest:016x})"))
+                }
+            }),
+            finding(
+                SetupField::OsCalibrationLoader,
+                &self.os_calibration_loader,
+                on("OS calibration loader"),
+            ),
+            finding(
+                SetupField::ExternalCalibrationLoader,
+                &self.external_calibration_loader,
+                on("external calibration loader"),
+            ),
+            finding(
+                SetupField::GpuGamutClamp,
+                &self.gpu_gamut_clamp,
+                on("GPU gamut clamp"),
+            ),
+            finding(SetupField::Dithering, &self.dithering, on("dithering")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Fields that differ in `later`, a read of the same device after an
+    /// HDR, topology or resume event.
+    ///
+    /// # Errors
+    /// [`DeviceError::StateConflict`] if `later` is of another device.
+    pub fn changes(&self, later: &Self) -> Result<Vec<SetupField>, DeviceError> {
+        if self.device != later.device {
+            return Err(DeviceError::StateConflict(format!(
+                "setup of {} compared with {}",
+                self.device, later.device
+            )));
+        }
+        let fields = [
+            (
+                SetupField::GammaRamp,
+                same_report(&self.gamma_ramp, &later.gamma_ramp),
+            ),
+            (
+                SetupField::OsCalibrationLoader,
+                same_report(&self.os_calibration_loader, &later.os_calibration_loader),
+            ),
+            (
+                SetupField::ExternalCalibrationLoader,
+                same_report(
+                    &self.external_calibration_loader,
+                    &later.external_calibration_loader,
+                ),
+            ),
+            (
+                SetupField::GpuGamutClamp,
+                same_report(&self.gpu_gamut_clamp, &later.gpu_gamut_clamp),
+            ),
+            (
+                SetupField::Dithering,
+                same_report(&self.dithering, &later.dithering),
+            ),
+        ];
+        Ok(fields
+            .into_iter()
+            .filter(|(_, same)| !same)
+            .map(|(f, _)| f)
+            .collect())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceError {
     /// Unsupported operation, role, scope or record.
@@ -455,6 +622,11 @@ pub trait DisplayDeviceControl {
     /// # Errors
     /// Disconnected or ambiguous device, or a native failure.
     fn query_device(&mut self, device: &DeviceId) -> Result<DeviceQuery, DeviceError>;
+    /// Read-only. Unreadable fields are [`Report::Unknown`].
+    ///
+    /// # Errors
+    /// Disconnected or ambiguous device, or a native failure.
+    fn display_setup(&mut self, device: &DeviceId) -> Result<DisplaySetup, DeviceError>;
     /// Targets this backend can address for `device`; can be empty.
     ///
     /// # Errors

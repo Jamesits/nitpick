@@ -13,7 +13,7 @@ use crate::common::Field;
 use crate::recovery;
 use crate::windows::{
     AdvancedColorInfo, AdvancedColorInfo2, DxgiOutput, PathReport, TargetName, WindowsDisplay,
-    WindowsNative, color_mode, info_2_flags, info_flags,
+    WindowsNative, WindowsSetupNative, color_mode, info_2_flags, info_flags,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -186,6 +186,19 @@ impl Fake {
             .entry(key.into())
             .or_default()
             .per_user = on;
+    }
+}
+
+/// The setup read has its own fake in `windows/setup_tests.rs`.
+impl WindowsSetupNative for Fake {
+    fn gamma_ramp(&mut self, _: &str) -> Result<Vec<u16>, DeviceError> {
+        Err(native_error("GetDeviceGammaRamp", "not in this fake"))
+    }
+    fn calibration_management(&mut self) -> Result<bool, DeviceError> {
+        Err(native_error(
+            "WcsGetCalibrationManagementState",
+            "not in this fake",
+        ))
     }
 }
 

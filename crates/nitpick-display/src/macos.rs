@@ -8,11 +8,11 @@
 
 use nitpick_core::device::{
     DeviceCapabilities, DeviceError, DeviceId, DeviceInfo, DeviceMode, DeviceQuery,
-    DisplayDeviceControl, EdrHeadroom, HostScope, IccProfile, PreparedProfileChange, ProfileState,
-    ProfileTarget, Report, UserScope,
+    DisplayDeviceControl, DisplaySetup, EdrHeadroom, HostScope, IccProfile, PreparedProfileChange,
+    ProfileState, ProfileTarget, Report, UserScope,
 };
 
-use crate::common::{Field, resolve, topology_revision, unsupported};
+use crate::common::{Field, resolve, topology_revision, unread_setup, unsupported};
 
 mod profile;
 #[cfg(target_os = "macos")]
@@ -365,6 +365,16 @@ impl<N: MacNative + MacProfileNative> DisplayDeviceControl for MacDisplay<N> {
             mode: mode(entry),
             topology_revision: snapshot.revision,
         })
+    }
+
+    fn display_setup(&mut self, device: &DeviceId) -> Result<DisplaySetup, DeviceError> {
+        let snapshot = self.snapshot_with(false)?;
+        resolve(&snapshot.entries, device, |e| &e.info)?;
+        // Not read yet. `CGGetDisplayTransferByTable` gives the gamma table.
+        Ok(unread_setup(
+            device,
+            "the macOS backend does not read the display setup",
+        ))
     }
 
     fn profile_targets(&mut self, device: &DeviceId) -> Result<Vec<ProfileTarget>, DeviceError> {

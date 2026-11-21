@@ -4,7 +4,7 @@
 
 `DisplayDeviceControl` in `nitpick-core::device` enumerates local display devices, reads their capabilities and current state, and controls their OS settings. The first write operation is ICC profile assignment, including the state needed to restore the previous assignment. `nitpick-display` implements this trait for Windows, macOS and Linux. Both the Qt host and the command-line host can use it.
 
-**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows, macOS and Linux device and capability queries and the recovery-record format. Windows has ICC assignment, readback and restoration; see [Windows profile assignment](#windows-profile-assignment). macOS has the same operations; see [macOS profile assignment](#macos-profile-assignment). They have not run on a Mac. Linux has the same operations through colord; see [Linux profile assignment](#linux-profile-assignment). They have not run on Linux. The remaining work is in [the output driver plan](../plan/output_driver.md).
+**Status:** the trait and its types are in `nitpick-core::device`, with a fake-backend contract test. `nitpick-display` has the Windows, macOS and Linux device and capability queries and the recovery-record format. Windows has ICC assignment, readback and restoration; see [Windows profile assignment](#windows-profile-assignment). macOS has the same operations; see [macOS profile assignment](#macos-profile-assignment). They have not run on a Mac. Linux has the same operations through colord; see [Linux profile assignment](#linux-profile-assignment). They have not run on Linux. The recovery store, the profile run with verified restoration, crash recovery and an in-memory fake backend are in `nitpick-display`; see [Restoration and recovery](#restoration-and-recovery). No host uses them yet. The [display setup](#display-setup) read gives some fields on Windows only. The remaining work is in [the output driver plan](../plan/output_driver.md).
 
 The host coordinates three separate interfaces:
 
@@ -30,8 +30,8 @@ graph LR
 | Component | Responsibility | Dependencies |
 |---|---|---|
 | `nitpick-core::device` | Trait, device identity, capabilities, mode state, profile requests, saved state and errors | Rust data types, with optional `serde` forms; no OS, GUI, executor or colour library |
-| `nitpick-display` | Device and capability enumeration, native profile changes, readback and restoration, recovery-record text form | Core plus native bindings selected for the target OS |
-| Host or test runner | Device selection, durable recovery record, worker lifetime and test sequence | Core and the selected implementations |
+| `nitpick-display` | Device and capability enumeration, display setup read, native profile changes, readback and restoration, recovery-record text form, recovery store, profile run and recovery; fake backend behind the feature `fake` | Core plus native bindings selected for the target OS |
+| Host or test runner | Device selection, store directory, worker lifetime, setup recheck events and test sequence | Core and the selected implementations |
 | Profile test support | ICC contents, MHC2 extraction and display model | Little CMS through its separate adapter, `nitpick-profile` |
 
 The core does not import `nitpick-display`. The browser server and optional webview do not import it. The CLI exposes device control as an optional build feature, so a browser-only host still builds and runs without a local display service. The Qt host uses the same native implementations; profile changes do not pass through its C++ presentation bridge.
@@ -49,6 +49,7 @@ The following types are owned Rust data. Native values use `Report<T>`: a known 
 | `DeviceCapabilities` | Detected HDR, WCG, wire-depth and ICC-management support. Keep supported settings distinct from the active settings. Use `Yes`, `No` or `Unknown` with reasons; unknown lists are not empty supported lists. |
 | `DeviceMode` | Current HDR state, gamut, wire depth, luminance limits, SDR white, native pixel size and macOS EDR headroom where readable. Unknown values remain unknown. |
 | `DeviceQuery` | Capabilities, mode, identity/topology revision and the source of each native report. |
+| `DisplaySetup` | Settings outside the profile assignment that can change the output: gamma ramp, OS and external calibration loaders, GPU gamut clamp and dithering. Read-only; see [Display setup](#display-setup). |
 | `ProfileTarget` | Device, native profile role and scope, including user and host scope where applicable. The backend lists the targets it can address. |
 | `ProfileState` | Observed associations and selected default or override. Distinguish no override, inherited state and an unreadable value. Include the scope that the OS applies where an OS setting selects it (the Windows per-user switch), and a state revision for change detection. |
 | `IccProfile` | Owned profile bytes and their SHA-256 content hash. A caller's path is not the profile identity. Construction checks only the ICC header size and `acsp` signature. |
@@ -63,6 +64,9 @@ pub trait DisplayDeviceControl {
     fn query_device(
         &mut self, device: &DeviceId,
     ) -> Result<DeviceQuery, DeviceError>;
+    fn display_setup(
+        &mut self, device: &DeviceId,
+    ) -> Result<DisplaySetup, DeviceError>;
     fn profile_targets(
         &mut self, device: &DeviceId,
     ) -> Result<Vec<ProfileTarget>, DeviceError>;
@@ -102,6 +106,57 @@ The host maps a local QRhi screen to a device through native identity. A browser
 Trait calls can perform native I/O. Hosts run blocking work on a worker and serialize changes for a device. Backends handle native thread requirements without depending on Qt. Cached query results can serve the synchronous output query; refresh them before opening a surface. Waiting must not block the Qt GUI thread or CLI event loop. Dropping a host wait or reaching its timeout does not undo an OS write. Keep the worker and recovery record until the outcome is known, then query and restore as needed. Do not start a replacement mutation while the old operation can still write.
 
 Before a profile change, the host cancels pending presentation and measurement timing. After the assignment is read back, it queries the output again, opens a new surface if needed and submits a new frame. Old callbacks, captures and ready events cannot qualify that frame. The measurement delay still starts after the new presentation acknowledgement.
+
+### Restoration and recovery
+
+`nitpick_display::store::RecoveryStore` keeps the recovery records in one directory that the host selects. `nitpick_display::restoration` runs one profile change and recovers the records of an earlier process. Both use only the trait, so they work with each backend and with the fake backend.
+
+Store rules:
+- One record file per device: `profile-<FNV-1a 64 of backend and key>.json`, in the recovery-record text form. The name comes from the device identity only. Thus a record that cannot be read still blocks a new change of its device.
+- `save` writes `<name>.partial`, syncs it to disk and renames it to the record name. On Unix it then syncs the directory. It fails with `StateConflict` if the device has a record.
+- A `.partial` file is not a record: no write starts before `save` returns.
+- `open` takes an exclusive lock on the file `lock` in the directory. A second open fails with `StateConflict`. The OS releases the lock when the process ends.
+- A record that cannot be read, of another version, or under the name of another device is listed with its error. It stays for investigation.
+
+`ProfileRun` has these phases. A failed restoration keeps the phase and the record, so the host can restore again.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Saved: prepare_icc_profile, then save the record
+    Saved --> Applied: set_icc_profile; the readback selects the profile hash
+    Saved --> ApplyFailed: error, or a readback without the profile
+    Saved --> Restored: restore (cancellation before the assignment)
+    Applied --> Restored: restoration verified
+    ApplyFailed --> Restored: restoration verified
+    Restored --> Restored: restore again
+```
+
+A restoration is verified when the result of `restore_profile` and a separate `profile_state` read both equal the original state: target, selection, applied scope and associations. The association order is not compared; a backend whose order has a meaning (colord) compares it in its own readback. A difference is `StateConflict`, and the run fails. The separate read finds a native write that lands after the backend readback.
+
+The run removes the record after a verified restoration, with one exception. After `Timeout` from `set_icc_profile`, the native write can still take effect. **Conservative rule:** the run restores and verifies, but keeps the record. The next `recover` restores and verifies again; if the state is original, it writes nothing.
+
+`recover` restores and verifies each record of the store, and removes each verified record. An unreadable record, a disconnected device or a conflict keeps the record and gives its error. Restoration does not compare the topology revision. The host calls `recover` at start, before any new change: it also restores the record of a run that is still active.
+
+The trait is synchronous. A host that cancels during `set_icc_profile` waits for the call to return on its worker, and then restores.
+
+`nitpick_display::fake::FakeDisplay` (feature `fake`, and in the crate tests) is an in-memory backend that follows this contract. It installs, associates and selects in separate steps, accepts restoration from each state that a prefix of these steps gives, and removes only planned resources. A test can make a step fail, time out after its write, or time out and write at a later call. It does not change OS state.
+
+### Display setup
+
+`display_setup` reads the settings outside the profile assignment that can change the output signal. No backend sets them. An unreadable field is unknown with the reason. An unknown field is never taken as off: an unsupported vendor call does not show that the control is off.
+
+| Field | Windows source | macOS, Linux |
+|---|---|---|
+| `gamma_ramp` | `GetDeviceGammaRamp` of the GDI source. `Identity` if each channel is $256\,i + i$ or $256\,i$ for entry $i$; otherwise `Custom` with the FNV-1a 64 digest of the little-endian entries. | Unknown |
+| `os_calibration_loader` | `WcsGetCalibrationManagementState`, loaded at run time. One setting for all displays. | Unknown |
+| `external_calibration_loader` | Unknown: not detected. A ramp that a loader loads shows in `gamma_ramp`, and a later load shows as a change. | Unknown |
+| `gpu_gamut_clamp`, `dithering` | Unknown: NVAPI, AMD and Intel controls are not read. | Unknown |
+
+`DisplaySetup::findings` gives each field that prevents a clean baseline: `Competing` for a custom ramp or a control that is on, and `Unknown` for an unknown field. A clean baseline has no findings. **Conservative rule:** an OS calibration loader that is on and dithering that is on are competing, also with an identity ramp. The loader can load a ramp after a profile change, and dithering changes the wire codes over time. A `Competing` finding fails a run. An `Unknown` finding stays in the result, and the run does not claim a clean baseline. **Open:** whether an `Unknown` finding must fail a run; no backend reads the GPU gamut clamp or dithering yet.
+
+`DisplaySetup::changes` compares a later read of the same device with the baseline. A field changes if its known values differ, or if it becomes known or unknown. Two unknown reads are equal. The host reads the setup again after an HDR, topology or resume event and before the run passes, because a background tool can load calibration again. A change fails the run.
+
+A check on Windows 11 build 26200 with one active display (an HDMI recorder, HDR off) gave: `GetDeviceGammaRamp` failed for its GDI source, and the calibration loader is on. The cause of the ramp failure is unknown. **Unverified:** which identity form each driver gives without a loaded ramp, and whether the GDI ramp applies while Advanced Color is active.
 
 ## Platform implementations
 
@@ -342,6 +397,11 @@ The crate must build on all three operating systems. Missing APIs, services, rol
 | Profile selection | One unqualified path; explicit native role and scope | Explicit target. The OS can have different defaults and overrides for one device. |
 | Call model | Native work in the UI; synchronous trait on a worker | Worker. Native APIs can block, and cancellation must not hide an unfinished write. |
 | Recovery | Save after assignment; prepare and save before assignment | Prepare first. A partial native failure or process crash must leave enough state to recover. |
+| Recovery-record storage | One journal file; a file that the caller names; one file per device in a locked directory | One file per device in a locked directory. A name from the device identity blocks a second change of the device, also when its record cannot be read. The lock stops two processes from recovering one record at the same time. |
+| Restoration check | The backend readback only; a separate state read after it | Separate read. It finds a native write that lands after the backend readback. Cost: one more native read. |
+| Record after a timed-out assignment | Remove it after a verified restoration; keep it until the next recovery | Keep it. The caller cannot know if the native write still runs. Cost: the next start restores again; without a change it writes nothing. |
+| Display setup read | Record it by hand only; a separate trait; a method of `DisplayDeviceControl` | Method `display_setup`. The backend resolves the device identity in the same way as for the other calls, and the host uses one worker. A backend that cannot read a field gives unknown. |
+| Unknown setup field in a baseline | Take it as off; report it as a finding | A finding. An unsupported vendor call does not show that the control is off. |
 | Recovery-record format | Separate record types in `nitpick-display`; `serde` forms of the core types | `serde` behind a core feature: one definition of each type. The reader checks `version` before other fields, because another version can give a field another meaning. Profile bytes and hashes are hex text, and the stored hash must match the bytes. |
 | Native-call tests | Test only on each OS; inject native reports | Inject. The mapping compiles on every OS, and unknown or failed fields can be tested without a display. |
 | macOS EDR headroom | Put it in the luminance fields with an assumed SDR white; a separate ratio field | Separate `edr` field. The SDR white luminance changes with brightness and is not reported. An assumed scale would give false absolute values and a false exact claim for the QRhi FP16 path. |
@@ -362,9 +422,9 @@ The crate must build on all three operating systems. Missing APIs, services, rol
 
 ## Usage
 
-Select a local device and a supported profile target. Use the current user scope where supported; other scopes must be explicit. Prepare the change and persist its recovery record before assignment. Confirm the OS state, then run the presentation and measurement sequence. Restore and confirm the original state at the end of the run.
+Select a local device and a supported profile target. Use the current user scope where supported; other scopes must be explicit. Read the [display setup](#display-setup) and check its baseline. Start a `ProfileRun`: it prepares the change and saves its recovery record before assignment. Confirm the OS state, then run the presentation and measurement sequence. Restore and confirm the original state at the end of the run; see [Restoration and recovery](#restoration-and-recovery).
 
-On startup, inspect unresolved recovery records before changing that device again. An unreadable or incompatible record fails recovery with a reason. Keep it for investigation. Follow [test setup and restoration](output_driver/testing.md#usage-and-restoration) for other display controls.
+On startup, open the store and call `recover` before changing a device. An unreadable or incompatible record fails recovery with a reason. Keep it for investigation. Follow [test setup and restoration](output_driver/testing.md#usage-and-restoration) for other display controls.
 
 ## Testing
 
@@ -372,12 +432,14 @@ Run the same trait contract against a fake backend and each native backend. To p
 
 Inject failure after installation, association and default selection. Verify recovery after each step, timeout, cancellation and process restart. Test concurrent external changes, shared pre-existing profiles and repeated restoration. A completed assignment must have matching readback. Failed restoration fails the run.
 
-Native integration tests use a selected test display and the `ordinary` [profile fixtures](output_driver/testing.md#profile-fixtures). Run assignment, readback and restoration on each supported OS. The example below selects the one device whose key contains `<key part>`, saves the recovery record before the first write, assigns, restores and prints each state. It accepts only `ordinary` fixtures. A macOS target needs the host part of the scope; a Windows target must not have it. The Linux target is `standard user`. After a failed restoration it keeps the record; `restore` retries from it:
+The run and store tests (`restoration_tests.rs`, `store_tests.rs`) use the fake backend and a temporary store directory. They cover success with and without a prior override, failure at each assignment step, a timeout after the write, late writes before and after the restoration readback, cancellation before and after the assignment, a crash at each point after the save with recovery in the next run, an external change, repeated and failed restoration, an unreadable record, a partial record file, the store lock and a disconnected device. The native backends have their own injected-call tests of the same steps.
+
+Native integration tests use a selected test display and the `ordinary` [profile fixtures](output_driver/testing.md#profile-fixtures). Run assignment, readback and restoration on each supported OS. The example below selects the one device whose key contains `<key part>`, saves the recovery record in `<record directory>` before the first write, assigns, restores and prints each state. `state` also prints the display setup and its baseline findings. It accepts only `ordinary` fixtures. A macOS target needs the host part of the scope; a Windows target must not have it. The Linux target is `standard user`. After a failed restoration or a timed-out assignment it keeps the record; `restore` recovers every record of the directory:
 
 ```text
 cargo run -p nitpick-display --example profile_roundtrip -- state <key part>
-cargo run -p nitpick-display --example profile_roundtrip -- assign <key part> <standard|advanced> <user|system>[/<this-host|any-host>] <fixture id> <record file>
-cargo run -p nitpick-display --example profile_roundtrip -- restore <record file>
+cargo run -p nitpick-display --example profile_roundtrip -- assign <key part> <standard|advanced> <user|system>[/<this-host|any-host>] <fixture id> <record directory>
+cargo run -p nitpick-display --example profile_roundtrip -- restore <record directory>
 ```
 
 Apply MHC2 fixtures only in the Windows calibration tests. Confirm calibration activation and light output at their own boundaries in [Output verification](output_driver/testing.md).

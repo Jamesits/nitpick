@@ -26,6 +26,7 @@ use super::{
 use crate::common::{Field, NativeFailure};
 
 mod profile;
+mod setup;
 
 /// `DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2`. Not in the
 /// `windows` crate metadata yet.

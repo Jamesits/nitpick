@@ -3,8 +3,8 @@
 use std::fmt;
 
 use nitpick_core::device::{
-    DeviceError, DeviceId, DeviceInfo, DeviceQuery, DisplayDeviceControl, IccProfile,
-    PreparedProfileChange, ProfileState, ProfileTarget,
+    DeviceError, DeviceId, DeviceInfo, DeviceQuery, DisplayDeviceControl, DisplaySetup, IccProfile,
+    PreparedProfileChange, ProfileState, ProfileTarget, Report,
 };
 
 /// A failed native call for one field. The field becomes
@@ -97,17 +97,40 @@ pub fn topology_revision(devices: &[DeviceInfo]) -> u64 {
 /// recovery records can store it.
 #[must_use]
 pub fn fnv1a64<S: AsRef<str>>(parts: &[S]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
+    let mut hash = FNV_OFFSET;
     for part in parts {
         // 0xff separates parts; it cannot occur in UTF-8.
         for &b in part.as_ref().as_bytes().iter().chain(&[0xff]) {
             hash ^= u64::from(b);
-            hash = hash.wrapping_mul(PRIME);
+            hash = hash.wrapping_mul(FNV_PRIME);
         }
     }
     hash
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// A setup whose fields the backend does not read. Each field is unknown
+/// with `reason`, so a baseline check cannot pass on it.
+#[must_use]
+pub fn unread_setup(device: &DeviceId, reason: &str) -> DisplaySetup {
+    DisplaySetup {
+        device: device.clone(),
+        gamma_ramp: Report::unknown(reason),
+        os_calibration_loader: Report::unknown(reason),
+        external_calibration_loader: Report::unknown(reason),
+        gpu_gamut_clamp: Report::unknown(reason),
+        dithering: Report::unknown(reason),
+    }
+}
+
+/// FNV-1a 64 of `bytes`; see [`fnv1a64`].
+#[must_use]
+pub fn fnv1a64_bytes(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(FNV_OFFSET, |hash, &b| {
+        (hash ^ u64::from(b)).wrapping_mul(FNV_PRIME)
+    })
 }
 
 /// Backend for a platform or service that is not available. Every call
@@ -137,6 +160,10 @@ impl DisplayDeviceControl for Unavailable {
 
     fn query_device(&mut self, _: &DeviceId) -> Result<DeviceQuery, DeviceError> {
         self.fail("display query")
+    }
+
+    fn display_setup(&mut self, _: &DeviceId) -> Result<DisplaySetup, DeviceError> {
+        self.fail("display setup")
     }
 
     fn profile_targets(&mut self, _: &DeviceId) -> Result<Vec<ProfileTarget>, DeviceError> {
