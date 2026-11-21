@@ -264,7 +264,6 @@ fn check_resize(frames: &mut CaptureFrames, handle: isize, size: (usize, usize))
 #[test]
 #[ignore = "opens full-screen windows on the first screen, which must have HDR on"]
 fn captures_the_pattern_window() {
-    nitpick_app::test_host::use_timer_update_requests();
     let _app = QGuiApplication::new();
     let states = DeviceStates::default();
     let mut driver = QrhiDriver::new(Backend::D3d11, BridgeWindow, Threads, states.clone());

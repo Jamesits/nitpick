@@ -18,19 +18,6 @@ mod ffi {
         #[namespace = "nitpick"]
         #[cxx_name = "quitApplication"]
         fn quit_application(code: i32);
-
-        /// Windows: sets `QT_D3D_NO_VBLANK_THREAD=1` unless it is set.
-        /// Call before the application object exists.
-        ///
-        /// Counter-intuitive: without a Qt Quick window, the D3D11 vblank
-        /// thread of Qt 6.12 delivered no `UpdateRequest` to the pattern
-        /// window on Windows 11, so no frame rendered before the
-        /// acknowledgement timeout. The timer fallback of `requestUpdate`
-        /// renders. **Unverified:** the cause, and whether the launcher
-        /// depends on its Qt Quick window for this.
-        #[namespace = "nitpick"]
-        #[cxx_name = "useTimerUpdateRequests"]
-        fn use_timer_update_requests();
     }
 
     extern "Rust" {
@@ -141,12 +128,6 @@ impl Hooks for QtHooks {
     }
 }
 
-/// Windows: makes `requestUpdate` use its timer, as in the test host. Call
-/// before the application object exists. See `ffi::use_timer_update_requests`.
-pub fn use_timer_update_requests() {
-    ffi::use_timer_update_requests();
-}
-
 fn exit_code(exit: &Exit) -> i32 {
     match exit {
         Exit::Quit | Exit::Stopped(None) => 0,
@@ -163,7 +144,6 @@ pub fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    ffi::use_timer_update_requests();
     let mut app = QGuiApplication::new();
     let backend = Backend::current();
     let states = DeviceStates::default();

@@ -63,6 +63,10 @@ using nitpick::VulkanHdrMetadata;
 // Time for the compositor to map the window and apply the full-screen state.
 constexpr int kInitTimeoutMs = 5000;
 
+// Retry interval after an out-of-date swap chain: the interval of the timer
+// fallback of QWindow::requestUpdate in Qt 6.12 at 60 Hz or less.
+constexpr int kRetryRenderMs = 5;
+
 template <typename... Args> std::string sformat(const char *fmt, Args... args) {
     char buf[512];
     std::snprintf(buf, sizeof buf, fmt, args...);
@@ -297,10 +301,25 @@ struct NativeSwapChain {
 // blending or colour conversion inside the application. The compositor and
 // the driver may still alter values after the present, which is what the
 // external scope verifies.
+//
+// Counter-intuitive: renders come from a timer of the window, not from
+// requestUpdate(). On Windows, Qt 6.12 delivers UpdateRequest for a D3D11
+// window only from its DXGI vblank thread once QRhi registered the window.
+// That thread calls back only after an IDXGIOutput::WaitForVBlank that
+// blocks for 1 ms or more. Where WaitForVBlank returns at once, Qt never
+// delivers the request and has no timer fallback, so a frame would time
+// out. A static pattern needs no vsync pacing of its renders.
 class PatternWindow final : public QWindow {
 public:
     PatternWindow(QScreen *screen, bool fp16, PatternBackend backend)
         : m_fp16(fp16), m_backend(backend), m_expectedSize(screenPatternSize(screen)) {
+        m_renderTimer.setSingleShot(true);
+        QObject::connect(&m_renderTimer, &QTimer::timeout, this, [this] {
+            if (m_ready) {
+                render();
+            }
+            notifyIfSettled();
+        });
         switch (backend) {
         case PatternBackend::D3d11:
 #if defined(Q_OS_WIN)
@@ -424,10 +443,19 @@ public:
         m_pending = QByteArray(reinterpret_cast<const char *>(data), qsizetype(size));
         m_pendingSize = QSize(width, height);
         g_probe.queued.push_back(frame);
-        requestUpdate();
+        scheduleRender(0);
         // The Rust side ignores the timer of a frame that was already
         // uploaded or replaced.
         QTimer::singleShot(timeoutMs, this, [frame] { nitpick::frameTimedOut(frame); });
+    }
+
+    // Renders after `ms` from the event loop. An earlier pending render is
+    // kept.
+    void scheduleRender(int ms) {
+        if (m_renderTimer.isActive() && m_renderTimer.remainingTime() <= ms) {
+            return;
+        }
+        m_renderTimer.start(ms);
     }
 
     // Each metadata call applies at the next present of the swap chain.
@@ -556,24 +584,13 @@ protected:
     }
 
     bool event(QEvent *e) override {
-        switch (e->type()) {
-        case QEvent::UpdateRequest:
-            if (m_ready) {
-                render();
-            }
-            notifyIfSettled();
-            return true;
-        case QEvent::PlatformSurface:
-            // The swap chain must go before the native surface.
-            if (static_cast<QPlatformSurfaceEvent *>(e)->surfaceEventType() ==
-                    QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed &&
-                m_sc) {
-                m_sc->destroy();
-                m_ready = false;
-            }
-            break;
-        default:
-            break;
+        // The swap chain must go before the native surface.
+        if (e->type() == QEvent::PlatformSurface &&
+            static_cast<QPlatformSurfaceEvent *>(e)->surfaceEventType() ==
+                QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed &&
+            m_sc) {
+            m_sc->destroy();
+            m_ready = false;
         }
         return QWindow::event(e);
     }
@@ -796,7 +813,7 @@ private:
             // Transient, for example during a mode change. The queued
             // frame retries until its timeout.
             if (!m_pending.isEmpty()) {
-                requestUpdate();
+                scheduleRender(kRetryRenderMs);
             }
             return;
         }
@@ -909,6 +926,7 @@ private:
     bool m_readback = false;
     std::string m_error;
     std::function<void()> m_onSettled;
+    QTimer m_renderTimer;
     // Pixels of the queued frame; its ID is in the Rust submission state.
     QByteArray m_pending;
     QSize m_pendingSize;
@@ -1036,7 +1054,7 @@ void injectFrameFault(FrameFault fault, std::uint32_t count) {
 void holdRenders(bool hold) {
     g_probe.hold = hold;
     if (!hold && g_window) {
-        g_window->requestUpdate();
+        g_window->scheduleRender(0);
     }
 }
 

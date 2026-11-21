@@ -4,7 +4,6 @@
 
 #include <QtCore/QCoreApplication>
 #include <QtCore/QMetaObject>
-#include <QtCore/qtenvironmentvariables.h>
 
 namespace nitpick {
 
@@ -19,15 +18,5 @@ bool postToGuiThread(std::uint64_t job) {
 }
 
 void quitApplication(std::int32_t code) { QCoreApplication::exit(code); }
-
-void useTimerUpdateRequests() {
-#if defined(Q_OS_WIN)
-    // qputenv updates the C runtime copy that Qt reads; SetEnvironmentVariable
-    // of the Rust standard library does not.
-    if (!qEnvironmentVariableIsSet("QT_D3D_NO_VBLANK_THREAD")) {
-        qputenv("QT_D3D_NO_VBLANK_THREAD", "1");
-    }
-#endif
-}
 
 } // namespace nitpick

@@ -129,7 +129,7 @@ The Vulkan HDR10 format has red in the low 10 bits, as `DXGI_FORMAT_R10G10B10A2_
 
 If `SetHDRMetaData` fails on Windows, the status line shows that the metadata was not sent. The pattern stays on the screen.
 
-The bridge queues the frame and returns to the Qt event loop. It reports the frame ID after its texture upload and a successful `endFrame`. This callback resolves the `present` future. `requestUpdate()` alone is not an acknowledgement. The bridge does not run a nested event loop. This does not confirm physical scanout. The launcher then applies the [measurement delay](overview.md#measurement-delay).
+The bridge queues the frame and returns to the Qt event loop. It reports the frame ID after its texture upload and a successful `endFrame`. This callback resolves the `present` future. A queued frame alone is not an acknowledgement. The render runs from a timer of the window, see [Render trigger](#render-trigger). The bridge does not run a nested event loop. This does not confirm physical scanout. The launcher then applies the [measurement delay](overview.md#measurement-delay).
 
 `submission.rs` keeps the frame state on the Qt GUI thread. The window keeps one pixel buffer; the render reports its events by frame ID:
 
@@ -137,13 +137,34 @@ The bridge queues the frame and returns to the Qt event loop. It reports the fra
 |---|---|
 | Render uploads the queued frame, `endFrame` succeeds | Success |
 | `beginFrame` gives an error or device loss | `Platform` error for the queued frame; it does not upload later. After a device loss, Qt 6.12 gives device loss for each later `beginFrame`, so each frame fails until a new `open`; the window does not create a new `QRhi`. |
-| `beginFrame` gives an out-of-date swap chain after one resize | The window retries at the next update |
+| `beginFrame` gives an out-of-date swap chain after one resize | The window retries after 5 ms |
 | Texture or pipeline creation fails, or `endFrame` fails | `Platform` error for the uploaded frame; the previous pattern stays |
 | 10 s from queueing without an upload | `Timeout`; the frame does not upload later |
 | The window closes or is replaced | `Disconnected` for the pending completion. A close during the conversion, before the frame is queued, also gives `Disconnected`: the driver compares the close count with its value after `open`. |
 | A new frame before the render | The new frame replaces the old pixels; only the new frame uploads |
 
 Cancellation removes the completion. A cancelled frame that is queued can still upload, because the window can show it until a replacement. Late events of other frame IDs do nothing. The timeout timer of a cancelled frame stays in Qt until it expires or the window closes; it then does nothing.
+
+### Render trigger
+
+The pattern window renders from a single-shot timer that it owns: 0 ms after a queued frame or the end of a test hold, 5 ms after an out-of-date swap chain. An earlier pending render is kept. **Deviation from the Qt examples:** the window does not use `QWindow::requestUpdate` and does not handle `UpdateRequest`. A static pattern needs no vsync pacing. The present still uses swap interval 1. The reason is in the comment of `PatternWindow` in `cpp/pattern_window.cpp`.
+
+Qt 6.12.0 behaviour on Windows (source: `QWindowsWindow::requestUpdate` and `qdxgivsyncservice.cpp` in qtbase):
+- `QD3D11SwapChain::createOrResize` registers the window in `QDxgiVSyncService` unless its swap interval is 0. The service finds the DXGI output of the window on the adapters of the live `QRhi` objects and starts one vblank thread for each monitor.
+- For a registered window with an output, `requestUpdate` stops the timer fallback of `QPlatformWindow` and waits only for a callback of the vblank thread.
+- The vblank thread calls `IDXGIOutput::WaitForVBlank` in a loop. If the call fails or returns within 1 ms, the thread sleeps for one refresh interval and does not call back. Qt has no fallback for this case.
+- `QT_D3D_NO_VBLANK_THREAD=1` turns the service off, so `requestUpdate` uses its timer.
+
+Measured on Windows 11 (build 26200), NVIDIA GeForce RTX 5090 (driver 32.0.16.1692), one screen (Atomos NINJA V, 3840×2160, HDR off, 8 bpc wire):
+
+| Check | Result |
+|---|---|
+| `WaitForVBlank` on this output, in the pattern window process and in a separate process, with and without the launcher open | `S_OK` after less than 0.05 ms at every call |
+| `requestUpdate` with the vblank thread on | No `UpdateRequest` in 10 s. `supportsWindow` was `true`; the vblank thread ran but did not call back. |
+| Test host and launcher with `requestUpdate` | Each frame timed out ("driver acknowledgement timed out"). The launcher failed also with its Qt Quick window open. |
+| Test host and launcher with the timer | Each frame acknowledged. Launcher: "Ready after delay", also with the Qt Quick window minimized. |
+
+**Unverified:** why `WaitForVBlank` does not block on this output: the recorder, the driver or the HDR-off state. The earlier [running launcher checks](#running-launcher-checks) passed with `requestUpdate` on a 3840×2160 screen with HDR on. The HDR state of the earlier test-host timeouts is not recorded. The timer path with HDR on, with the Qt Quick window on another screen, and on macOS and Linux.
 
 ### Asynchronous presentation
 
@@ -167,9 +188,7 @@ The unit tests of `qrhi_driver.rs` and `session.rs` use a simulated event loop w
 
 `nitpick --test-host` runs the [test-host protocol](testing.md#host-boundary) without QML. `test_host.rs` makes a `QGuiApplication` and three `QrhiDriver` values on the shared device cache. The first opens and presents. The second answers `displays` and `query` while a presentation borrows the first. The third lists the screen identities for `refresh`. The state machine runs as one `gui_executor.rs` task. The test host has no `QObject` for `CxxQtThread::queue`, so it posts task steps with `QMetaObject::invokeMethod` on the application object (`cpp/test_host.cpp`). After `stopped`, it ends the event loop. The `submission.rs` close count gives a pattern window that closes outside the host, as in the launcher. The capture adapter comes from `pattern_capture.rs`: on Windows the [WGC adapter](testing.md#windows-graphics-capture-adapter) on the `HWND` of the open pattern window (`patternWindowHandle` in `cpp/pattern_window.cpp`), elsewhere none.
 
-Counter-intuitive:
-- On Windows, the test host sets `QT_D3D_NO_VBLANK_THREAD=1` through `qputenv`, unless the variable is set. Without it, Qt 6.12 sent no `UpdateRequest` to the pattern window when no Qt Quick window existed, and each frame timed out after 10 s. With the variable, `requestUpdate` uses its timer. `std::env::set_var` is not sufficient: Qt reads the C runtime copy of the environment. The [swap-chain checks](testing.md#swap-chain-checks) set it in the same way. **Unverified:** the cause, and whether the launcher depends on its Qt Quick window for its update requests.
-- `nitpick-app` is a library and a binary. The build script links the generated C++ into every target, and that C++ calls the Rust side of the bridges. An integration test gets these Rust symbols only from a library.
+Counter-intuitive: `nitpick-app` is a library and a binary. The build script links the generated C++ into every target, and that C++ calls the Rust side of the bridges. An integration test gets these Rust symbols only from a library.
 
 ## Signalling
 
@@ -247,6 +266,7 @@ Automatic light levels use $D / (2^n - 1)$ as full-range PQ for every input enco
 | FP16 luminance scale | assume 80 on all platforms; calibrate each display; reject paths without a known scale; warn on paths without a known scale | warn on paths without a known scale | A guessed scale changes PQ luminance and codes, so `exact` is `No`. The pattern stays usable for a visual check. Calibration is outside the current scope. |
 | Remapped output (HDR off, QRhi format fallback) | fail; show the pattern with a warning | show the pattern with a warning | The OS or the compositor remaps the output, but the pattern stays usable for a visual check. `exact` and the warnings prevent a false claim of exact output. |
 | Adapter (Windows) | default adapter; adapter of the monitor | adapter of the monitor | Prevents a cross-adapter copy on hybrid-GPU systems. QRhi gets the adapter LUID. Only D3D11 does this; the Windows Vulkan window of the swap-chain tests uses the device that QRhi selects. |
+| Render trigger | `QWindow::requestUpdate`; a timer of the window | a timer of the window | On Windows, Qt 6.12 can withhold `UpdateRequest` for a D3D11 window without a limit, see [Render trigger](#render-trigger). A static pattern needs no vsync pacing. |
 | Window backend | fixed per OS in the C++ window; `Backend` of the driver passed to `open` | `Backend` of the driver | One value selects the swap chain and the native metadata structure. The swap-chain tests open the same window with Vulkan on Windows. The launcher and the test host use `Backend::current()`: D3D11 on Windows, Metal on macOS, Vulkan elsewhere. |
 | Metadata on Linux | Qt private API; none | Qt private API | QRhi exposes no `VkSwapchainKHR`. Cost: the binary must use the exact Qt version of its private headers. |
 | GUI-thread executor | `qmetaobject` `execute_async`; a C++ bridge that posts with `QMetaObject::invokeMethod`; `async-task` with `CxxQtThread::queue` | `async-task` with `CxxQtThread::queue` | `qmetaobject` is a different Qt binding. `CxxQtThread::queue` is the existing cxx-qt path to the GUI thread and accepts jobs from any thread. `async-task` gives the task state and wakers; the glue code is only the post and the drop handle. |

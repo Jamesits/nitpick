@@ -41,7 +41,7 @@ fn success_only_after_upload_and_end_frame() {
     let log = Log::default();
     let mut s = Submissions::default();
     let id = submit(&mut s, &log);
-    // Queueing alone, like requestUpdate(), is no acknowledgement.
+    // Queueing alone, like a scheduled render, is no acknowledgement.
     assert!(log.borrow().is_empty());
     assert_eq!(s.take_upload(), Some(id));
     assert!(log.borrow().is_empty());

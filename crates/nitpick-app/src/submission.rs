@@ -196,8 +196,8 @@ pub fn present(
         id,
         _gui_thread: PhantomData,
     };
-    // The window only posts an update request here, so no render event
-    // can run before `queued`.
+    // The window only schedules a render here, so no render event can run
+    // before `queued`.
     queue(id)?;
     with(|s| s.queued(id));
     Ok(registration)

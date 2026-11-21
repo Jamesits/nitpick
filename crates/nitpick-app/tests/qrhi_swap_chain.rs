@@ -460,7 +460,7 @@ fn with_fault(
 
 fn out_of_date(run: &mut Run, surface: &Surface, a: &Pattern, b: &Pattern) {
     // One: the render resizes the swap chain and begins again. Two: the
-    // window retries at the next update.
+    // window retries after a short interval.
     for (count, pattern) in [(1, a), (2, b)] {
         let (outcome, id) = with_fault(run, surface, pattern, FrameFault::BeginOutOfDate, count);
         outcome.unwrap_or_else(|e| panic!("out of date {count} times: {e}"));
@@ -586,7 +586,6 @@ fn close_during_conversion(run: &mut Run, surface: &Surface, pattern: &Pattern) 
 }
 
 fn check_backend(backend: Backend) {
-    nitpick_app::test_host::use_timer_update_requests();
     let _app = QGuiApplication::new();
     let mut run = Run::start(backend);
 

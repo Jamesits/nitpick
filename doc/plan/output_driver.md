@@ -96,12 +96,20 @@ Open questions:
 - The hosts read the fixtures from the source tree of the build (`nitpick_fixtures::fixture_dir`). Thus a packaged launcher with `--test-host` stops with exit status 2. Must the release build leave out the test-host mode, or include the fixtures?
 - The host fills the surface around the fixture with nominal black, so automatic MaxCLL and MaxFALL differ from the fixture values (for example `seq-metadata-*`) unless the surface has the fixture size. Must a metadata check use a surface of the fixture size, or must the fixtures give the values of the filled frame?
 
-### 61. Find why the D3D11 vblank thread sends no update requests
+### 68. Verify the timer render trigger with HDR on and with two screens
+
+The pattern window renders from its own timer, not from `requestUpdate`; see [Render trigger](../design/output_driver/qt.md#render-trigger). It passed on Windows with HDR off only.
 
 TODO:
 
-- Without `QT_D3D_NO_VBLANK_THREAD`, `nitpick --test-host` on Windows 11 with Qt 6.12.0 got no `UpdateRequest` in the pattern window, and each frame timed out; see [Test host](../design/output_driver/qt.md#test-host). Find the cause, for example the adapter of the Qt vsync service, the screen (an HDR recorder with an 8 bpc wire), or the missing Qt Quick window. If the cause is in `pattern_window.cpp`, correct it there and remove the variable from the test host and from `tests/qrhi_swap_chain.rs`.
-- Check whether the launcher depends on its Qt Quick window for the update requests: show a pattern with the QML window minimized, and with the QML window on another screen. A timeout of a frame is a failure.
+- With the consent of the machine owner, turn on HDR on the Windows test screen. Run the ignored tests `qrhi_swap_chain`, `wgc_capture` and `test_host` of `nitpick-app` (Vulkan with `VULKAN_SDK`). Expect all to pass without `QT_D3D_NO_VBLANK_THREAD`. Record the results in [Output verification](../design/output_driver/testing.md).
+- Measure `IDXGIOutput::WaitForVBlank` with HDR on, and on an output that is not the recorder. Record whether it blocks for one refresh interval. This finds whether the recorder, the driver or the HDR-off state causes the immediate return.
+- With two screens on Windows, show a pattern in the launcher with the Qt Quick window on the other screen. A timeout of a frame is a failure.
+- On macOS and on GNOME 50 (Wayland and xcb), the test-host screen test of item 33 and the swap-chain test of item 38 run the timer path. A timeout of a frame there is a failure of this item.
+
+Open questions:
+
+- Must the defect be reported to Qt? Qt 6.12.0 `QDxgiVSyncService` gives no `UpdateRequest` and no timer fallback when `WaitForVBlank` returns within 1 ms.
 
 ### 62. Connect capture artifacts to the hosts
 

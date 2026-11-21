@@ -393,7 +393,7 @@ Process tests drive the real hosts through the protocol:
 - `nitpick-cli`, `tests/test_host.rs`: the real service and the mock page of the [browser process tests](browser.md#testing). They check `query`, `open`, the PNG samples of the placed fixture against the reference sample table, replacement, a late `applied`, the delay, `capture`, `close`, malformed input, the frame order, a disconnect during presentation in three rounds, and a viewport change with a new generation.
 - `nitpick-app`, `tests/test_host.rs`: with the Qt `offscreen` platform, the protocol on the real Qt event loop. That platform has no screen with a native identity, so no window opens. An ignored test opens full-screen windows on the first screen: 10-bit replacement and delay, a 12-bit fixture on a 10-bit surface, a 12-bit surface, a marked frame on each surface with `capture`, and `close`. On Windows each `capture` runs twice: without a heartbeat and a deadline of 2 s, which must `fail`, and with a heartbeat of 100 ms, which must accept the frame. The host has no artifact directory, so an accepted frame gives `unavailable` with that reason. Run it with `cargo nextest run -p nitpick-app --test test_host --run-ignored only`.
 
-Results: all pass on Windows 11 build 26200 with Qt 6.12.0. The ignored screen test ran on one 3840×2160 HDR screen with an 8 bpc wire. Without a heartbeat, the WGC adapter gave one frame in 2 s at both depths. **Not verified:** macOS and Linux; a pattern window closed by Esc in the real Qt event loop (only the contract checks it, with a controlled close).
+Results: all pass on Windows 11 build 26200 with Qt 6.12.0. The ignored screen test ran on one 3840×2160 HDR screen with an 8 bpc wire. Without a heartbeat, the WGC adapter gave one frame in 2 s at both depths. With the [timer render trigger](qt.md#render-trigger), the ignored screen test passed again on the same screen with HDR off. **Not verified:** macOS and Linux; a pattern window closed by Esc in the real Qt event loop (only the contract checks it, with a controlled close).
 
 Reject negative delays and verify that the Qt setting survives a restart. With HDR off, Windows QRhi and the browser return `hdr_on = Some(false)` and the host shows that state. Check that interpretation warnings and FP16 or clipping marks reach both status output and the reference table.
 
@@ -478,7 +478,7 @@ Checks. Each frame is a full-surface image. The expected swap chain is the produ
 | Metadata | A request with a different value in each field: the native structure equals the code-unit values (DXGI: maximum mastering luminance in whole cd/m²), and the status line gives them. Metadata off: D3D11 calls `SetHDRMetaData(NONE)`; Vulkan reports that the earlier metadata stays. |
 | Delayed submission | Renders held: no acknowledgement in 500 ms and no upload. After the release: the acknowledgement and the readback of that frame. |
 | Rapid replacement | Two frames queued before one render; the first future is dropped, as the host does. Only the second uploads, completes and is in the readback. |
-| Out-of-date swap chain | Once: the render resizes the swap chain and begins again. Twice: the next update uploads. At each call: `Timeout`, and the frame does not upload or read back later. |
+| Out-of-date swap chain | Once: the render resizes the swap chain and begins again. Twice: the retry 5 ms later uploads. At each call: `Timeout`, and the frame does not upload or read back later. |
 | Device loss and errors | `beginFrame` device loss or error: `Platform` with the text of the window; the frame does not upload later. `endFrame` device loss or error: `Platform`; the upload ran. Upload failure: `Platform`; the readback of that render holds the previous pattern. Then the next frame shows. |
 | Close | `deleteLater`, as Esc does, while the frame waits for its render, and (12 bits) while the worker converts: `Disconnected`; no frame queued in the closed window |
 
@@ -487,7 +487,7 @@ Limits of the method:
 - "Close during upload": upload, draw and `endFrame` run in one synchronous render on the GUI thread, so a close cannot come between them. The test closes before the render and during the conversion.
 - The swap chain of this test has the transfer-source flag; the production swap chain does not. Qt 6.12 D3D11 ignores the flag; Vulkan adds `VK_IMAGE_USAGE_TRANSFER_SRC_BIT`.
 - DXGI and Vulkan have no call that reads HDR metadata back. The metadata check covers the structure at the native call, not the swap chain or the wire.
-- The test makes the `QGuiApplication` on a test thread and sets `QT_D3D_NO_VBLANK_THREAD`, as the [test host](qt.md#test-host) does.
+- The test makes the `QGuiApplication` on a test thread.
 
 Run with `cargo nextest run -p nitpick-app --test qrhi_swap_chain --run-ignored only`. On Windows, the Vulkan test needs `VULKAN_SDK` at build time, as the [QRhi readback](#qrhi-readback) tests do.
 
@@ -499,6 +499,8 @@ Results: Windows 11 build 26200, Qt 6.12.0, debug build, NVIDIA GeForce RTX 5090
 | Vulkan (Windows) | as in the record table; `VK_EXT_hdr_metadata` available | pass |
 
 A one-time mutation check on D3D11 moved the drawn origin down by one row. The first readback then differed in all 8294400 pixels.
+
+These results are from the earlier render trigger (`requestUpdate` with `QT_D3D_NO_VBLANK_THREAD=1`). With the [timer render trigger](qt.md#render-trigger), the D3D11 test ran only with HDR off, with the format and pixel checks removed for that run: the delayed submission, rapid replacement and out-of-date checks passed.
 
 **Not verified:** Metal on macOS; Vulkan on Linux; the record and the warning of a fallback swap chain (HDR off); a real device loss, out-of-date swap chain or resize.
 
