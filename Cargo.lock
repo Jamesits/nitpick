@@ -2540,6 +2540,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitpick-model"
+version = "0.1.0"
+dependencies = [
+ "nitpick-compare",
+ "nitpick-fixtures",
+ "nitpick-profile",
+]
+
+[[package]]
 name = "nitpick-profile"
 version = "0.1.0"
 dependencies = [

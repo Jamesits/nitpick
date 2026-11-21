@@ -17,6 +17,7 @@ import hashlib
 from fractions import Fraction as Q
 
 import icc
+import model
 import reference as ref
 import transforms
 
@@ -281,23 +282,28 @@ def patched(base, pid):
     return lambda offset: bytes(malform(pid, bytearray(data), pos, offset))
 
 
+# The `mhc2` set, by profile ID.
+MHC2_SET = {
+    "mhc2_identity": Mhc2(IDENTITY, IDENTITY_LUT),
+    "mhc2_matrix": Mhc2(MATRIX, IDENTITY_LUT),
+    "mhc2_lut": Mhc2(IDENTITY, LUT_256),
+    "mhc2_combined": Mhc2(MATRIX, LUT_256),
+    "mhc2_swap_rg": Mhc2(rgb_action_to_xyz(SWAP_RG, "bt709"), IDENTITY_LUT, (SWAP_RG, "bt709")),
+}
+# Valid adapter cases with ordinary data, by profile ID.
+MHC2_VALID = {
+    "mhc2_signed": Mhc2(SIGNED_MATRIX, SIGNED_LUT),
+    "mhc2_zero_matrix_offset": Mhc2(None, LUT_256),
+    "mhc2_zero_lut_count": Mhc2(MATRIX, ([], [], [])),
+    "mhc2_metadata_only": Mhc2(None, ([], [], [])),
+    "mhc2_lut_4096": Mhc2(IDENTITY, LUT_4096),
+}
+
+
 def cases():
     """`(id, use, display, tags, data_order, mhc2 expectation)` in manifest order."""
     srgb = SRGB_DISPLAY
-    mhc2 = {
-        "mhc2_identity": Mhc2(IDENTITY, IDENTITY_LUT),
-        "mhc2_matrix": Mhc2(MATRIX, IDENTITY_LUT),
-        "mhc2_lut": Mhc2(IDENTITY, LUT_256),
-        "mhc2_combined": Mhc2(MATRIX, LUT_256),
-        "mhc2_swap_rg": Mhc2(rgb_action_to_xyz(SWAP_RG, "bt709"), IDENTITY_LUT, (SWAP_RG, "bt709")),
-    }
-    valid = {
-        "mhc2_signed": Mhc2(SIGNED_MATRIX, SIGNED_LUT),
-        "mhc2_zero_matrix_offset": Mhc2(None, LUT_256),
-        "mhc2_zero_lut_count": Mhc2(MATRIX, ([], [], [])),
-        "mhc2_metadata_only": Mhc2(None, ([], [], [])),
-        "mhc2_lut_4096": Mhc2(IDENTITY, LUT_4096),
-    }
+    mhc2, valid = MHC2_SET, MHC2_VALID
     out = []
     for pid in ("ordinary_srgb", "ordinary_p3_gamma22"):
         d = DISPLAYS[pid]
@@ -351,7 +357,12 @@ def build():
     files["icc_truncated.icc"] = truncated_profile(files["mhc2_identity.icc"])
     entries.append(("icc_truncated", "adapter", None, error("invalid_profile")))
 
-    manifest = {"frame_metadata": FRAME_METADATA, "profiles": [], "transforms": transforms.cases(DISPLAYS)}
+    manifest = {
+        "frame_metadata": FRAME_METADATA,
+        "profiles": [],
+        "transforms": transforms.cases(DISPLAYS),
+        "model": model.cases({**MHC2_SET, **MHC2_VALID}),
+    }
     for pid, use, display, mhc2 in entries:
         data = files[f"{pid}.icc"]
         manifest["profiles"].append({

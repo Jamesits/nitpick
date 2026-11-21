@@ -1,0 +1,21 @@
+[package]
+name = "nitpick-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Explicit HDR display model: source decode, MHC2 matrix and LUT, wire encoding and quantization"
+publish = false
+
+# No dependency on `nitpick-core` or `nitpick-profile`: the model takes
+# owned calibration values, so it needs neither the conversion code that it
+# checks nor the Little CMS build.
+[dependencies]
+nitpick-compare = { path = "../nitpick-compare" }
+
+[dev-dependencies]
+nitpick-fixtures = { path = "../nitpick-fixtures" }
+nitpick-profile = { path = "../nitpick-profile" }
+
+[lints]
+workspace = true

@@ -4,7 +4,7 @@
 
 This design tests each output path in [Output drivers](overview.md): QRhi HDR10, QRhi FP16, and browser PNG at both input depths. It covers Windows, macOS and Linux. It also defines tests for display calibration and physical output.
 
-**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts), the frame marker, frame acceptance and region selection of [Timing and frame identity](#timing-and-frame-identity) exist with synthetic-capture tests. The [reference metric](#reference-metric) and the per-case limits of [Pass criteria](#pass-criteria) exist in `nitpick-compare` with unit tests; no runner uses them yet. The offscreen draw of [QRhi readback](#qrhi-readback) and the [swap-chain checks](#swap-chain-checks) pass on D3D11 and on Vulkan, on Windows only. The QRhi host has the [Windows capture adapter](#windows-graphics-capture-adapter); the browser host has no capture adapter. No host has an artifact directory. The macOS and Linux capture adapters and the display model are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
+**Status:** partly implemented. The core has conversion tests in `crates/nitpick-core/src/output_tests.rs`. The [shared fixtures](#shared-fixtures), the [profile fixtures](#profile-fixtures) and their reader exist. Only the command-line process tests in [browser integration](#browser-integration) compare production output with them. The real client page runs in browser engines on Windows only. The common driver interface, the QRhi and browser drivers and the command-line host exist with their unit tests. The [profile adapter](#mhc2-profile-adapter) in `nitpick-profile` and its [conventional ICC transforms](#conventional-icc-transforms) pass the profile fixtures on Windows only. The [test-host protocol](#host-boundary) runs in both hosts, on Windows only. The [capture interface and artifacts](#capture-interface-and-artifacts), the frame marker, frame acceptance and region selection of [Timing and frame identity](#timing-and-frame-identity) exist with synthetic-capture tests. The [reference metric](#reference-metric) and the per-case limits of [Pass criteria](#pass-criteria) exist in `nitpick-compare` with unit tests; no runner uses them yet. The offscreen draw of [QRhi readback](#qrhi-readback) and the [swap-chain checks](#swap-chain-checks) pass on D3D11 and on Vulkan, on Windows only. The QRhi host has the [Windows capture adapter](#windows-graphics-capture-adapter); the browser host has no capture adapter. No host has an artifact directory. The [display model](#model-order-and-domain) in `nitpick-model` passes its reference cases; it has no OS-dependent code. The macOS and Linux capture adapters are not implemented. No device results are claimed here. The [output driver plan](../../plan/output_driver.md) lists the driver changes needed before those tests.
 
 Unit tests check calculations, bytes and state transitions without a GPU or display. GPU, compositor, driver and probe tests are integration tests. Keep their results separate. A unit test cannot certify Windows calibration, browser HDR output or panel light.
 
@@ -73,6 +73,7 @@ The following rules come from the linked Microsoft documents. Device behaviour s
 | Comparison code | module of `nitpick-test-host`; separate crate | The crate `nitpick-compare`, without a `nitpick-core` dependency. The reference cannot then share the conversion code that it checks. |
 | Comparison limits | derived at run time from the submitted values; frozen in the fixtures | Frozen in the fixtures by the generator. A run cannot change them, and a regression of the submitted values cannot widen them. |
 | Display model | ICC transform alone; explicit HDR model with library support | Explicit HDR model. Nitpick controls units, stage order, transfer functions and clipping; see [Colour library boundary](#colour-library-boundary). |
+| Display model crate | module of `nitpick-profile`; separate crate | The crate `nitpick-model`. It takes owned calibration values, so it does not need the Little CMS build, and the IDD state replay can use it too. It uses the transfer functions and matrices of `nitpick-compare`; both are reference code, not production conversion code. |
 | IDD dependency | required for unit tests; optional lab tool | Optional lab tool. Signing and HDR hardware must not block normal CI. |
 | Browser automation | screenshots as an HDR reference; protocol tests and qualified OS capture | Protocol tests on all hosts; HDR checks only on a qualified engine and OS. |
 | Pending frame at a disconnect or a display change | report a cancellation; report the driver error; accept both | The driver error. The state fixtures expect an error, and the result does not depend on the order in which the host sees the driver result and the change. |
@@ -140,7 +141,7 @@ Convert XYZ to BT.2020 linear RGB, then encode the requested input codes. A red 
 
 ### Profile fixtures
 
-The ICC profiles and `manifest.json` are in `tests/fixtures/profile/`. The generator in `tests/reference/` (`icc.py`, `profiles.py`, `transforms.py`) writes them together with the output fixtures. It serializes the bytes itself; it does not use Little CMS or nitpick code. The `profile` module of the `nitpick-fixtures` crate reads the manifest and checks each file against the manifest size and SHA-256. The manifest holds only data with a programmatic use: case ID, file, use, hash, expected values, expected adapter errors and the [conventional transform cases](#conventional-icc-transforms). The generator source documents each case.
+The ICC profiles and `manifest.json` are in `tests/fixtures/profile/`. The generator in `tests/reference/` (`icc.py`, `profiles.py`, `transforms.py`, `model.py`) writes them together with the output fixtures. It serializes the bytes itself; it does not use Little CMS or nitpick code. The `profile` module of the `nitpick-fixtures` crate reads the manifest and checks each file against the manifest size and SHA-256. The manifest holds only data with a programmatic use: case ID, file, use, hash, expected values, expected adapter errors, the [conventional transform cases](#conventional-icc-transforms) and the [display model cases](#model-order-and-domain). The generator source documents each case.
 
 Every matrix, curve and luminance value is an exact rational, defined before serialization. The manifest stores two forms of each stored value:
 - `intended`: the binary64 value nearest to the rational.
@@ -715,20 +716,50 @@ The generator does not accept a value that has no inverse in the stored curve: a
 
 ### Model order and domain
 
-For a source in a known colour space, perform source transfer decode and scale conversion first. With column vectors:
+The crate `nitpick-model` has the model. It is portable test support: it has no OS, GUI or Little CMS dependency, and it takes owned values. Its transfer functions and primary matrices come from `nitpick-compare` (`colour.rs`). `Model::new` takes three values, without defaults:
+- `Source`: primaries with their white, and the encoding: linear with the cd/m² of 1.0 (scRGB: 80), PQ, or SDR with its transfer and the cd/m² of its white.
+- `Calibration`: the 3×3 XYZ matrix and optional channel LUTs. For MHC2, use the left 3×3 of the stored matrix (`Mhc2::xyz_matrix`) and the stored LUTs, unchanged.
+- `Wire`: primaries with their white, the encoding (PQ, or SDR with its transfer and white), and the depth (1 to 16 bits).
 
-$$
-XYZ=M_{src\to XYZ}\,RGB_{src,linear},\qquad
-RGB_{wire,linear}=M_{XYZ\to wire}\,A_{MHC2}\,XYZ.
-$$
+`Model::predict` gives each stage of one pixel. With column vectors, $M$ the SMPTE RP 177 matrix of the primaries and their white, and $A$ the calibration matrix:
+1. Decode the source to linear RGB in cd/m². A PQ or SDR signal outside 0 to 1 is an error.
+2. $XYZ = M_{src}\,RGB_{src}$.
+3. $RGB_{wire} = M_{wire}^{-1}\,A\,XYZ$, in cd/m².
+4. Encode the wire transfer function and clip the signal to 0 to 1. PQ uses the inverse EOTF in absolute units: a value at or below 0 gives signal 0, a value above 10000 cd/m² gives 1. SDR divides by the wire white, clips to 0 to 1 and encodes.
+5. Apply the LUT of each channel in the encoded domain: entry $k$ of $n$ is the output for $k/(n-1)$, with linear interpolation between entries. The LUT input is in 0 to 1 after step 4. Clamp the result to 0 to 1.
+6. Quantize to a full-range code: $\lfloor (2^d - 1)\,v + 1/2 \rfloor$.
 
-Then encode the wire transfer function and apply the profile LUT in that encoded domain. HDR10 uses the PQ inverse EOTF in absolute units. SDR needs an explicit target transfer and reference white. The target primaries describe wire encoding, not the measured panel primaries. Do not insert an ICC D50 adaptation into the MHC2 matrix path without a separate documented requirement.
+The result keeps the source and wire luminance, the signal, the LUT result before and after the clamp, the code, and the clip state of steps 4 and 5 for each channel.
 
-For the test model, interpolate uniformly spaced LUT entries linearly. Clamp LUT input to its domain and clamp output to the normalized wire range. For PQ, define nonpositive luminance as code zero and luminance above 10000 cd/m² as peak before LUT lookup. Round to nearest integer at the selected wire depth. Keep float results before quantization too. **Model limit:** these clipping, interpolation and rounding rules are explicit ideal choices; they do not establish GPU internal precision, clipping order or dithering. First validate in-domain patches, then characterize boundary cases separately.
+Rules and their reasons:
+- The target primaries describe the wire encoding, not the measured panel primaries. There is no D50 adaptation in the MHC2 matrix path.
+- **No curve stage other than the LUT.** The model has no ICC TRC, inverse TRC, `vcgt` or rendering-intent stage. An MHC2 LUT already holds the calibration of the wire curve; another curve stage applies it two times. Conventional ICC adaptation stays in [Conventional ICC transforms](#conventional-icc-transforms).
+- **No NVAPI LUT construction.** The model does not include the NVAPI SDR LUT construction or its 8-bit sample optimization. They belong to a vendor driver path, not to the Windows MHC2 contract.
+- The model does not use the MHC2 minimum and peak luminance. They do not change the matrix or the LUT. OS tone mapping from these values is not modelled.
+- The SDR transfer and white are always explicit. The model has no default SDR curve: sRGB and gamma 2.2 are distinct inputs. **Unverified:** the SDR transfer and white of the Windows SDR or SDR WCG wire on a runner. A measurement or the runner's wire contract must give them.
+- **Deviation from ST 2084:** the PQ inverse EOTF of 0 is $c_1^{m_2} \approx 7.3 \cdot 10^{-7}$, not 0. The model gives signal 0 for 0 cd/m², so it is not continuous at 0. The step is below 0.05 of a 16-bit code and changes no code.
+- The sRGB curve uses the published IEC 61966-2-1 knees: 0.04045 for decoding and 0.0031308 for encoding. They do not map exactly to each other.
+- Codes are full range. Range conversion, RGB-to-YCbCr conversion, chroma subsampling and dithering are not in the model.
+- `Lut` accepts 2 to 4096 entries per channel, all finite, of equal length. Entries outside 0 to 1 stay; the result is clamped. The IDD affine column and scalar are not in `Calibration`.
+
+**Model limit:** these clipping, interpolation and rounding rules are explicit ideal choices. They do not show GPU internal precision, clipping order or dithering. A model pass shows only these calculations. First compare in-domain patches, then characterize boundary cases separately.
 
 Do not treat the full OS display path as only this model. Tone mapping, other colour adjustments, output range conversion, RGB-to-YCbCr conversion, subsampling and dithering can be present. Model these only when their parameters are known. Otherwise limit the comparison to the defined boundary.
 
-Tests check identity, a known XYZ gain, an asymmetric cross-channel matrix, channel-specific LUTs and a combined case whose result changes if the order is reversed. Check LUT knots, midpoints and endpoints. Use an independent vector calculation for each expected value. A model pass certifies these calculations only.
+**Expected values.** `model.py` in `tests/reference` calculates them independently: exact rational matrices, the stored 15.16 calibration values decoded exactly, mpmath transfer functions and the stored binary64 inputs. A linear source stays exact up to the wire encoding, so a value on a clip limit stays on it. The `model` list of the profile manifest has the cases. Each case gives the calibration (a profile ID, or an inline matrix and LUTs), the source, the wire, the inputs and the expected stages. The generator stops if a code is within $10^{-6}$ of a rounding midpoint, or if a wire component of a non-black input is within $10^{-9}$ (relative) of 0. A binary64 calculation cannot decide those results.
+
+| Cases | Check |
+|---|---|
+| `pq_identity` | `mhc2_identity`, scRGB to HDR10 (BT.2020 PQ, 10 bits): black, 1 to 10000 cd/m², above the PQ peak, the BT.709 primaries, a colour outside BT.2020 |
+| `pq_xyz_gain` | An inline XYZ gain of 1/2 on the same inputs; the generator test checks that the wire luminance is half that of `pq_identity`. |
+| `pq_matrix` | `mhc2_matrix`: asymmetric matrix with unequal row sums |
+| `pq_lut`, `pq_signed`, `pq_lut_4096` | Channel LUTs of 256, 3 and 4096 entries, PQ to PQ with the same primaries: knots, midpoints and endpoints. `pq_signed` has entries below 0 and above 1, so the output clamp occurs. |
+| `pq_combined`, `sdr_srgb_combined` | `mhc2_combined`. The generator test checks that the LUT before the matrix gives other codes. |
+| `sdr_srgb_identity`, `sdr_gamma22_identity`, `sdr_srgb_white_200` | scRGB to an SDR BT.709 wire at 12 bits, near black and above white. The generator test checks that sRGB and gamma 2.2 give different codes near black. |
+| `sdr_srgb_swap_rg` | `mhc2_swap_rg` on an sRGB wire: red gives green, green gives red. The generator test checks that a transposed matrix, or the XYZ matrix applied to RGB, gives other codes. |
+| `srgb_source_to_pq`, `gamma22_source_to_pq` | SDR sources at a white of 203 cd/m² to HDR10 |
+
+`lib_tests.rs` reads each profile calibration through the profile adapter (`read_mhc2`) and compares each stage. The limit for a float is $10^{-12}$ times the largest component of the expected vector, and at least $10^{-12}$; codes must be equal. A clip state is compared only where the expected value before clipping is farther than that limit from each clip limit: on a limit, f64 roundoff can put the value on either side, with the same result after clipping. The unit tests check the LUT, the transfer functions and the errors with values calculated by hand. All pass on Windows; the model has no OS-dependent code. The `nitpick-model` tests read MHC2 through `nitpick-profile`, so they need the C compiler of its Little CMS build.
 
 ### Instrumented Windows IDD
 
@@ -824,6 +855,12 @@ The profile adapter build compiles the bundled Little CMS sources, so it needs a
 
 ```text
 cargo nextest run -p nitpick-profile
+```
+
+The display model tests also read the profile fixtures through the adapter:
+
+```text
+cargo nextest run -p nitpick-model
 ```
 
 For physical QRhi setup, use [QRhi measurement settings](qt.md#testing). For iPad setup, use [Browser measurement settings](browser.md#testing). Record brightness, ambient-light controls, Night light/Night Shift/True Tone, accessibility filters, profile association, SDR white, output depth/range, display mode and background patch level. Hold them fixed. Use large interior patches for probes; record patch area and average picture level because local dimming and automatic brightness can change results.

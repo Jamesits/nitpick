@@ -390,17 +390,6 @@ Open questions:
 - As a standard user, system-wide association calls returned success without a change, and the assignment failed at readback with `StateConflict`. Must the backend report `PermissionDenied` instead, for example by checking the process token before a system-wide write?
 - `ColorProfileGetDisplayList` returned no profile while associations existed, so the backend reads undocumented registry values. Is there a documented read of both lists, or a Windows build where the function works?
 
-### 50. Add the explicit HDR display model
-
-Requires: 36, 43.
-
-TODO:
-
-- Implement [Model order and domain](../design/output_driver/testing.md#model-order-and-domain) as portable test support. Require source and wire spaces and luminance scales. Keep conventional ICC adaptation separate from MHC2 evaluation.
-- Apply the extracted MHC2 LUT directly after wire transfer encoding. Do not add an inverse ICC TRC or `vcgt` stage to a LUT that already contains that calibration. Keep NVAPI's SDR LUT construction and its 8-bit sample optimization out of this model.
-- Verify identity, XYZ gain, asymmetric matrices, channel LUTs and an order-sensitive combined case against independent vectors. Check knots, interpolation, clipping and quantization; retain pre-quantization floats. Report these as ideal model results, not GPU behaviour.
-- Use the RGB exchange fixture to detect a wrong matrix basis or transpose. Test sRGB and gamma 2.2 as distinct SDR transfers, including near-black values. Keep the runner's actual SDR transfer unverified until measured or established by its wire contract.
-
 ### 51. Qualify capture adapters and compare output
 
 Requires: 32, 35, 36, 38, 48, 63, plus the applicable adapter: 40 or 41 (the Windows adapter exists). Windows profile comparisons also require 43, 50.
@@ -436,6 +425,7 @@ Requires: 50.
 TODO:
 
 - Add portable callback records and state replay from [Instrumented Windows IDD](../design/output_driver/testing.md#instrumented-windows-idd). Model enable flags, the scalar, affine matrix, LUT, transform generation and HDR metadata selection.
+- Extend the [display model](../design/output_driver/testing.md#model-order-and-domain) for the IDD record: `Calibration` in `nitpick-model` has only a 3×3 matrix and LUTs. Add the affine column and the scalar as a separate IDD stage, so that the MHC2 path keeps ignoring the stored fourth column. Verify with independent vectors from the generator.
 - Verify disabled stages, non-unit scalar, nonzero affine terms, replacement, reset and new/previous/default metadata. Reject previous metadata before any exists. Keep the active IDD affine column distinct from the ignored profile matrix column; avoid scaling HDR twice with SDR white.
 
 ### 53. Qualify the optional console IDD runner
@@ -465,6 +455,7 @@ Requires: 43, 44, 48, 50, 54.
 Open questions:
 
 - Does the selected runner load each new profile without stale calibration? MHC2 activation and legacy gamma-ramp loader settings are separate; qualify the actual transition on this runner.
+- Which SDR transfer (sRGB or gamma 2.2) and SDR white does the runner's SDR and SDR WCG wire use? The display model takes both explicitly and has no default. Get them from the committed wire colour space and SDR white of the IDD, or from a measurement, before an SDR comparison.
 
 TODO:
 
@@ -478,7 +469,7 @@ Requires: 28, 33, 36, 43, 48, 49, 50. Add device jobs after their qualification 
 
 TODO:
 
-- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display. Include the `nitpick-cli` process and dependency-graph tests on Linux and macOS without a display server or a window session; they passed only on Windows in a desktop session. Run the `nitpick-profile` adapter tests on each OS; the job needs a C compiler and must not set `LCMS2_LIB_DIR`. Build and unit-test `nitpick-webview` in a separate job on each OS; on Linux it needs the WebKitGTK and GTK development packages, and it has been built only on Windows.
+- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display. Include the `nitpick-cli` process and dependency-graph tests on Linux and macOS without a display server or a window session; they passed only on Windows in a desktop session. Run the `nitpick-profile` adapter tests and the `nitpick-model` tests on each OS; the job needs a C compiler and must not set `LCMS2_LIB_DIR`. The model tests passed only on Windows. Build and unit-test `nitpick-webview` in a separate job on each OS; on Linux it needs the WebKitGTK and GTK development packages, and it has been built only on Windows.
 - Run native device query and profile contract tests with injected calls on each target OS. Keep actual profile mutations in selected-device integration jobs. Verify routing and result aggregation with injected pass, fail and unavailable results. A required device losing qualification must fail; an optional unavailable device must not count as HDR coverage. Record conversion, encoding, acknowledgement, capture and settle times separately. Fail bounded-wait and queue-growth checks independently of pixel results.
 
 ### 57. Record physical output qualification

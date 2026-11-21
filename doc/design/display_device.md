@@ -32,7 +32,7 @@ graph LR
 | `nitpick-core::device` | Trait, device identity, capabilities, mode state, profile requests, saved state and errors | Rust data types, with optional `serde` forms; no OS, GUI, executor or colour library |
 | `nitpick-display` | Device and capability enumeration, display setup read, native profile changes, readback and restoration, recovery-record text form, recovery store, profile run and recovery; fake backend behind the feature `fake` | Core plus native bindings selected for the target OS |
 | Host or test runner | Device selection, store directory, worker lifetime, setup recheck events and test sequence | Core and the selected implementations |
-| Profile test support | ICC contents, MHC2 extraction and display model | Little CMS through its separate adapter, `nitpick-profile` |
+| Profile test support | ICC contents and MHC2 extraction; the display model | Little CMS through its separate adapter, `nitpick-profile`; the model in `nitpick-model` takes owned values and has no Little CMS dependency |
 
 The core does not import `nitpick-display`. The browser server and optional webview do not import it. The CLI exposes device control as an optional build feature, so a browser-only host still builds and runs without a local display service. The Qt host uses the same native implementations; profile changes do not pass through its C++ presentation bridge.
 

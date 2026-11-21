@@ -32,6 +32,95 @@ pub struct ProfileManifest {
     pub frame_metadata: MetadataRequest,
     pub profiles: Vec<ProfileEntry>,
     pub transforms: Vec<TransformCase>,
+    pub model: Vec<ModelCase>,
+}
+
+/// A case of the explicit HDR display model. The generator computes
+/// `expected` from the stored calibration values and the stored `input`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ModelCase {
+    pub id: String,
+    pub calibration: ModelCalibration,
+    pub source: ModelSpace,
+    pub wire: ModelWire,
+    /// Source signals, or linear values for a linear source.
+    pub input: Vec<[f64; 3]>,
+    pub expected: Vec<ModelExpected>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ModelCalibration {
+    /// The MHC2 values of a profile fixture, read through the adapter.
+    Profile { profile: String },
+    /// An XYZ matrix and channel LUTs; `None` selects identity LUTs.
+    Inline {
+        matrix: [[f64; 3]; 3],
+        lut: Option<[Vec<f64>; 3]>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ModelSpace {
+    /// `bt709` or `bt2020`, with the D65 white.
+    pub primaries: String,
+    pub encoding: ModelEncoding,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ModelWire {
+    #[serde(flatten)]
+    pub space: ModelSpace,
+    /// Bits per full-range code.
+    pub depth: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModelEncoding {
+    Linear {
+        nits_per_unit: f64,
+    },
+    Pq,
+    Sdr {
+        transfer: SdrTransfer,
+        white_nits: f64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SdrTransfer {
+    /// IEC 61966-2-1.
+    Srgb,
+    /// Pure power 2.2.
+    Gamma22,
+}
+
+/// Expected stages of one pixel; see the display model for each stage.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ModelExpected {
+    pub source_nits: [f64; 3],
+    pub wire_nits: [f64; 3],
+    pub signal: [f64; 3],
+    pub lut: [f64; 3],
+    pub output: [f64; 3],
+    pub code: [u32; 3],
+    pub clip: ModelClip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ModelClip {
+    pub encode: [ClipState; 3],
+    pub output: [ClipState; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipState {
+    None,
+    Low,
+    High,
 }
 
 /// A conventional ICC transform with its expected output. The generator
