@@ -59,4 +59,33 @@ fn no_config_directory_saves_nothing() {
     let settings = Settings { path: None };
     assert_eq!(settings.measurement_delay_ms(), 1000);
     assert!(settings.set_measurement_delay_ms(5).is_err());
+    assert!(settings.set_browser(8080, "10.0.0.2").is_err());
+}
+
+#[test]
+fn browser_settings_persist_next_to_the_delay() {
+    let (_dir, path) = file();
+    assert_eq!(Settings::at(&path).browser_port(), 0);
+    assert_eq!(Settings::at(&path).browser_address(), "");
+    Settings::at(&path).set_measurement_delay_ms(30).unwrap();
+    Settings::at(&path).set_browser(8080, "10.0.0.2").unwrap();
+    let settings = Settings::at(&path);
+    assert_eq!(settings.browser_port(), 8080);
+    assert_eq!(settings.browser_address(), "10.0.0.2");
+    assert_eq!(settings.measurement_delay_ms(), 30);
+}
+
+#[test]
+fn invalid_browser_values_give_the_defaults() {
+    let (_dir, path) = file();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for text in [
+        r#"{"browserPort": 65536, "browserAddress": 5}"#,
+        r#"{"browserPort": -1, "browserAddress": null}"#,
+        r#"{"browserPort": "80"}"#,
+    ] {
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(Settings::at(&path).browser_port(), 0, "{text}");
+        assert_eq!(Settings::at(&path).browser_address(), "", "{text}");
+    }
 }

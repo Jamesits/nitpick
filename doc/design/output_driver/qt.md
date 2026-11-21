@@ -7,6 +7,7 @@ The QRhi driver shows test patterns in a borderless full-screen Qt window on a l
 ```mermaid
 graph LR
     L[launcher.rs] --> S[session.rs]
+    S -->|OutputDriver, service events| BR[browser.rs<br/>BrowserDriver, BrowserService]
     S -->|OutputDriver| Q[QrhiDriver<br/>qrhi_driver.rs]
     S -->|spawn_local| E[gui_executor.rs] -->|poll present| Q
     S -->|screen identities| R[device worker] -->|DeviceStates cache| Q
@@ -94,6 +95,29 @@ Measurement delay (contract: [Measurement delay](overview.md#measurement-delay))
 - A closed pattern window (Esc) cancels the delay. `submission.rs` counts window closes. The task reads the count after `open`, because `open` closes an earlier window. A close after that count cancels the delay, also if it arrives before the task resumes after the acknowledgement.
 - The timer is a single-shot `Qt::PreciseTimer`. A coarse Qt timer can fire up to 5 % early. Tests replace the timer with a controlled clock.
 - The launcher saves the delay in the `measurementDelayMs` key of `launcher.json` in the OS configuration directory (`dirs::config_dir()/nitpick`). A missing or invalid value gives the default. The file is written to a temporary file and renamed. QSettings was not used, because a JSON file can be tested without a Qt application or a registry.
+
+### Browser output in the launcher
+
+The launcher also hosts the [browser driver](browser.md). The "Output" selection selects the driver: "Local screen (QRhi window)" or "Browser (local or remote)". The display list shows only the displays of the selected driver. A change of the selection is a display change, see [Host lifecycle](#host-lifecycle). The browser path uses the same presentation steps and measurement delay, without the device read. The depth list names the "16-bit PNG" for the browser.
+
+Service (`browser.rs`):
+- The service starts at the first selection of the browser output. It stays on until the launcher ends, also when the user selects the other output. After a failed start, the next selection tries again. The status line and the browser panel show the reason.
+- Without "Allow remote displays on this network", the service binds `127.0.0.1`. With it, the service binds the interface address that the user selects. The list has the addresses of the network interfaces: IPv4 first, then IPv6, without loopback and without IPv6 link-local addresses (a URL with a zone index does not work in browsers). The launcher reads the list at the first selection and at "Restart service".
+- Remote displays are off at each launcher start. The launcher saves the port in `browserPort` (0: the OS selects a port) and the last remote address in `browserAddress` of `launcher.json`. The pairing code is random for each connection.
+- A change of the remote setting or the address, and "Restart service", start the service again. A restart ends the client session and the pending browser presentation ("Cancelled: the browser service restarted"), and closes the surface.
+- The old service stops on a helper thread, because the stop waits up to 1 s for open connections. Counter-intuitive: a restart on the same address and a fixed port waits for this stop on the GUI thread. Without this wait, each second restart on a fixed port failed to bind on Windows (os error 10048). With a connected page, the wait was 3 ms or less.
+- The browser panel shows the URL, the pairing code while a connection waits for authentication, and the client state.
+
+Service events:
+- A `gui_executor.rs` task forwards the service events as launcher events. The launcher gives each event back to the session in a separate Qt event-loop job, because the session belongs to the `QObject` and a task cannot borrow it. Each event has the start count of its service; an event of an earlier service does nothing.
+- `Ready`: the display list and the reference table read the client state again.
+- `ViewportChanged` of the display of the open surface and of the last request: the session ends the presentation or the delay and keeps the request. This applies also after readiness. At the next `Ready` of the display, the session shows the request again at the new size. A new request, a display change, a disconnect or a restart drops the kept request.
+- `Disconnected`: the session ends the presentation or the delay and closes the surface. The client goes out of the display list.
+- `Stopped`: as a restart; the panel shows the error.
+
+The status of an ended presentation is the error that the driver gives for the change: "Error: display disconnected" or "Error: platform error: the browser viewport changed; open the surface again". Thus the status does not depend on whether the driver result or the service event comes first. An ended delay gives "Cancelled: the browser disconnected" or "Cancelled: the browser viewport changed".
+
+The session keeps two browser drivers on the same client state, as the [test host](#test-host) does: one opens and presents, the other answers `displays` and the reference table while a presentation borrows the first. The reference table uses the `query` of the client, so it has the browser limits and the "clipped" marks of [Code to PNG sample](browser.md#code-to-png-sample).
 
 ### Output report
 
@@ -276,6 +300,9 @@ Automatic light levels use $D / (2^n - 1)$ as full-range PQ for every input enco
 | `DisplayId` key | Qt screen index; native screen name | native screen name | The index changes when another screen is added or removed. The native name is the input of the device mapping. |
 | Device report timing | query on the GUI thread; refresh on a worker into a shared cache | worker into a shared cache | Native queries can block. `query` and `open` stay synchronous, as the trait requires. The cache is outside the driver borrow, so the reference table can read it while a presentation holds the driver. |
 | Lifecycle location | in the `QObject`; a separate Rust type | separate type (`session.rs`) | Tests run it with a simulated event loop, a fake window and held workers, without Qt. |
+| Browser service start | at launcher start; at the first selection of the browser output | first selection | No listening socket until the user wants browser output. |
+| Remote displays | saved setting; off at each launcher start | off at each start | A listener on a network interface needs an explicit user action. The address is saved, so that the action is one click. |
+| Service events to the session | handle in the forward task; post each event to the `QObject` | post to the `QObject` | The session belongs to the `QObject`. The handling can drop the presentation task and start a new one. |
 | X11 EDID source | Qt private `QXcbScreen`; `xcb-randr` in C++; `x11rb` in Rust | `x11rb` | Pure Rust: no extra C library, and the code compiles on every OS. Cost: a second X connection, which follows only `DISPLAY`. |
 
 ## Testing
@@ -318,6 +345,24 @@ Results on Windows 11 (build 26200), Qt 6.12.0, D3D11, debug build. Test display
 Counter-intuitive: a Windows topology change blocks the Qt GUI thread for 0.7 to 1.2 s while Qt updates its screens. A "Show pattern" request in this time runs after the refresh, so the screen change does not cancel it.
 
 **Unverified:** these checks on macOS and Linux. A screen change during the nested event loop of `open`, which makes the launcher post the refresh again; on Windows, `open` was too short for this.
+
+Browser output checks use the same script and `WM_NULL` probe. Playwright 1.64.1 drives Edge 157.0.4341.60 (channel `msedge`, headless and headed runs) as the page. The page types the code that the launcher shows. Playwright changes the viewport size and holds a frame response with a route. Results on Windows 11 (build 26200), debug build; all checks gave the same result headless and headed:
+
+| Check | Result |
+|---|---|
+| Browser output selected | URL `http://127.0.0.1:<port>/`, client state "Waiting for a browser." |
+| Pairing | The code shows until authentication. Then "Edge at 127.0.0.1" is in the display list. |
+| Reference table of the client | Size 1280×720, "Output: 16-bit PNG, cICP", the browser warnings and "clipped" marks (BT.2111 PQ narrow range) |
+| Delay 1500 ms | "Ready after delay" 1.504 s after "Waiting". The status has the SDR preview and full-screen layout warnings, "Pixel-exact layout" and the PNG clipping. Note: Playwright starts Chromium with `--force-color-profile=srgb`, so the page reports `dynamic-range: standard`. |
+| Viewport 1280×720 to 1024×600 during a 3000 ms delay | "Cancelled: the browser viewport changed", then a frame at 1024×600 and "Ready after delay" 3.0 s after its "Waiting". Largest `WM_NULL` round trip 5.0 ms. |
+| Viewport change while the page holds the frame response | "Error: platform error: the browser viewport changed; open the surface again", then a frame at 1200×700. Largest round trip 0.4 ms. |
+| Page closed during the delay | "Cancelled: the browser disconnected"; no later status in 4 s |
+| Remote displays on, address 100.113.1.100 (the Ethernet address of the test computer) | URL with this address. A page on the same computer through this URL is "Edge at 100.113.1.100" and gets its frame. The old loopback URL refuses connections. |
+| Remote displays off | A loopback URL again; the remote session ends |
+| "Restart service" on fixed port 8765, three times without and three times with a connected page | Each restart binds. Largest round trip 3.3 ms. |
+| QRhi output after these checks | "Ready after delay"; Esc during the delay gives "Cancelled: the pattern window closed" |
+
+**Unverified:** a page on another device. The remote check used a page on the same computer, so it did not test the network path or a firewall. Full screen through the launcher, and these checks on macOS and Linux.
 
 ## Future enhancements
 

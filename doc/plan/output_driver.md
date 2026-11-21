@@ -30,12 +30,22 @@ TODO:
 
 ### 29. Connect browser output to the Qt launcher
 
-Requires: 17, 25, 28.
+Requires: 17 for the macOS and Linux checks.
+
+The launcher part and its checks are in [Browser output in the launcher](../design/output_driver/qt.md#browser-output-in-the-launcher) and [Running launcher checks](../design/output_driver/qt.md#running-launcher-checks). They passed on Windows with Edge on the same computer, also through the Ethernet address with remote displays on. The macOS and GNOME checks of items 16 and 17 were skipped for this work.
 
 TODO:
 
-- Add browser driver selection, service events, pairing display and the explicit remote-display setting. Populate clients from the service and use the existing host lifecycle and delay.
-- Verify local and remote browser sessions, URL reporting, warnings and reference marks. A disconnect during delay must cancel readiness. A viewport change must cancel old work, reopen and render at the new size without blocking Qt controls.
+- Run a remote session from another device on the network, for example Safari on an iPad: URL, pairing, the client name with the device address, a frame, the delay, and a disconnect and a rotation (viewport change) during the delay. On Windows, record whether the first bind of a network interface gives a Windows Defender Firewall prompt for the launcher, and what the user must allow. The launcher has no firewall handling.
+- Run the browser launcher checks on macOS and on GNOME 50 (Wayland and xcb). Use an event-loop probe of that OS in place of `WM_NULL`.
+- Select "Full screen" in a desktop browser page during a launcher session. Expect `ViewportChanged`, a cancelled delay and a frame at the full-screen size without the layout warning. Playwright full screen does not resize the OS window (see the page test notes in [Browser output driver testing](../design/output_driver/browser.md#testing)); use manual input or the webview shell.
+
+Open questions:
+
+- A restart on the same address and a fixed port waits on the Qt GUI thread for the stop of the old service, up to about 1 s with open connections (3 ms or less measured). Must the restart be asynchronous, with the start after the stop on a later event-loop job?
+- Remote displays are off at each launcher start; only the address is saved. Must the launcher save the remote setting?
+- After the user selects the other output, the browser surface stays open and the page keeps the last pattern. Must the launcher close the browser surface (the page then shows black)?
+- The launcher reads the interface addresses at the first selection of the browser output and at "Restart service". Must it follow network changes, for example a new DHCP address, without a user action?
 
 ### 30. Add the optional local webview process
 

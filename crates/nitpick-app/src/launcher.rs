@@ -1,6 +1,6 @@
 //! QML-facing launcher object: pattern catalogue, display list, reference
-//! tables and the "Show pattern" request. The lifecycle is in
-//! `session.rs`.
+//! tables, the browser service and the "Show pattern" request. The
+//! lifecycle is in `session.rs`.
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -13,23 +13,34 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[qproperty(QString, status)]
-        /// JSON array: `[{key, name, width, height}]`, from the last
-        /// `refreshDisplays`.
+        /// JSON array: `[{driver, key, name, width, height}]`: the screens
+        /// of the last `refreshDisplays`, then the browser clients.
         #[qproperty(QString, displays)]
-        /// Changes when new device reports arrive; the reference table
-        /// depends on it.
+        /// Changes when new device reports or browser client states
+        /// arrive; the reference table depends on it.
         #[qproperty(i32, device_revision, cxx_name = "deviceRevision")]
         /// Saved measurement delay in ms; see `saveMeasurementDelay`.
         #[qproperty(i32, measurement_delay, cxx_name = "measurementDelay")]
+        /// URL of the browser service; empty while it does not run.
+        #[qproperty(QString, browser_url, cxx_name = "browserUrl")]
+        /// Code for the browser that waits for authentication; empty
+        /// otherwise.
+        #[qproperty(QString, pairing_code, cxx_name = "pairingCode")]
+        /// Browser client state for the user.
+        #[qproperty(QString, browser_client, cxx_name = "browserClient")]
+        /// Saved TCP port of the browser service; 0: the OS selects one.
+        #[qproperty(i32, browser_port, cxx_name = "browserPort")]
+        /// Saved interface address for remote displays.
+        #[qproperty(QString, browser_address, cxx_name = "browserAddress")]
         type Launcher = super::LauncherRust;
 
         /// JSON object: `{patterns: [{id, label, description, encodings: [{id, label}]}],
-        /// depths: [{id, label}], primaries: [{id, label}]}`.
+        /// depths: [{id, label, browserLabel}], primaries: [{id, label}]}`.
         #[qinvokable]
         fn catalogue(&self) -> QString;
 
         /// Reference table for the native size of the display `display`
-        /// (a `key` of `displays`).
+        /// of `driver` (a `driver` and a `key` of `displays`).
         #[qinvokable]
         #[cxx_name = "referenceTable"]
         fn reference_table(
@@ -37,6 +48,7 @@ pub mod qobject {
             pattern: &QString,
             encoding: &QString,
             depth: &QString,
+            driver: &QString,
             display: &QString,
         ) -> QString;
 
@@ -52,10 +64,12 @@ pub mod qobject {
         #[cxx_name = "saveMeasurementDelay"]
         fn save_measurement_delay(self: Pin<&mut Self>, ms: i32);
 
-        /// Reads the device state of `display` on a worker, renders the
-        /// pattern at the pattern area size of a new full-screen window
-        /// and shows it, then waits `delay` ms. `metadata` is a JSON
-        /// object, see `request_from_json`. `status` follows each step.
+        /// `QRhi`: reads the device state of `display` on a worker,
+        /// renders the pattern at the pattern area size of a new
+        /// full-screen window and shows it. Browser: renders the pattern
+        /// at the client viewport and sends it. Then waits `delay` ms.
+        /// `metadata` is a JSON object, see `request_from_json`. `status`
+        /// follows each step.
         #[qinvokable]
         #[cxx_name = "showPattern"]
         fn show_pattern(
@@ -63,10 +77,25 @@ pub mod qobject {
             pattern: &QString,
             encoding: &QString,
             depth: &QString,
+            driver: &QString,
             display: &QString,
             metadata: &QString,
             delay: i32,
         );
+
+        /// Starts the browser service, or starts it again. Without
+        /// `remote`, it binds the loopback interface. With `remote`, it
+        /// binds `address`, so that other devices on the network can
+        /// connect. Saves `port`, and `address` with `remote`. A restart
+        /// ends the client session.
+        #[qinvokable]
+        #[cxx_name = "startBrowser"]
+        fn start_browser(self: Pin<&mut Self>, remote: bool, address: &QString, port: i32);
+
+        /// JSON array of the interface addresses for remote displays.
+        #[qinvokable]
+        #[cxx_name = "interfaceAddresses"]
+        fn interface_addresses(&self) -> QString;
     }
 
     impl cxx_qt::Threading for Launcher {}
@@ -77,7 +106,7 @@ use std::sync::Arc;
 
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
-use nitpick_core::driver::{ContentLightLevel, Hdr10Request};
+use nitpick_core::driver::{ContentLightLevel, DisplayId, Hdr10Request};
 use nitpick_core::metadata::MasteringPrimaries;
 use nitpick_core::output::SwapChainFormat;
 use nitpick_core::pattern::PatternKind;
@@ -85,15 +114,20 @@ use nitpick_core::signal::{BitDepth, D65, Encoding, Format};
 use serde_json::{Value, json};
 
 use crate::delay::delay_from;
-use crate::display;
 use crate::session::{Event, Session, ShowRequest};
 use crate::settings::Settings;
+use crate::{browser, display};
 
 pub struct LauncherRust {
     status: QString,
     displays: QString,
     device_revision: i32,
     measurement_delay: i32,
+    browser_url: QString,
+    pairing_code: QString,
+    browser_client: QString,
+    browser_port: i32,
+    browser_address: QString,
     settings: Settings,
     /// Created at the first request, which gives the Qt thread handle.
     session: Option<Session>,
@@ -108,6 +142,11 @@ impl Default for LauncherRust {
             device_revision: 0,
             // Saved delays fit a Qt timer interval, see `delay_from`.
             measurement_delay: i32::try_from(settings.measurement_delay_ms()).unwrap_or(i32::MAX),
+            browser_url: QString::default(),
+            pairing_code: QString::default(),
+            browser_client: QString::default(),
+            browser_port: i32::from(settings.browser_port()),
+            browser_address: QString::from(&settings.browser_address()),
             settings,
             session: None,
         }
@@ -122,6 +161,20 @@ fn parse(
     let encoding: Encoding = encoding.to_string().parse()?;
     let depth: BitDepth = depth.to_string().parse()?;
     Ok((pattern.to_string().parse()?, Format::new(encoding, depth)))
+}
+
+/// The display `key` of the driver `driver`: a `driver` and a `key` of
+/// `displays`.
+fn display_id(driver: &QString, key: &QString) -> Result<DisplayId, String> {
+    let key = key.to_string();
+    match driver.to_string().as_str() {
+        display::DRIVER => Ok(display::display_for_key(key)),
+        browser::DRIVER => Ok(DisplayId {
+            driver: browser::DRIVER,
+            key,
+        }),
+        other => Err(format!("unknown output driver `{other}`")),
+    }
 }
 
 /// Parses the launcher JSON
@@ -186,9 +239,19 @@ impl qobject::Launcher {
             SwapChainFormat::Hdr10 => "10-bit (HDR10 swap chain, exact codes)",
             SwapChainFormat::ScRgb => "12-bit (FP16 scRGB swap chain)",
         };
+        let depths: Vec<_> = BitDepth::ALL
+            .iter()
+            .map(|&d| {
+                json!({
+                    "id": d.id(),
+                    "label": depth_label(d),
+                    "browserLabel": format!("{} (16-bit PNG)", d.label()),
+                })
+            })
+            .collect();
         let value = json!({
             "patterns": patterns,
-            "depths": id_labels(&BitDepth::ALL, BitDepth::id, depth_label),
+            "depths": depths,
             "primaries": id_labels(
                 &MasteringPrimaries::ALL,
                 MasteringPrimaries::id,
@@ -203,12 +266,15 @@ impl qobject::Launcher {
         pattern: &QString,
         encoding: &QString,
         depth: &QString,
+        driver: &QString,
         display: &QString,
     ) -> QString {
-        let text = match (parse(pattern, encoding, depth), &self.session) {
+        let parsed = parse(pattern, encoding, depth)
+            .and_then(|(kind, format)| Ok((kind, format, display_id(driver, display)?)));
+        let text = match (parsed, &self.session) {
             (Err(e), _) => e,
             (Ok(_), None) => "No display selected.".into(),
-            (Ok((kind, format)), Some(s)) => s.reference_table(kind, format, &display.to_string()),
+            (Ok((kind, format, id)), Some(s)) => s.reference_table(kind, format, &id),
         };
         QString::from(&text)
     }
@@ -220,11 +286,18 @@ impl qobject::Launcher {
             let _ = self.qt_thread().queue(qobject::Launcher::refresh_displays);
             return;
         }
-        let list: Vec<Value> = session
+        self.update_displays();
+    }
+
+    fn update_displays(mut self: Pin<&mut Self>) {
+        let list: Vec<Value> = self
+            .as_mut()
+            .session()
             .displays()
             .iter()
             .map(|d| {
                 json!({
+                    "driver": d.id.driver,
                     "key": d.id.key,
                     "name": d.name,
                     "width": d.size.0,
@@ -240,6 +313,7 @@ impl qobject::Launcher {
         pattern: &QString,
         encoding: &QString,
         depth: &QString,
+        driver: &QString,
         display: &QString,
         metadata: &QString,
         delay: i32,
@@ -249,7 +323,7 @@ impl qobject::Launcher {
                 kind,
                 format,
                 metadata: request_from_json(&metadata.to_string())?,
-                display: display::display_for_key(display.to_string()),
+                display: display_id(driver, display)?,
                 delay_ms: delay_from(delay)?,
             })
         });
@@ -271,6 +345,47 @@ impl qobject::Launcher {
         }
     }
 
+    pub fn start_browser(mut self: Pin<&mut Self>, remote: bool, address: &QString, port: i32) {
+        let address = address.to_string();
+        let result = u16::try_from(port)
+            .map_err(|_| format!("the port must be in 0..=65535, not {port}"))
+            .and_then(|port| Ok((port, browser::config(remote, &address, port)?)))
+            .and_then(|(port, config)| {
+                self.as_mut().set_browser_port(i32::from(port));
+                if remote {
+                    self.as_mut().set_browser_address(QString::from(&address));
+                }
+                let saved = self.browser_address().to_string();
+                // A failed save does not stop the service.
+                let save = self.settings.set_browser(port, &saved);
+                self.as_mut().session().start_browser(&config)?;
+                save.map_err(|e| format!("cannot save the browser settings: {e}"))
+            });
+        self.as_mut().update_browser();
+        self.as_mut().update_displays();
+        if let Err(e) = result {
+            self.set_status(QString::from(&format!("Error: {e}")));
+        }
+    }
+
+    pub fn interface_addresses(&self) -> QString {
+        let list: Vec<String> = browser::interface_addresses()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        QString::from(&Value::from(list).to_string())
+    }
+
+    fn update_browser(mut self: Pin<&mut Self>) {
+        let view = self.as_mut().session().browser_view().clone();
+        self.as_mut()
+            .set_browser_url(QString::from(view.url.as_deref().unwrap_or_default()));
+        self.as_mut().set_pairing_code(QString::from(
+            view.pairing_code.as_deref().unwrap_or_default(),
+        ));
+        self.set_browser_client(QString::from(&view.client));
+    }
+
     fn session(mut self: Pin<&mut Self>) -> &mut Session {
         if self.session.is_none() {
             let thread = self.qt_thread();
@@ -278,11 +393,16 @@ impl qobject::Launcher {
             // Events go through the queue in order, so a later status
             // always arrives last. The launcher may be gone at exit.
             let session = Session::native(Arc::new(thread), move |event| {
-                let _ = events.queue(move |launcher| match event {
+                let _ = events.queue(move |mut launcher| match event {
                     Event::Status(text) => launcher.set_status(QString::from(&text)),
                     Event::Devices => {
                         let revision = launcher.device_revision().wrapping_add(1);
                         launcher.set_device_revision(revision);
+                    }
+                    Event::Displays => launcher.update_displays(),
+                    Event::Browser => launcher.update_browser(),
+                    Event::Service(service, event) => {
+                        launcher.as_mut().session().on_service_event(service, event);
                     }
                 });
             });

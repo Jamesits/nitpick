@@ -12,11 +12,20 @@ ApplicationWindow {
     readonly property var pattern: patterns[patternList.currentIndex]
     readonly property var encoding: pattern.encodings[Math.max(0, encodingBox.currentIndex)]
     readonly property var depth: catalogue.depths[Math.max(0, depthBox.currentIndex)]
-    // `[{key, name, width, height}]` from the driver, see launcher.rs.
-    readonly property var displays: JSON.parse(launcher.displays || "[]")
-    // Native screen key of the selected display. It survives a change of
-    // the screen list, unlike the list index.
+    readonly property var drivers: [
+        { id: "qrhi", label: qsTr("Local screen (QRhi window)") },
+        { id: "browser", label: qsTr("Browser (local or remote)") }
+    ]
+    readonly property string driverId: drivers[Math.max(0, driverBox.currentIndex)].id
+    // `[{driver, key, name, width, height}]` of all drivers, see launcher.rs.
+    readonly property var allDisplays: JSON.parse(launcher.displays || "[]")
+    readonly property var displays: allDisplays.filter(d => d.driver === driverId)
+    // Key of the selected display: the native screen name or the browser
+    // client ID. It survives a change of the list, unlike the list index.
     property string selectedKey: ""
+    // Interface addresses for remote displays, read when the browser
+    // output is first selected and at "Restart service".
+    property var addresses: []
 
     // Keeps the selected display when the list changes. Called later, so
     // that the combo box has the new model first.
@@ -26,6 +35,17 @@ ApplicationWindow {
         selectedKey = displays.length > 0 ? displays[screenBox.currentIndex].key : "";
     })
     Component.onCompleted: launcher.refreshDisplays()
+
+    // Starts the browser service, or starts it again with the settings of
+    // the browser panel. Remote displays are off at each launcher start.
+    function startBrowser() {
+        launcher.startBrowser(remoteCheck.checked, addressBox.currentText, portBox.value);
+    }
+
+    function readAddresses() {
+        addresses = JSON.parse(launcher.interfaceAddresses());
+        addressBox.currentIndex = Math.max(0, addresses.indexOf(launcher.browserAddress));
+    }
 
     // Screens added or removed: a display change.
     Connections {
@@ -128,7 +148,106 @@ ApplicationWindow {
 
                 Layout.fillWidth: true
                 model: root.catalogue.depths
+                textRole: root.driverId === "browser" ? "browserLabel" : "label"
+            }
+
+            Label {
+                text: qsTr("Output")
+                font.bold: true
+            }
+
+            ComboBox {
+                id: driverBox
+
+                Layout.fillWidth: true
+                model: root.drivers
                 textRole: "label"
+                // A display change. The browser service starts at its
+                // first selection and runs until the launcher ends.
+                onActivated: {
+                    if (root.driverId === "browser" && launcher.browserUrl === "") {
+                        root.readAddresses();
+                        root.startBrowser();
+                    }
+                    launcher.refreshDisplays();
+                }
+            }
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                visible: root.driverId === "browser"
+
+                CheckBox {
+                    id: remoteCheck
+
+                    Layout.columnSpan: 2
+                    text: qsTr("Allow remote displays on this network")
+                    enabled: root.addresses.length > 0
+                    onToggled: root.startBrowser()
+                }
+                Label {
+                    text: qsTr("Interface address")
+                }
+                ComboBox {
+                    id: addressBox
+
+                    Layout.fillWidth: true
+                    model: root.addresses
+                    enabled: remoteCheck.checked
+                    onActivated: root.startBrowser()
+                }
+                Label {
+                    text: qsTr("Port (0: any)")
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    SpinBox {
+                        id: portBox
+
+                        Layout.fillWidth: true
+                        from: 0
+                        to: 65535
+                        editable: true
+                        value: launcher.browserPort
+                        textFromValue: (v, locale) => String(v)
+                        valueFromText: (text, locale) => Number(text)
+                    }
+                    Button {
+                        text: qsTr("Restart service")
+                        // Also after a network change, which can change
+                        // the interface addresses.
+                        onClicked: {
+                            root.readAddresses();
+                            root.startBrowser();
+                        }
+                    }
+                }
+                Label {
+                    text: qsTr("URL")
+                }
+                TextField {
+                    Layout.fillWidth: true
+                    readOnly: true
+                    selectByMouse: true
+                    text: launcher.browserUrl
+                    placeholderText: qsTr("not running")
+                }
+                Label {
+                    text: qsTr("Pairing code")
+                }
+                Label {
+                    text: launcher.pairingCode || "-"
+                    font.bold: true
+                    font.pixelSize: 24
+                }
+                Label {
+                    Layout.columnSpan: 2
+                    Layout.fillWidth: true
+                    text: launcher.browserClient
+                    wrapMode: Text.WordWrap
+                }
             }
 
             Label {
@@ -260,7 +379,8 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 text: qsTr("Show pattern (Esc closes)")
                 onClicked: launcher.showPattern(root.pattern.id, root.encoding.id, root.depth.id,
-                                                root.selectedKey, root.metadataJson(), delayBox.value)
+                                                root.driverId, root.selectedKey, root.metadataJson(),
+                                                delayBox.value)
             }
 
             Label {
@@ -275,9 +395,13 @@ ApplicationWindow {
                 Layout.topMargin: 8
                 wrapMode: Text.WordWrap
                 opacity: 0.8
-                text: qsTr("Before measuring: turn on HDR for the display, set the GPU output to 10 bpc " +
-                           "(12 bpc for 12-bit). Narrow-range codes reach the wire unchanged only with RGB " +
-                           "full-range output. See doc/design/test_patterns.md.")
+                text: root.driverId === "browser"
+                      ? qsTr("Open the URL in the browser, enter the pairing code and select " +
+                             "\"Full screen\" in the page. Then select the browser in the display list. " +
+                             "See doc/design/output_driver/browser.md.")
+                      : qsTr("Before measuring: turn on HDR for the display, set the GPU output to 10 bpc " +
+                             "(12 bpc for 12-bit). Narrow-range codes reach the wire unchanged only with RGB " +
+                             "full-range output. See doc/design/test_patterns.md.")
             }
 
             Item {
@@ -307,7 +431,7 @@ ApplicationWindow {
                     text: {
                         launcher.deviceRevision;
                         return launcher.referenceTable(root.pattern.id, root.encoding.id,
-                                                       root.depth.id, root.selectedKey);
+                                                       root.depth.id, root.driverId, root.selectedKey);
                     }
                 }
             }

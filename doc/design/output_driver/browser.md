@@ -268,7 +268,7 @@ The status line names the frame ID, format and surface size, then the mode descr
 
 ## Usage
 
-Qt launcher, local webview test:
+Qt launcher, local webview test (**not implemented**; the launcher does not start the shell now):
 1. In the launcher, select the driver "Browser (local webview)" and a screen.
 2. "Show pattern" starts `nitpick-webview --url <url> --at <x>,<y>` if no session exists.
 3. Enter the code shown by the launcher in the webview. After authentication, the launcher waits 10 s for `hello`.
@@ -293,10 +293,12 @@ The shell opens one borderless full-screen window on the selected monitor and re
 
 Exit status: 0 after the window closes and after `--list-monitors`, 1 if the shell cannot start, read the monitors, select a monitor or open the window, and 2 for invalid arguments. The process does not stop when the session ends; the caller closes it. When the process ends, the server sees a closed client.
 
-Qt launcher, remote display (iPad):
-1. In the launcher, turn on remote displays. The launcher shows the URL with the LAN address.
-2. Open the URL in Safari on the iPad. Enter the code shown by the launcher. After authentication, tap "Full screen".
-3. Select the iPad in the display list. Then select the pattern and "Show pattern".
+Qt launcher, local or remote browser (for example an iPad):
+1. In the launcher, select the output "Browser (local or remote)". The launcher starts the service and shows its URL. For a remote display, select "Allow remote displays on this network" and the interface address of the network of the display. The URL then has this address.
+2. Open the URL in the browser. Enter the code shown by the launcher. After authentication, select "Full screen".
+3. Select the browser in the display list. Then select the pattern and "Show pattern".
+
+The service lifecycle in the launcher is in [Browser output in the launcher](qt.md#browser-output-in-the-launcher).
 
 Command-line host: follow [Host and dependency boundary](overview.md#host-and-dependency-boundary). Qt, Tauri and a local screen are not required. Build and run by package:
 
@@ -353,6 +355,8 @@ Command-line process tests (`nitpick-cli`, `tests/browser_session.rs`) start the
 - a viewport change during the delay: the host cancels the delay and shows the pattern again at the new size.
 
 The test-host process tests (`tests/test_host.rs`) use the same mock page; see [Shared host contract](testing.md#shared-host-contract).
+
+Launcher unit tests (`nitpick-app`, `session_tests.rs` and `browser_tests.rs`) run the browser part of the launcher session with a mock service and a simulated event loop: the URL, pairing and client states, presentation and delay, a disconnect and a viewport change during the presentation and during the delay (in both orders of driver result and service event), the show again at the new size, a restart with events of the old service, a failed start and a service stop. One test runs the real service with a WebSocket page on its own thread; another restarts the real service five times on the same fixed port. The interface address list and the launcher settings have unit tests. The checks of the running launcher with a real browser are in [Running launcher checks](qt.md#running-launcher-checks).
 
 `tests/dependencies.rs` runs `cargo tree` for the host target with the default features (without `device`). It fails if the normal or build dependencies of `nitpick-cli` contain `nitpick-app`, `nitpick-display`, `nitpick-webview`, or a Qt, Tauri, webview, GUI toolkit or window-system package. Results: all pass on Windows 11 in a desktop session. The Windows executable imports no `user32.dll` or `gdi32.dll`. **Not verified:** a run on Linux or macOS without a display server or a window session.
 

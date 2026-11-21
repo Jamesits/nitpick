@@ -8,6 +8,8 @@ use serde_json::{Map, Value};
 use crate::delay::{self, DEFAULT_DELAY_MS};
 
 const DELAY_KEY: &str = "measurementDelayMs";
+const PORT_KEY: &str = "browserPort";
+const ADDRESS_KEY: &str = "browserAddress";
 
 pub struct Settings {
     /// `None` if the OS has no config directory; nothing is saved then.
@@ -46,11 +48,46 @@ impl Settings {
     /// # Errors
     /// The file cannot be written.
     pub fn set_measurement_delay_ms(&self, ms: u32) -> Result<(), String> {
+        self.write(DELAY_KEY, ms.into())
+    }
+
+    /// The saved TCP port of the browser service; 0 (the OS selects a
+    /// port) if missing or invalid.
+    #[must_use]
+    pub fn browser_port(&self) -> u16 {
+        self.read()
+            .get(PORT_KEY)
+            .and_then(Value::as_u64)
+            .and_then(|p| u16::try_from(p).ok())
+            .unwrap_or(0)
+    }
+
+    /// The saved interface address for remote displays; empty if missing
+    /// or invalid. Remote displays stay off at each start.
+    #[must_use]
+    pub fn browser_address(&self) -> String {
+        self.read()
+            .get(ADDRESS_KEY)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Saves the port and the address, and keeps the other keys.
+    ///
+    /// # Errors
+    /// The file cannot be written.
+    pub fn set_browser(&self, port: u16, address: &str) -> Result<(), String> {
+        self.write(PORT_KEY, port.into())?;
+        self.write(ADDRESS_KEY, address.into())
+    }
+
+    fn write(&self, key: &str, value: Value) -> Result<(), String> {
         let Some(path) = &self.path else {
             return Err("no configuration directory".into());
         };
         let mut map = self.read();
-        map.insert(DELAY_KEY.into(), ms.into());
+        map.insert(key.into(), value);
         let text = Value::Object(map).to_string();
         let error = |e: std::io::Error| format!("{}: {e}", path.display());
         if let Some(dir) = path.parent() {
