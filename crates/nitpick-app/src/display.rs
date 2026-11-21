@@ -110,6 +110,15 @@ pub mod ffi {
         display_id: u32,
     }
 
+    /// A point in the desktop units of `nitpick-webview --at`: native
+    /// pixels on Windows, the platform plugin units elsewhere.
+    #[namespace = "nitpick"]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct DesktopPoint {
+        x: i32,
+        y: i32,
+    }
+
     unsafe extern "C++" {
         include!("nitpick-app/cpp/pattern_window.h");
 
@@ -131,6 +140,12 @@ pub mod ffi {
         #[namespace = "nitpick"]
         #[cxx_name = "screenIdentity"]
         fn screen_identity(screen: i32) -> Result<ScreenIdentity>;
+
+        /// The centre of screen `screen`: Windows `rcMonitor`, elsewhere
+        /// `QPlatformScreen::geometry`.
+        #[namespace = "nitpick"]
+        #[cxx_name = "screenDesktopPoint"]
+        fn screen_desktop_point(screen: i32) -> Result<DesktopPoint>;
 
         /// Opens a full-screen window on `screen` with an HDR10 swap chain, or
         /// an FP16 scRGB swap chain if `fp16`, through `backend`, and

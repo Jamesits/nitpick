@@ -67,6 +67,17 @@ impl<J: Workers> BrowserDriver<J> {
     pub fn agent(&self, display: &DisplayId) -> Option<String> {
         client(&self.hub, display).ok().map(|c| c.hello.agent())
     }
+
+    /// The `webview` flag of the cached `hello` of `display`: the page URL
+    /// has the `webview` parameter. Any page can set it, so it does not
+    /// prove that the page runs in `nitpick-webview`. `None` if no client
+    /// with a valid `hello` has this ID.
+    #[must_use]
+    pub fn webview(&self, display: &DisplayId) -> Option<bool> {
+        client(&self.hub, display)
+            .ok()
+            .map(|c| c.hello.client.webview)
+    }
 }
 
 /// The cached state of `display`.

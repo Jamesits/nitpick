@@ -14,12 +14,17 @@ ApplicationWindow {
     readonly property var depth: catalogue.depths[Math.max(0, depthBox.currentIndex)]
     readonly property var drivers: [
         { id: "qrhi", label: qsTr("Local screen (QRhi window)") },
-        { id: "browser", label: qsTr("Browser (local or remote)") }
+        { id: "browser", label: qsTr("Browser (local or remote)") },
+        { id: "webview", label: qsTr("Browser (local webview)") }
     ]
     readonly property string driverId: drivers[Math.max(0, driverBox.currentIndex)].id
+    // The browser outputs use the browser service and its PNG depths.
+    readonly property bool browserOutput: driverId === "browser" || driverId === "webview"
     // `[{driver, key, name, width, height}]` of all drivers, see launcher.rs.
     readonly property var allDisplays: JSON.parse(launcher.displays || "[]")
-    readonly property var displays: allDisplays.filter(d => d.driver === driverId)
+    // The local webview opens on a QRhi screen.
+    readonly property var displays: allDisplays.filter(
+        d => d.driver === (driverId === "webview" ? "qrhi" : driverId))
     // Key of the selected display: the native screen name or the browser
     // client ID. It survives a change of the list, unlike the list index.
     property string selectedKey: ""
@@ -148,7 +153,7 @@ ApplicationWindow {
 
                 Layout.fillWidth: true
                 model: root.catalogue.depths
-                textRole: root.driverId === "browser" ? "browserLabel" : "label"
+                textRole: root.browserOutput ? "browserLabel" : "label"
             }
 
             Label {
@@ -165,7 +170,7 @@ ApplicationWindow {
                 // A display change. The browser service starts at its
                 // first selection and runs until the launcher ends.
                 onActivated: {
-                    if (root.driverId === "browser" && launcher.browserUrl === "") {
+                    if (root.browserOutput && launcher.browserUrl === "") {
                         root.readAddresses();
                         root.startBrowser();
                     }
@@ -176,7 +181,7 @@ ApplicationWindow {
             GridLayout {
                 Layout.fillWidth: true
                 columns: 2
-                visible: root.driverId === "browser"
+                visible: root.browserOutput
 
                 CheckBox {
                     id: remoteCheck
@@ -398,6 +403,10 @@ ApplicationWindow {
                 text: root.driverId === "browser"
                       ? qsTr("Open the URL in the browser, enter the pairing code and select " +
                              "\"Full screen\" in the page. Then select the browser in the display list. " +
+                             "See doc/design/output_driver/browser.md.")
+                      : root.driverId === "webview"
+                      ? qsTr("Select the screen. \"Show pattern\" opens the webview on it. Enter the " +
+                             "pairing code in the webview and select \"Full screen\" in the page. " +
                              "See doc/design/output_driver/browser.md.")
                       : qsTr("Before measuring: turn on HDR for the display, set the GPU output to 10 bpc " +
                              "(12 bpc for 12-bit). Narrow-range codes reach the wire unchanged only with RGB " +

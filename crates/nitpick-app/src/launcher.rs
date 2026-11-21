@@ -40,7 +40,9 @@ pub mod qobject {
         fn catalogue(&self) -> QString;
 
         /// Reference table for the native size of the display `display`
-        /// of `driver` (a `driver` and a `key` of `displays`).
+        /// of `driver` (a `driver` and a `key` of `displays`). For the
+        /// driver `webview`, `display` is a `qrhi` screen, and the table
+        /// is of the webview client on it.
         #[qinvokable]
         #[cxx_name = "referenceTable"]
         fn reference_table(
@@ -67,7 +69,10 @@ pub mod qobject {
         /// `QRhi`: reads the device state of `display` on a worker,
         /// renders the pattern at the pattern area size of a new
         /// full-screen window and shows it. Browser: renders the pattern
-        /// at the client viewport and sends it. Then waits `delay` ms.
+        /// at the client viewport and sends it. Webview (`driver`
+        /// `webview`, `display` a `qrhi` screen): starts the local webview
+        /// on the screen if necessary, then as the browser. Then waits
+        /// `delay` ms.
         /// `metadata` is a JSON object, see `request_from_json`. `status`
         /// follows each step.
         #[qinvokable]
@@ -163,12 +168,17 @@ fn parse(
     Ok((pattern.to_string().parse()?, Format::new(encoding, depth)))
 }
 
+/// The output selection of the local webview. It is not a driver: its
+/// displays are the `QRhi` screens, and it presents through the browser
+/// driver.
+const WEBVIEW: &str = "webview";
+
 /// The display `key` of the driver `driver`: a `driver` and a `key` of
-/// `displays`.
+/// `displays`. For [`WEBVIEW`], the `QRhi` screen.
 fn display_id(driver: &QString, key: &QString) -> Result<DisplayId, String> {
     let key = key.to_string();
     match driver.to_string().as_str() {
-        display::DRIVER => Ok(display::display_for_key(key)),
+        display::DRIVER | WEBVIEW => Ok(display::display_for_key(key)),
         browser::DRIVER => Ok(DisplayId {
             driver: browser::DRIVER,
             key,
@@ -271,9 +281,16 @@ impl qobject::Launcher {
     ) -> QString {
         let parsed = parse(pattern, encoding, depth)
             .and_then(|(kind, format)| Ok((kind, format, display_id(driver, display)?)));
+        let webview = driver.to_string() == WEBVIEW;
         let text = match (parsed, &self.session) {
             (Err(e), _) => e,
             (Ok(_), None) => "No display selected.".into(),
+            (Ok((kind, format, id)), Some(s)) if webview => match s.webview_display(&id) {
+                Some(client) => s.reference_table(kind, format, &client),
+                None => "The local webview does not run on this screen. \"Show pattern\" \
+                         starts it; the table then follows its viewport."
+                    .into(),
+            },
             (Ok((kind, format, id)), Some(s)) => s.reference_table(kind, format, &id),
         };
         QString::from(&text)
@@ -328,6 +345,7 @@ impl qobject::Launcher {
             })
         });
         match request {
+            Ok(r) if driver.to_string() == WEBVIEW => self.as_mut().session().show_webview(r),
             Ok(r) => self.as_mut().session().show(r),
             Err(e) => self.set_status(QString::from(&format!("Error: {e}"))),
         }
@@ -403,6 +421,9 @@ impl qobject::Launcher {
                     Event::Browser => launcher.update_browser(),
                     Event::Service(service, event) => {
                         launcher.as_mut().session().on_service_event(service, event);
+                    }
+                    Event::Webview(start, event) => {
+                        launcher.as_mut().session().on_webview_event(start, event);
                     }
                 });
             });

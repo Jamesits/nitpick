@@ -13,6 +13,7 @@
 #include <QtGui/QPlatformSurfaceEvent>
 #include <QtGui/QScreen>
 #include <QtGui/QWindow>
+#include <QtGui/qpa/qplatformscreen.h>
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
 
@@ -1031,6 +1032,21 @@ std::int32_t screenPixelWidth(std::int32_t screen) {
 
 std::int32_t screenPixelHeight(std::int32_t screen) {
     return screenPatternSize(screenAt(screen)).height();
+}
+
+// The centre of the screen in the units of the platform plugin, not in Qt's
+// device-independent pixels: QT_SCALE_FACTOR and the per-screen high-DPI
+// factor scale the size of QScreen::geometry() but keep its native origin,
+// so its centre can fall on another monitor.
+DesktopPoint screenDesktopPoint(std::int32_t screen) {
+    QScreen *s = screenAt(screen);
+#if defined(Q_OS_WIN)
+    const RECT r = monitorRect(s);
+    return DesktopPoint{r.left + (r.right - r.left) / 2, r.top + (r.bottom - r.top) / 2};
+#else
+    const QRect r = s->handle()->geometry();
+    return DesktopPoint{r.x() + r.width() / 2, r.y() + r.height() / 2};
+#endif
 }
 
 ScreenIdentity screenIdentity(std::int32_t screen) {

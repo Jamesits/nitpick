@@ -259,7 +259,7 @@ The status line names the frame ID, format and surface size, then the mode descr
 | Presentation | block on the server reply; await a reply by frame ID | await the reply | The host stays active during image encoding, transfer and client processing. See [Asynchronous presentation](overview.md#asynchronous-presentation). |
 | PNG encoder | `png` crate; own encoder | `png` crate | Writes 16-bit RGB. Version 0.18.1 decodes `cICP`, `mDCV` and `cLLI`, but its encoder does not write them. The driver writes them with `Writer::write_chunk` after the header and before `IDAT`. |
 | Local test window | system browser; Tauri; `wry` direct | system browser for basic use; optional Tauri process for controlled tests | Tauri gives a fixed engine (WebView2 on Windows), monitor selection and browser arguments. A separate process keeps its event loop independent of the host. |
-| Monitor selection (Tauri) | monitor index; screen position | screen position | The shell accepts a position and selects the monitor that contains it. The Qt launcher derives the position from its screen list; a command-line caller can supply it. The server does not use Qt screen geometry. |
+| Monitor selection (Tauri) | monitor index; screen position | screen position | The shell accepts a position and selects the monitor that contains it. The Qt launcher derives the position from the native geometry of the Qt screen (see [Local webview in the launcher](qt.md#local-webview-in-the-launcher)); a command-line caller can supply it. The server does not use Qt screen geometry. |
 | Position units (Tauri) | the windowing library's physical units on all platforms; the desktop units of each OS | desktop units: native pixels on Windows, logical units on macOS and Linux | On macOS and Linux, the library multiplies logical monitor geometry by the scale of each monitor. With mixed scales, these physical rectangles can overlap or leave gaps, so a point does not identify one monitor. Windows positions monitors in native pixels. |
 | Access | open; token in the URL; WebSocket authentication and bearer token | fixed API paths and [session authentication](#authentication), server bound to localhost by default | The server code controls display access. The bearer token controls image access without a secret in the URL. A LAN address only when the user turns on remote displays. The host gives a specific interface address; the service rejects an unspecified address (`0.0.0.0`, `::`), because the URL shown to the user contains the bound address. |
 | Sessions | multiple clients; one client | one session, including authentication | One client controls the display state. A second connection cannot replace it. |
@@ -268,11 +268,14 @@ The status line names the frame ID, format and surface size, then the mode descr
 
 ## Usage
 
-Qt launcher, local webview test (**not implemented**; the launcher does not start the shell now):
-1. In the launcher, select the driver "Browser (local webview)" and a screen.
-2. "Show pattern" starts `nitpick-webview --url <url> --at <x>,<y>` if no session exists.
-3. Enter the code shown by the launcher in the webview. After authentication, the launcher waits 10 s for `hello`.
-4. Select "Full screen" in the page. The window already covers the monitor, but the page reports `fullscreen` only after this user action. Until then, the panel covers part of the pattern and the host shows the full-screen layout warning.
+Qt launcher, local webview test:
+1. Build `nitpick-webview` into the directory of the launcher executable, for example `cargo build -p nitpick-app -p nitpick-webview`.
+2. In the launcher, select the output "Browser (local webview)" and a screen.
+3. "Show pattern" starts `nitpick-webview --url=<url> --at=<x>,<y>` on the screen if it does not run there. If another browser holds the session, the launcher shows an error and does not start the webview.
+4. Enter the code shown by the launcher in the webview. After authentication, the launcher waits 10 s for `hello`, then shows the pattern.
+5. Select "Full screen" in the page. The window already covers the monitor, but the page reports `fullscreen` only after this user action. Until then, the panel covers part of the pattern and the host shows the full-screen layout warning.
+
+The process lifecycle in the launcher is in [Local webview in the launcher](qt.md#local-webview-in-the-launcher).
 
 Local webview process (`nitpick-webview`), also without Qt:
 
@@ -288,6 +291,8 @@ cargo run -p nitpick-webview -- --url http://127.0.0.1:8080/ --at 100,100
 | `--list-monitors` | print each monitor name, rectangle `x,y wxh` in desktop units and scale, then exit; not with `--url` or `--at` |
 
 Desktop units are native pixels on Windows, points on macOS and GDK application pixels on Linux. See the "Position units" decision in [Technical decisions](#technical-decisions). Edges are half-open: a monitor at `0,0 2560x1440` contains `2559,1439`, not `2560,0`. The shell fails if no monitor or more than one monitor contains the point.
+
+Give a point with a negative coordinate as one argument, `--at=-1920,540`. As a separate value, `--at -1920,540` stops with exit status 2: the argument parser (`clap`) reads `-1920,540` as a flag.
 
 The shell opens one borderless full-screen window on the selected monitor and requests the keyboard focus. The window permits navigation only inside the origin of `--url` and rejects new windows. The shell defines no commands and no capabilities, so the page has no IPC access to it. The webview runs in private mode, so it keeps no cookies or storage. WebView2 still creates a data folder in `%LOCALAPPDATA%\com.nekomimirouter.nitpick.webview`. On Linux, the shell prints `warning: WebKitGTK shows HDR images as SDR`; the driver identifies the engine from the user agent, see [Graphics path](#graphics-path).
 
@@ -356,7 +361,7 @@ Command-line process tests (`nitpick-cli`, `tests/browser_session.rs`) start the
 
 The test-host process tests (`tests/test_host.rs`) use the same mock page; see [Shared host contract](testing.md#shared-host-contract).
 
-Launcher unit tests (`nitpick-app`, `session_tests.rs` and `browser_tests.rs`) run the browser part of the launcher session with a mock service and a simulated event loop: the URL, pairing and client states, presentation and delay, a disconnect and a viewport change during the presentation and during the delay (in both orders of driver result and service event), the show again at the new size, a restart with events of the old service, a failed start and a service stop. One test runs the real service with a WebSocket page on its own thread; another restarts the real service five times on the same fixed port. The interface address list and the launcher settings have unit tests. The checks of the running launcher with a real browser are in [Running launcher checks](qt.md#running-launcher-checks).
+Launcher unit tests (`nitpick-app`, `session_tests.rs` and `browser_tests.rs`) run the browser part of the launcher session with a mock service and a simulated event loop: the URL, pairing and client states, presentation and delay, a disconnect and a viewport change during the presentation and during the delay (in both orders of driver result and service event), the show again at the new size, a restart with events of the old service, a failed start and a service stop. With a fake process starter, they cover the [local webview](qt.md#local-webview-in-the-launcher): the start with the URL and the screen point, pairing and the show at the first `hello`, a wrong code, the `hello` timeout, a process exit and a failed start, an existing session of another browser, another browser that takes the slot after the start, a removed screen, the replacement on another screen after the old session ends, a service restart and late events of an ended process. `webview_tests.rs` covers the exit description and the argument form. One test runs the real service with a WebSocket page on its own thread; another restarts the real service five times on the same fixed port. The interface address list and the launcher settings have unit tests. The checks of the running launcher with a real browser are in [Running launcher checks](qt.md#running-launcher-checks).
 
 `tests/dependencies.rs` runs `cargo tree` for the host target with the default features (without `device`). It fails if the normal or build dependencies of `nitpick-cli` contain `nitpick-app`, `nitpick-display`, `nitpick-webview`, or a Qt, Tauri, webview, GUI toolkit or window-system package. Results: all pass on Windows 11 in a desktop session. The Windows executable imports no `user32.dll` or `gdi32.dll`. **Not verified:** a run on Linux or macOS without a display server or a window session.
 
@@ -404,7 +409,9 @@ A second run on the same system (WebView2 157.0.4341.46) attached Playwright to 
 - A new frame during fetch and during decode: the old request made no change and sent no reply; one object URL stayed. `close` removed the image and released its URL.
 - Window close by `WM_CLOSE`: exit status 0, and the server reported "client closed".
 
-**Not verified:** more than one monitor, mixed scales, macOS, Linux on X11 and Wayland, the WebKitGTK SDR output, and the keyboard focus without the script's activation.
+The keyboard focus without an activation by a script passed when the Qt launcher starts the shell; see [Running launcher checks](qt.md#running-launcher-checks).
+
+**Not verified:** more than one monitor, mixed scales, macOS, Linux on X11 and Wayland, and the WebKitGTK SDR output.
 
 **Not done:** all other tests. The graphics path survey is from documentation and bug reports, not from tests on devices.
 

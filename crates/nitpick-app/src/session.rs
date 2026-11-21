@@ -1,9 +1,10 @@
 //! Host lifecycle of the launcher on the Qt GUI thread: the `QRhi` driver
 //! with its device refresh on a worker, the browser driver with its
-//! service events, the synchronous `query` and `open`, asynchronous
-//! presentation, the measurement delay and cancellation. `launcher.rs`
-//! connects it to QML. See "Asynchronous presentation" and "Measurement
-//! delay" in `doc/design/output_driver/overview.md`.
+//! service events and the optional local webview process, the synchronous
+//! `query` and `open`, asynchronous presentation, the measurement delay
+//! and cancellation. `launcher.rs` connects it to QML. See "Asynchronous
+//! presentation" and "Measurement delay" in
+//! `doc/design/output_driver/overview.md`.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -22,12 +23,13 @@ use nitpick_core::image::Image;
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::Format;
 
-use crate::browser::{self, NativeService, StartService};
+use crate::browser::{self, NativeService, StartService, WebviewFlag};
 use crate::delay::{DelayTimer, QtTimer};
 use crate::display::{self, Backend, DeviceReports, DeviceStates, ffi};
 use crate::gui_executor::{self, LocalTask, Post};
 use crate::qrhi_driver::{BridgeWindow, PatternWindow, QrhiDriver, Threads, Workers};
 use crate::submission;
+use crate::webview::{HELLO_TIMEOUT_MS, LaunchWebview, NativeWebview};
 
 /// Change for the host UI. Delivered on the GUI thread, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +47,18 @@ pub enum Event {
     /// host gives it back to [`Session::on_service_event`] from its event
     /// loop, because the handling can replace the pending presentation.
     Service(u64, ServiceEvent),
+    /// An event of the webview process with the given start count. The
+    /// host gives it back to [`Session::on_webview_event`] from its event
+    /// loop.
+    Webview(u64, WebviewEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebviewEvent {
+    /// The process ended; the exit status and its first error line.
+    Exited(String),
+    /// No valid `hello` within [`HELLO_TIMEOUT_MS`] after authentication.
+    HelloTimeout,
 }
 
 /// Reads device reports off the GUI thread. Tests inject a held reader.
@@ -151,11 +165,66 @@ struct Browser<B> {
     _service: Box<dyn Any>,
 }
 
+/// A request that waits for the client of the webview process.
+struct Waiting {
+    generation: u64,
+    /// `display` is the `QRhi` screen of the webview.
+    request: ShowRequest,
+}
+
+/// The `nitpick-webview` process of the launcher.
+enum Webview {
+    Idle,
+    Running(Running),
+    /// The process on another screen was ended. The new process starts
+    /// when no WebSocket session holds the service slot, so that the old
+    /// page cannot keep the new page out.
+    Replacing {
+        screen: DisplayId,
+        waiting: Waiting,
+    },
+}
+
+struct Running {
+    /// The start count; events of an earlier process do not apply.
+    start: u64,
+    /// The `QRhi` screen of the window.
+    screen: DisplayId,
+    client: WebviewClient,
+    waiting: Option<Waiting>,
+    /// Forwards the exit as [`WebviewEvent::Exited`].
+    _exit: LocalTask,
+    /// Dropped last: it ends the process.
+    _process: Box<dyn Any>,
+}
+
+/// The service session that the launcher assigns to the webview: the first
+/// session after the start. Its `Ready` client must have the `webview`
+/// flag.
+enum WebviewClient {
+    /// No session.
+    Unpaired,
+    /// The session holds the slot; the page waits for the code.
+    Connected,
+    /// The `hello` timeout runs.
+    Authenticated {
+        _timeout: LocalTask,
+    },
+    Ready(DisplayId),
+}
+
 pub struct Session<W = BridgeWindow, J = Threads, B = BrowserDriver> {
     /// Presentation of the last request. Declared before the drivers: it
     /// holds a driver borrow until it completes, and dropping it cancels
     /// the presentation.
     pending: Option<Pending>,
+    webview: Webview,
+    launcher: Box<dyn LaunchWebview>,
+    /// Counts webview starts.
+    webview_starts: u64,
+    /// A WebSocket session holds the one slot of the service: from
+    /// `Connected` to `Disconnected`.
+    slot_held: bool,
     /// Device refresh for the display list and the reference table.
     refreshing: Option<LocalTask>,
     driver: Rc<RefCell<QrhiDriver<W, J>>>,
@@ -184,6 +253,7 @@ impl Session {
             Threads,
             Box::new(ThreadReader),
             Box::new(NativeService::default()),
+            Box::new(NativeWebview),
             Rc::new(QtTimer),
             post,
             events,
@@ -191,7 +261,12 @@ impl Session {
     }
 }
 
-impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static> Session<W, J, B> {
+impl<W, J, B> Session<W, J, B>
+where
+    W: PatternWindow + 'static,
+    J: Workers + 'static,
+    B: OutputDriver + WebviewFlag + 'static,
+{
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: Backend,
@@ -199,6 +274,7 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
         workers: J,
         reader: Box<dyn DeviceReader>,
         service: Box<dyn StartService<B>>,
+        launcher: Box<dyn LaunchWebview>,
         timer: Rc<dyn DelayTimer>,
         post: Arc<dyn Post>,
         events: impl Fn(Event) + 'static,
@@ -206,6 +282,10 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
         let states = DeviceStates::default();
         Self {
             pending: None,
+            webview: Webview::Idle,
+            launcher,
+            webview_starts: 0,
+            slot_held: false,
             refreshing: None,
             driver: Rc::new(RefCell::new(QrhiDriver::new(
                 backend,
@@ -253,14 +333,14 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
         &self.driver
     }
 
-    /// Drops the pending presentation or measurement delay. Its late
-    /// results do not reach the status line.
+    /// Drops the pending presentation or measurement delay, and the
+    /// request that waits for the webview. Their late results do not reach
+    /// the status line.
     fn cancel(&mut self, reason: &str) {
         let generation = self.shared.next_generation();
-        if let Some(p) = self.pending.take()
-            && !p.task.is_finished()
-        {
-            drop(p);
+        let running = self.pending.take().is_some_and(|p| !p.task.is_finished());
+        let waiting = self.take_webview_waiting().is_some();
+        if running || waiting {
             self.shared
                 .status(generation, format!("Cancelled: {reason}"));
         }
@@ -269,8 +349,9 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
     /// A display change: the screens, the selected display or the output
     /// driver changed. Cancels the pending presentation, lists the
     /// displays and reads their device state on a worker. Closes the
-    /// window if its screen is gone. A browser surface stays open, but a
-    /// later viewport change does not show its pattern again.
+    /// window or the webview if its screen is gone. A browser surface
+    /// stays open, but a later viewport change does not show its pattern
+    /// again.
     ///
     /// # Errors
     /// [`Busy`]; the pending presentation is cancelled already.
@@ -288,6 +369,11 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
             driver.close(&id);
         }
         drop(driver);
+        if let Webview::Running(r) = &self.webview
+            && !self.displays.iter().any(|d| d.id == r.screen)
+        {
+            self.webview = Webview::Idle;
+        }
         let refresh = self.states.begin();
         let reports = self.reader.read(screens);
         let (states, shared) = (self.states.clone(), Rc::clone(&self.shared));
@@ -313,6 +399,7 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
         // its driver borrow before a window closes, so that its
         // `Disconnected` does not reach the status line.
         self.pending = None;
+        self.take_webview_waiting();
         // A reshow must not replace a later request.
         if let Some(b) = &mut self.browser {
             b.reshow = None;
@@ -375,6 +462,290 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
             request,
             phase,
         });
+    }
+
+    /// Shows the pattern in the local webview on the `QRhi` screen
+    /// `request.display`. Starts `nitpick-webview` if it does not run and
+    /// no other browser holds the session; replaces a webview on another
+    /// screen. The request then waits for pairing and the first valid
+    /// `hello` of the webview page, and goes to its client.
+    pub fn show_webview(&mut self, request: ShowRequest) {
+        self.pending = None;
+        self.take_webview_waiting();
+        if let Some(b) = &mut self.browser {
+            b.reshow = None;
+        }
+        let generation = self.shared.next_generation();
+        let status = |text: &str| self.shared.status(generation, format!("Error: {text}"));
+        if self.browser.is_none() {
+            return status("the browser service does not run");
+        }
+        let screen = request.display.clone();
+        if !self.displays.iter().any(|d| d.id == screen) {
+            return status("display disconnected");
+        }
+        let waiting = Waiting {
+            generation,
+            request,
+        };
+        let foreign = self.slot_held
+            && !matches!(
+                &self.webview,
+                Webview::Running(r) if !matches!(r.client, WebviewClient::Unpaired)
+            );
+        match std::mem::replace(&mut self.webview, Webview::Idle) {
+            Webview::Running(mut r) if r.screen == screen => {
+                let client = match &r.client {
+                    WebviewClient::Ready(c) if self.webview_ready(c) => Some(c.clone()),
+                    _ => None,
+                };
+                if let Some(client) = client {
+                    self.webview = Webview::Running(r);
+                    return self.show(ShowRequest {
+                        display: client,
+                        ..waiting.request
+                    });
+                }
+                r.waiting = Some(waiting);
+                self.webview = Webview::Running(r);
+                self.shared.status(
+                    generation,
+                    format!(
+                        "Waiting for the local webview on {}: enter the pairing code in its window.",
+                        self.screen_name(&screen)
+                    ),
+                );
+            }
+            running if foreign => {
+                self.webview = running;
+                status(
+                    "another browser holds the session; close it before the local webview starts",
+                );
+            }
+            Webview::Running(r) => {
+                // Ends the process; its page leaves the slot.
+                drop(r);
+                self.webview = Webview::Replacing { screen, waiting };
+                self.shared.status(
+                    generation,
+                    "Closing the local webview on the other screen".into(),
+                );
+                self.start_replacement();
+            }
+            Webview::Replacing { .. } | Webview::Idle => self.launch_webview(screen, waiting),
+        }
+    }
+
+    /// The client of the webview on the `QRhi` screen `screen`, after its
+    /// first valid `hello`.
+    #[must_use]
+    pub fn webview_display(&self, screen: &DisplayId) -> Option<DisplayId> {
+        match &self.webview {
+            Webview::Running(Running {
+                screen: s,
+                client: WebviewClient::Ready(c),
+                ..
+            }) if s == screen && self.webview_ready(c) => Some(c.clone()),
+            _ => None,
+        }
+    }
+
+    /// `client` is in the browser display list.
+    fn webview_ready(&self, client: &DisplayId) -> bool {
+        self.browser.as_ref().is_some_and(|b| {
+            b.viewer
+                .borrow_mut()
+                .displays()
+                .iter()
+                .any(|d| d.id == *client)
+        })
+    }
+
+    fn screen_name(&self, screen: &DisplayId) -> String {
+        self.displays
+            .iter()
+            .find(|d| d.id == *screen)
+            .map_or_else(|| screen.to_string(), |d| d.name.clone())
+    }
+
+    /// Takes the request that waits for the webview client. A replacement
+    /// without its request does not start.
+    fn take_webview_waiting(&mut self) -> Option<Waiting> {
+        match std::mem::replace(&mut self.webview, Webview::Idle) {
+            Webview::Running(mut r) => {
+                let waiting = r.waiting.take();
+                self.webview = Webview::Running(r);
+                waiting
+            }
+            Webview::Replacing { waiting, .. } => Some(waiting),
+            Webview::Idle => None,
+        }
+    }
+
+    /// Ends the webview process. Returns its waiting request.
+    fn end_webview(&mut self) -> Option<Waiting> {
+        match std::mem::replace(&mut self.webview, Webview::Idle) {
+            Webview::Running(r) => r.waiting,
+            Webview::Replacing { waiting, .. } => Some(waiting),
+            Webview::Idle => None,
+        }
+    }
+
+    /// Starts the replacement process once no session holds the slot.
+    fn start_replacement(&mut self) {
+        if self.slot_held || !matches!(self.webview, Webview::Replacing { .. }) {
+            return;
+        }
+        if let Webview::Replacing { screen, waiting } =
+            std::mem::replace(&mut self.webview, Webview::Idle)
+        {
+            self.launch_webview(screen, waiting);
+        }
+    }
+
+    /// Starts `nitpick-webview` at a point of `screen` from Qt. The
+    /// service gets no screen geometry.
+    fn launch_webview(&mut self, screen: DisplayId, waiting: Waiting) {
+        let generation = waiting.generation;
+        let status = |text: String| self.shared.status(generation, format!("Error: {text}"));
+        let Some(url) = self.view.url.clone() else {
+            return status("the browser service does not run".into());
+        };
+        let at = match self.driver.try_borrow().map(|d| d.desktop_point(&screen)) {
+            Ok(Ok(at)) => at,
+            Ok(Err(e)) => return status(e.to_string()),
+            Err(_) => return status("the display is busy".into()),
+        };
+        let launched = match self.launcher.launch(&url, at) {
+            Ok(l) => l,
+            Err(e) => return status(format!("cannot start the local webview: {e}")),
+        };
+        self.webview_starts += 1;
+        let start = self.webview_starts;
+        let (shared, exit) = (Rc::clone(&self.shared), launched.exit);
+        let forward = gui_executor::spawn_local(Arc::clone(&self.post), async move {
+            if let Ok(text) = exit.await {
+                (shared.events)(Event::Webview(start, WebviewEvent::Exited(text)));
+            }
+        });
+        self.shared.status(
+            generation,
+            format!(
+                "Starting the local webview on {}. Enter the pairing code in its window.",
+                self.screen_name(&screen)
+            ),
+        );
+        self.webview = Webview::Running(Running {
+            start,
+            screen,
+            client: WebviewClient::Unpaired,
+            waiting: Some(waiting),
+            _exit: forward,
+            _process: launched.process,
+        });
+    }
+
+    /// Handles an event that [`Event::Webview`] gave. Events of an earlier
+    /// process do nothing.
+    pub fn on_webview_event(&mut self, start: u64, event: WebviewEvent) {
+        let Webview::Running(r) = &self.webview else {
+            return;
+        };
+        if r.start != start {
+            return;
+        }
+        let text = match event {
+            WebviewEvent::Exited(exit) => format!("Error: the local webview stopped: {exit}"),
+            WebviewEvent::HelloTimeout => {
+                if !matches!(r.client, WebviewClient::Authenticated { .. }) {
+                    return;
+                }
+                format!(
+                    "Error: the local webview sent no display state within {} s after \
+                     authentication; it was closed",
+                    HELLO_TIMEOUT_MS / 1000
+                )
+            }
+        };
+        if let Some(w) = self.end_webview() {
+            self.shared.status(w.generation, text);
+        }
+    }
+
+    /// Assigns the session of `ClientState::Connected` to a webview that
+    /// has none.
+    fn webview_connected(&mut self) {
+        self.slot_held = true;
+        if let Webview::Running(r) = &mut self.webview
+            && matches!(r.client, WebviewClient::Unpaired)
+        {
+            r.client = WebviewClient::Connected;
+        }
+    }
+
+    /// Starts the `hello` timeout of the webview session.
+    fn webview_authenticated(&mut self) {
+        let Webview::Running(r) = &mut self.webview else {
+            return;
+        };
+        if !matches!(r.client, WebviewClient::Connected) {
+            return;
+        }
+        let (shared, start) = (Rc::clone(&self.shared), r.start);
+        let elapsed = self.timer.start(HELLO_TIMEOUT_MS);
+        let timeout = gui_executor::spawn_local(Arc::clone(&self.post), async move {
+            if elapsed.await.is_ok() {
+                (shared.events)(Event::Webview(start, WebviewEvent::HelloTimeout));
+            }
+        });
+        r.client = WebviewClient::Authenticated { _timeout: timeout };
+    }
+
+    /// The session left the slot. A webview page can connect again, for
+    /// example after a wrong code.
+    fn webview_disconnected(&mut self) {
+        self.slot_held = false;
+        if let Webview::Running(r) = &mut self.webview {
+            r.client = WebviewClient::Unpaired;
+        }
+        self.start_replacement();
+    }
+
+    /// The first `Ready` of the webview session: the request that waits
+    /// for it, on `display`. A client without the `webview` flag is another
+    /// browser that took the slot; the webview then ends.
+    fn webview_hello(&mut self, display: &DisplayId) -> Option<ShowRequest> {
+        let assigned = matches!(
+            &self.webview,
+            Webview::Running(r)
+                if matches!(r.client, WebviewClient::Connected | WebviewClient::Authenticated { .. })
+        );
+        if !assigned {
+            return None;
+        }
+        let flag = self
+            .browser
+            .as_ref()
+            .and_then(|b| b.viewer.borrow().webview(display));
+        if flag != Some(true) {
+            if let Some(w) = self.end_webview() {
+                self.shared.status(
+                    w.generation,
+                    "Error: another browser took the session before the local webview; \
+                     the webview was closed"
+                        .into(),
+                );
+            }
+            return None;
+        }
+        let Webview::Running(r) = &mut self.webview else {
+            unreachable!("checked above")
+        };
+        r.client = WebviewClient::Ready(display.clone());
+        r.waiting.take().map(|w| ShowRequest {
+            display: display.clone(),
+            ..w.request
+        })
     }
 
     /// Reference table of `display` at its native size, with the limits of
@@ -456,13 +827,19 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
         Ok(())
     }
 
-    /// Ends the browser part of the pending presentation and the surface,
-    /// then stops the service.
+    /// Ends the browser part of the pending presentation, the surface and
+    /// the webview, then stops the service. A new service can have another
+    /// URL, so the webview does not stay.
     fn stop_browser(&mut self, reason: &str) {
         if self.browser.is_none() {
             return;
         }
         self.end_browser_pending(None, reason);
+        if let Some(w) = self.end_webview() {
+            self.shared
+                .status(w.generation, format!("Cancelled: {reason}"));
+        }
+        self.slot_held = false;
         if let Some(b) = self.browser.take()
             && let Some(d) = b.opened.borrow_mut().take()
         {
@@ -512,10 +889,12 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
             }
             ServiceEvent::Client(ClientState::Connected) => {
                 self.view.client = "A browser connected.".into();
+                self.webview_connected();
             }
             ServiceEvent::Client(ClientState::Authenticated) => {
                 self.view.pairing_code = None;
                 self.view.client = "The browser is authenticated; waiting for its state.".into();
+                self.webview_authenticated();
             }
             ServiceEvent::Client(ClientState::Ready(display)) => self.on_ready(&display),
             ServiceEvent::Client(change @ ClientState::ViewportChanged(_)) => {
@@ -546,6 +925,7 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
                 if let Some(d) = b.opened.borrow_mut().take() {
                     b.driver.borrow_mut().close(&d);
                 }
+                self.webview_disconnected();
                 (self.shared.events)(Event::Displays);
                 (self.shared.events)(Event::Devices);
             }
@@ -575,9 +955,10 @@ impl<W: PatternWindow + 'static, J: Workers + 'static, B: OutputDriver + 'static
             .map_or_else(|| display.to_string(), |d| d.name);
         self.view.client = format!("Ready: {name}.");
         let reshow = b.reshow.take_if(|r| r.display == *display);
+        let webview = self.webview_hello(display);
         (self.shared.events)(Event::Displays);
         (self.shared.events)(Event::Devices);
-        if let Some(request) = reshow {
+        if let Some(request) = webview.or(reshow) {
             self.show(request);
         }
     }

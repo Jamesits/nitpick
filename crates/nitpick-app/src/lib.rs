@@ -22,6 +22,7 @@ mod settings;
 mod submission;
 pub mod swap_chain_probe;
 pub mod test_host;
+mod webview;
 
 // For the swap-chain tests, which drive the real window through
 // `qrhi_driver`.

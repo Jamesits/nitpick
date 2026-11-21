@@ -14,12 +14,14 @@ struct VulkanHdrMetadata;
 struct PatternSurface;
 struct RendererInfo;
 struct ScreenIdentity;
+struct DesktopPoint;
 
 // All functions throw std::runtime_error on failure; cxx maps it to Err.
 std::int32_t screenCount();
 std::int32_t screenPixelWidth(std::int32_t screen);
 std::int32_t screenPixelHeight(std::int32_t screen);
 ScreenIdentity screenIdentity(std::int32_t screen);
+DesktopPoint screenDesktopPoint(std::int32_t screen);
 PatternSurface openPatternWindow(std::int32_t screen, bool fp16, PatternBackend backend);
 void closePatternWindow();
 std::uint64_t patternWindowHandle();

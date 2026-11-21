@@ -13,8 +13,21 @@ use std::thread::JoinHandle;
 use nitpick_browser::{
     BindHost, BrowserDriver, BrowserService, ServiceConfig, ServiceEvent, ServiceEvents,
 };
+use nitpick_core::driver::DisplayId;
 
 pub use nitpick_browser::driver::DRIVER;
+
+/// The `webview` flag of a browser client; see [`BrowserDriver::webview`].
+/// Tests inject it.
+pub trait WebviewFlag {
+    fn webview(&self, display: &DisplayId) -> Option<bool>;
+}
+
+impl WebviewFlag for BrowserDriver {
+    fn webview(&self, display: &DisplayId) -> Option<bool> {
+        BrowserDriver::webview(self, display)
+    }
+}
 
 /// Service events in order. Tests inject a channel.
 pub trait EventSource {

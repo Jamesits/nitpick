@@ -63,16 +63,28 @@ Open questions:
 
 Requires: 29, 30.
 
+The selection, the process lifecycle and their unit tests are in [Local webview in the launcher](../design/output_driver/qt.md#local-webview-in-the-launcher). The Windows run with one monitor passed; see [Running launcher checks](../design/output_driver/qt.md#running-launcher-checks).
+
 TODO:
 
-- Add the local-webview selection and process lifecycle in [Usage](../design/output_driver/browser.md#usage). Derive the monitor position from Qt; keep screen geometry out of the server.
-- On Windows, start `nitpick-webview` without a console window; it is a console program, so that its errors and `--list-monitors` output reach a terminal. Check that its window gets the keyboard focus when the launcher starts it; Windows can refuse a foreground change.
-- Verify launch when no session exists, pairing, the post-authentication `hello` timeout, process failure and screen changes. An existing client must not be replaced by another session.
+- Build the launcher on macOS and on Linux: the non-Windows branch of `screenDesktopPoint` in `cpp/pattern_window.cpp` (`QPlatformScreen::geometry()`) has not been built. Run the launcher webview checks there (Linux with X11 and with Wayland), with the method of the Windows run and an event-loop probe of that OS. Check the keyboard focus of the started window, and that no WebKit process stays after the launcher ends the shell.
+- On Windows with two monitors at different scales, start the webview on each screen, also on a monitor left of or above the primary monitor (a negative `--at` value). The window must open full screen on the selected monitor.
+- On a dedicated test system, add and remove a screen with `SetDisplayConfig` while the webview waits for pairing and while it shows a pattern. The removal of its screen must end the process; another screen change must cancel a waiting request and keep the process. Do not change the display settings of a developer machine.
+- Check the `hello` timeout with a real page, for example with an init script that holds `hello` after authentication. Only the unit tests cover it now, with a fake process and a controlled timer.
 
 Open questions:
 
-- Which Qt screen value gives the `--at` point? On Windows, check whether `QScreen::geometry()` keeps the native origin of each screen with mixed scales. On macOS and Linux, check that Qt and the shell use the same logical units, also with `QT_SCALE_FACTOR` or a GDK scale.
-- Must the shell stop when the launcher ends unexpectedly? It runs until its window closes.
+- On macOS and Linux, are the units of `QPlatformScreen::geometry()` the desktop units of the shell (points; GDK application pixels), also with `QT_SCALE_FACTOR` or a GDK scale? **Unverified:** on xcb, the Qt units are X pixels, and with `GDK_SCALE=2` a GDK application pixel is two X pixels. On Windows, the launcher uses `rcMonitor`, which is in the units of the shell.
+- Must the shell stop when the launcher ends unexpectedly? It runs until its window closes. On Windows, it stayed open after `taskkill /F` of the launcher; a normal launcher end ends it.
+- Errors of the webview process reach the status line only while a request waits for the webview. Must a later error, for example the `hello` timeout after a reload of the page, also reach the status line or the browser panel?
+
+### 82. Package `nitpick-webview` with the launcher
+
+Requires: 31.
+
+TODO:
+
+- The packaging scripts in `crates/nitpick-app/packaging` copy only the launcher. The launcher starts `nitpick-webview` from its own directory, so a package has no local webview. Add the release build of `nitpick-webview` to the package of each OS (on macOS in the app bundle, next to the launcher executable). Verify that the launcher of each package starts it.
 
 ### 32. Verify the real page in browser engines
 
@@ -573,3 +585,9 @@ Open questions:
 TODO:
 
 - On macOS and on Linux, run `cargo doc --no-deps --workspace`. The cross-target build could not document `nitpick-profile` (the `lcms2-sys` build needs a C compiler of the target), `nitpick-webview` (GTK `pkg-config` on Linux, a C compiler for `objc2-exception-helper` on macOS) and `nitpick-app` (not tried: it needs the Qt of the target). Fix each warning.
+
+### 83. Accept a separate negative `--at` value in `nitpick-webview`
+
+TODO:
+
+- `nitpick-webview --url <url> --at -1920,540` stops with exit status 2: `clap` reads `-1920,540` as a flag. Only `--at=-1920,540` works; [Usage](../design/output_driver/browser.md#usage) states this, and the launcher uses the `=` form. Accept the separate form, for example with `allow_hyphen_values` on `--at`, and test it in `args_tests.rs`. Then remove the note in Usage.

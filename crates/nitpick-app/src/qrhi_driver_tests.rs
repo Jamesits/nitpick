@@ -101,6 +101,12 @@ impl PatternWindow for FakeWindow {
         Ok(self.0.borrow().size.unwrap_or(SIZE))
     }
 
+    /// Screen `n` of [`identity`] is at `(1000 n + 500, 500)`.
+    fn desktop_point(&self, screen: i32) -> Result<(i64, i64), String> {
+        let n = self.screen_identity(screen)?.display_id - 100;
+        Ok((i64::from(n) * 1000 + 500, 500))
+    }
+
     fn open(
         &mut self,
         screen: i32,

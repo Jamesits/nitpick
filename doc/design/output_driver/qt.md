@@ -8,6 +8,7 @@ The QRhi driver shows test patterns in a borderless full-screen Qt window on a l
 graph LR
     L[launcher.rs] --> S[session.rs]
     S -->|OutputDriver, service events| BR[browser.rs<br/>BrowserDriver, BrowserService]
+    S -->|start, end, exit| WV[webview.rs] -->|process| NW[nitpick-webview]
     S -->|OutputDriver| Q[QrhiDriver<br/>qrhi_driver.rs]
     S -->|spawn_local| E[gui_executor.rs] -->|poll present| Q
     S -->|screen identities| R[device worker] -->|DeviceStates cache| Q
@@ -98,7 +99,7 @@ Measurement delay (contract: [Measurement delay](overview.md#measurement-delay))
 
 ### Browser output in the launcher
 
-The launcher also hosts the [browser driver](browser.md). The "Output" selection selects the driver: "Local screen (QRhi window)" or "Browser (local or remote)". The display list shows only the displays of the selected driver. A change of the selection is a display change, see [Host lifecycle](#host-lifecycle). The browser path uses the same presentation steps and measurement delay, without the device read. The depth list names the "16-bit PNG" for the browser.
+The launcher also hosts the [browser driver](browser.md). The "Output" selection selects the driver: "Local screen (QRhi window)", "Browser (local or remote)" or "Browser (local webview)" (see [Local webview in the launcher](#local-webview-in-the-launcher)). The display list shows only the displays of the selected driver; for the local webview, the `QRhi` screens. A change of the selection is a display change, see [Host lifecycle](#host-lifecycle). The browser path uses the same presentation steps and measurement delay, without the device read. The depth list names the "16-bit PNG" for the browser.
 
 Service (`browser.rs`):
 - The service starts at the first selection of the browser output. It stays on until the launcher ends, also when the user selects the other output. After a failed start, the next selection tries again. The status line and the browser panel show the reason.
@@ -118,6 +119,45 @@ Service events:
 The status of an ended presentation is the error that the driver gives for the change: "Error: display disconnected" or "Error: platform error: the browser viewport changed; open the surface again". Thus the status does not depend on whether the driver result or the service event comes first. An ended delay gives "Cancelled: the browser disconnected" or "Cancelled: the browser viewport changed".
 
 The session keeps two browser drivers on the same client state, as the [test host](#test-host) does: one opens and presents, the other answers `displays` and the reference table while a presentation borrows the first. The reference table uses the `query` of the client, so it has the browser limits and the "clipped" marks of [Code to PNG sample](browser.md#code-to-png-sample).
+
+### Local webview in the launcher
+
+The output "Browser (local webview)" starts the optional [`nitpick-webview`](browser.md#usage) process on the selected `QRhi` screen. It uses the service of [Browser output in the launcher](#browser-output-in-the-launcher) and presents through the browser driver. `webview.rs` starts the process; `session.rs` keeps its state. The reference table is of the webview client after its first valid `hello`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Unpaired: Show pattern, slot free / start process
+    Idle --> Idle: Show pattern, slot held / error
+    Unpaired --> Connected: Connected
+    Connected --> Authenticated: Authenticated / start 10 s timer
+    Authenticated --> Ready: Ready with webview flag / show waiting request
+    Connected --> Unpaired: Disconnected
+    Authenticated --> Unpaired: Disconnected
+    Ready --> Unpaired: Disconnected
+    Authenticated --> Idle: timer, or Ready without webview flag / end process, error
+    Ready --> Replacing: Show pattern on another screen / end process
+    Replacing --> Unpaired: slot free / start process
+```
+
+The process runs in the states `Unpaired`, `Connected`, `Authenticated` and `Ready`. From each of them, "Show pattern" on another screen gives `Replacing` (the diagram shows it from `Ready` only). Exception: in `Unpaired` with the slot held by another session, it gives an error and the process stays. A process exit, a removed screen, a service restart or stop, and the launcher end give `Idle`. "Slot" is the one session slot of the service. The launcher follows it from the `Connected` and `Disconnected` events.
+
+Rules:
+- "Show pattern" with the webview on the selected screen: after its first valid `hello`, the request goes to its client at once. Before that, the request waits ("Waiting for the local webview"); a new request replaces it.
+- The launcher starts a process only if no session holds the slot. Thus an existing client is not replaced; the status shows "another browser holds the session". A webview on another screen ends first; the new process starts after the `Disconnected` of the old session. Reason: the old page holds the slot until its WebSocket closes, and a page that connects before that gets `409` and shows "Connect again".
+- The launcher assigns the first session after the start to the webview. Its first `Ready` client must have the `webview` flag; otherwise another browser took the slot, and the launcher ends the webview. **Deviation from an exact process binding:** any page can set the flag, so this check finds a mistake, not an attacker. The pairing code controls access, as for each browser.
+- After a wrong code, the page shows "Connect again". The process and the waiting request stay.
+- The `hello` timeout runs from `Authenticated` for 10 s (`HELLO_TIMEOUT_MS` in `webview.rs`) on the Qt timer of the [measurement delay](#host-lifecycle). On timeout, the launcher ends the process.
+- A display change cancels a waiting request; the process stays if its screen stays. The launcher ends the process if its screen is gone, at a service restart or stop (a new service can have another URL), and when the session drops at the launcher end. The selection of another output does not end it, as for the [browser surface](#browser-output-in-the-launcher).
+- Process errors go to the status line only while a request waits, with the generation of that request. Later errors of the client are the browser errors of [Browser output in the launcher](#browser-output-in-the-launcher).
+
+Process:
+- The executable is `nitpick-webview` in the directory of the launcher executable. If it is missing, the status names the path.
+- Arguments: `--url=<url>` and `--at=<x>,<y>`, each in one argument (see [Usage](browser.md#usage) for a negative point).
+- The `--at` point is the centre of the screen in the units of the Qt platform plugin: on Windows the `rcMonitor` of the `HMONITOR` (native pixels), elsewhere `QPlatformScreen::geometry()`. Counter-intuitive: `QScreen::geometry()` is not used. Qt 6.12 keeps the native origin of a screen and divides only its size by the high-DPI factor (`QHighDpi::fromNativeScreenGeometry`), so a point from its size can be on another monitor. **Unverified:** that the Qt platform units on macOS and Linux are the desktop units of the shell, also with `QT_SCALE_FACTOR` or a GDK scale.
+- Windows: the launcher starts the process with `CREATE_NO_WINDOW`, because it is a console program. It calls `AllowSetForegroundWindow` for the process, so that its window can take the keyboard focus.
+- The launcher reads the error output of the process. The exit status and the first line that starts with `error` (else the last line) go into the status.
+- Ending the process is a kill (`TerminateProcess` on Windows, `SIGKILL` elsewhere), not a window close. On Windows, no WebView2 process stayed after a kill (see [Running launcher checks](#running-launcher-checks)). **Unverified:** that the WebKit processes end after a kill on macOS and Linux.
 
 ### Output report
 
@@ -303,6 +343,10 @@ Automatic light levels use $D / (2^n - 1)$ as full-range PQ for every input enco
 | Browser service start | at launcher start; at the first selection of the browser output | first selection | No listening socket until the user wants browser output. |
 | Remote displays | saved setting; off at each launcher start | off at each start | A listener on a network interface needs an explicit user action. The address is saved, so that the action is one click. |
 | Service events to the session | handle in the forward task; post each event to the `QObject` | post to the `QObject` | The session belongs to the `QObject`. The handling can drop the presentation task and start a new one. |
+| Webview monitor point | `QScreen::geometry()`; native screen geometry | native: Windows `rcMonitor`, elsewhere `QPlatformScreen::geometry()` | The shell selects the monitor in the desktop units of the OS. See [Local webview in the launcher](#local-webview-in-the-launcher). |
+| Webview session binding | a per-start token in the page URL; the first session after the start, checked by the `webview` flag | first session with the flag check | The service has one slot, so no other page can join while the webview holds it. A token needs a protocol change and still does not stop a page with the URL. |
+| Webview end | close the window; kill the process | kill | A close needs a window message or a signal per OS. The shell ends without state to save. |
+| Webview on another screen | start at once; start after the old session leaves the slot | after the old session | A page that connects while the slot is held gets `409`. |
 | X11 EDID source | Qt private `QXcbScreen`; `xcb-randr` in C++; `x11rb` in Rust | `x11rb` | Pure Rust: no extra C library, and the code compiles on every OS. Cost: a second X connection, which follows only `DISPLAY`. |
 
 ## Testing
@@ -363,6 +407,23 @@ Browser output checks use the same script and `WM_NULL` probe. Playwright 1.64.1
 | QRhi output after these checks | "Ready after delay"; Esc during the delay gives "Cancelled: the pattern window closed" |
 
 **Unverified:** a page on another device. The remote check used a page on the same computer, so it did not test the network path or a firewall. Full screen through the launcher, and these checks on macOS and Linux.
+
+[Local webview](#local-webview-in-the-launcher) checks use the same UI Automation script. It selects the output with the keyboard and clicks "Show pattern". It types the pairing code with `SendKeys` into the foreground window, without an activation of its own. Results on Windows 11 (build 26200), debug build, WebView2 157, one SDR monitor at 2560×1600 and 100 % scale (`--list-monitors`: `\\.\DISPLAY1 0,0 2560x1600 scale 1`), delay 3000 ms:
+
+| Check | Result |
+|---|---|
+| "Show pattern" without a session | The process started after 56 to 72 ms with `--url=http://127.0.0.1:<port>/ --at=1280,800`. The status was "Starting the local webview on `\\.\DISPLAY1`". |
+| Console window | None. The new visible windows were the Tauri window and the Tao event window of the process. The process has a `conhost.exe` child without a window. |
+| Keyboard focus | The webview window was the foreground window 117 to 283 ms after the click, in three runs. |
+| Pairing | The typed code authenticated the page. "Submitting pattern" 0.17 s after the code, then "Ready after delay" with a 2560×1600 frame, "Edge webview" and the full-screen layout warning. |
+| "Show pattern" again | The same process; "Ready after delay" for frame 2 |
+| Process killed after readiness | Browser panel "The browser disconnected: client closed."; no status change |
+| Process killed (`Stop-Process`) while it waits for pairing | "Error: the local webview stopped: exit status -1" at once |
+| A WebSocket session of another client holds the slot | "Error: another browser holds the session; close it before the local webview starts"; no process |
+| Launcher closed with the webview open | The process and its 2 child processes ended in less than 4 s. |
+| Launcher process killed (`taskkill /F`) | The webview process stayed open. |
+
+Not run: the `hello` timeout (the real page sends `hello` at once), screen changes (no change of the display settings of a developer machine), two monitors and mixed scales. The unit tests cover the first two.
 
 ## Future enhancements
 

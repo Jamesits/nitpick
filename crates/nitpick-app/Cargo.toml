@@ -24,9 +24,15 @@ nitpick-core = { path = "../nitpick-core" }
 nitpick-display = { path = "../nitpick-display", features = ["x11"] }
 nitpick-test-host = { path = "../nitpick-test-host", features = ["device"] }
 serde_json = "1"
+# Without `timeout`: the launcher only waits for and kills the webview.
+shared_child = { version = "1.1.2", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 nitpick-capture = { path = "../nitpick-capture" }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 cxx-qt-build = "0.10.0"
@@ -45,7 +51,3 @@ tokio-tungstenite = "0.30.0"
 
 [target.'cfg(windows)'.dev-dependencies]
 half = "2.7.1"
-windows = { version = "0.62.2", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-] }

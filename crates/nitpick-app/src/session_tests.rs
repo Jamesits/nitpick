@@ -16,13 +16,14 @@ use nitpick_core::driver::{
 use nitpick_core::pattern::{MIN_SIZE, PatternKind};
 use nitpick_core::signal::{BitDepth, Encoding, Format};
 
-use super::{Busy, DeviceReader, Event, Session, ShowRequest};
-use crate::browser::{self, EventSource, StartService, Started};
+use super::{Busy, DeviceReader, Event, Session, ShowRequest, WebviewEvent};
+use crate::browser::{self, EventSource, StartService, Started, WebviewFlag};
 use crate::delay::DelayTimer;
 use crate::display::{Backend, DeviceReports, display_for_key, ffi};
 use crate::qrhi_driver::Job;
 use crate::qrhi_driver::tests::{ChannelPost, FakeWindow, HeldWorkers, id, identity};
 use crate::submission;
+use crate::webview::{HELLO_TIMEOUT_MS, LaunchWebview, Launched};
 
 type Read = (Vec<ffi::ScreenIdentity>, oneshot::Sender<DeviceReports>);
 
@@ -93,6 +94,8 @@ struct BrowserLog {
     closes: Vec<DisplayId>,
     /// Image size of each `present`, and its reply.
     presents: Vec<((usize, usize), Reply)>,
+    /// Keys of the clients with the `webview` flag.
+    webview: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -221,6 +224,62 @@ impl OutputDriver for MockBrowser {
     }
 }
 
+impl WebviewFlag for MockBrowser {
+    fn webview(&self, display: &DisplayId) -> Option<bool> {
+        let log = self.0.borrow();
+        log.clients
+            .iter()
+            .any(|(k, _)| *k == display.key)
+            .then(|| log.webview.contains(&display.key))
+    }
+}
+
+/// The webview processes of [`FakeLauncher`]: the arguments, the exit
+/// sender and the end count of each.
+#[derive(Default)]
+struct LaunchLog {
+    launches: Vec<(String, (i64, i64))>,
+    exits: Vec<oneshot::Sender<String>>,
+    ended: Rc<Cell<u32>>,
+    /// The next launch fails with this reason.
+    fail: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct FakeLauncher(Rc<RefCell<LaunchLog>>);
+
+impl LaunchWebview for FakeLauncher {
+    fn launch(&self, url: &str, at: (i64, i64)) -> Result<Launched, String> {
+        let mut log = self.0.borrow_mut();
+        if let Some(e) = log.fail.take() {
+            return Err(e);
+        }
+        log.launches.push((url.to_owned(), at));
+        let (tx, exit) = oneshot::channel();
+        log.exits.push(tx);
+        Ok(Launched {
+            exit,
+            process: Box::new(StopGuard(Rc::clone(&log.ended))),
+        })
+    }
+}
+
+impl FakeLauncher {
+    fn launches(&self) -> Vec<(String, (i64, i64))> {
+        self.0.borrow().launches.clone()
+    }
+
+    fn ended(&self) -> u32 {
+        self.0.borrow().ended.get()
+    }
+
+    /// The newest process exits.
+    fn exit(&self, text: &str) {
+        let tx = self.0.borrow_mut().exits.pop().expect("a process");
+        let _ = tx.send(text.into());
+    }
+}
+
 struct Channel(channel::UnboundedReceiver<ServiceEvent>);
 
 impl EventSource for Channel {
@@ -270,12 +329,13 @@ struct Setup<B = MockBrowser> {
     workers: HeldWorkers,
     reader: HeldReader,
     timer: HeldTimer,
+    launcher: FakeLauncher,
     events: Rc<RefCell<Vec<Event>>>,
     /// The posted jobs, in place of the Qt event loop.
     jobs: mpsc::Receiver<Job>,
 }
 
-impl<B: OutputDriver + 'static> Setup<B> {
+impl<B: OutputDriver + WebviewFlag + 'static> Setup<B> {
     /// One event loop pass. It never waits.
     fn pass(&self) {
         while let Ok(job) = self.jobs.try_recv() {
@@ -283,8 +343,8 @@ impl<B: OutputDriver + 'static> Setup<B> {
         }
     }
 
-    /// Event loop passes until no service event is left. Gives each
-    /// service event back to the session, as the launcher does.
+    /// Event loop passes until no service or webview event is left. Gives
+    /// each of them back to the session, as the launcher does.
     fn deliver(&mut self) {
         loop {
             self.pass();
@@ -292,7 +352,7 @@ impl<B: OutputDriver + 'static> Setup<B> {
                 let mut events = self.events.borrow_mut();
                 let (service, rest) = events
                     .drain(..)
-                    .partition(|e| matches!(e, Event::Service(..)));
+                    .partition(|e| matches!(e, Event::Service(..) | Event::Webview(..)));
                 *events = rest;
                 service
             };
@@ -300,8 +360,10 @@ impl<B: OutputDriver + 'static> Setup<B> {
                 return;
             }
             for e in service {
-                if let Event::Service(n, e) = e {
-                    self.session.on_service_event(n, e);
+                match e {
+                    Event::Service(n, e) => self.session.on_service_event(n, e),
+                    Event::Webview(n, e) => self.session.on_webview_event(n, e),
+                    _ => unreachable!(),
                 }
             }
         }
@@ -333,12 +395,13 @@ impl<B: OutputDriver + 'static> Setup<B> {
     }
 }
 
-fn build<B: OutputDriver + 'static>(service: Box<dyn StartService<B>>) -> Setup<B> {
+fn build<B: OutputDriver + WebviewFlag + 'static>(service: Box<dyn StartService<B>>) -> Setup<B> {
     let window = FakeWindow::default();
     window.0.borrow_mut().size = Some(MIN_SIZE);
     let workers = HeldWorkers::default();
     let reader = HeldReader::default();
     let timer = HeldTimer::default();
+    let launcher = FakeLauncher::default();
     let events = Rc::new(RefCell::new(Vec::new()));
     let (tx, jobs) = mpsc::channel();
     let log = Rc::clone(&events);
@@ -348,6 +411,7 @@ fn build<B: OutputDriver + 'static>(service: Box<dyn StartService<B>>) -> Setup<
         workers.clone(),
         Box::new(reader.clone()),
         service,
+        Box::new(launcher.clone()),
         Rc::new(timer.clone()),
         Arc::new(ChannelPost(Mutex::new(tx))),
         move |e| log.borrow_mut().push(e),
@@ -358,6 +422,7 @@ fn build<B: OutputDriver + 'static>(service: Box<dyn StartService<B>>) -> Setup<
         workers,
         reader,
         timer,
+        launcher,
         events,
         jobs,
     }
@@ -1169,6 +1234,288 @@ fn a_service_stop_clears_the_browser_state() {
     assert_eq!(view.url, None);
     assert_eq!(view.client, "The browser service stopped: accept failed");
     assert_eq!(s.session.displays(), Vec::new());
+}
+
+/// A started mock service without a client, and the listed screens.
+fn webview_setup() -> (Setup, MockService) {
+    let m = MockService::default();
+    let mut s = build(Box::new(m.clone()));
+    s.session.start_browser(&ServiceConfig::default()).unwrap();
+    s.session.refresh().unwrap();
+    s.reply();
+    s.pass();
+    s.take_events();
+    (s, m)
+}
+
+/// A page connects and authenticates.
+fn authenticate(s: &mut Setup, m: &MockService) {
+    send(s, m, ServiceEvent::Client(ClientState::Connected));
+    send(s, m, ServiceEvent::PairingCode("0123".into()));
+    send(s, m, ServiceEvent::Client(ClientState::Authenticated));
+}
+
+/// A page pairs as client `n` with the `webview` flag `flag`.
+fn pair(s: &mut Setup, m: &MockService, n: u32, flag: bool) {
+    authenticate(s, m);
+    m.browser.set_client(n, MIN_SIZE);
+    m.browser.0.borrow_mut().webview = if flag {
+        vec![client(n).key]
+    } else {
+        Vec::new()
+    };
+    send(s, m, ServiceEvent::Client(ClientState::Ready(client(n))));
+}
+
+const URL: &str = "http://127.0.0.1:0/";
+
+/// [`FakeWindow::desktop_point`] of screen `n`.
+fn point(n: i64) -> (i64, i64) {
+    (n * 1000 + 500, 500)
+}
+
+fn starting(status: &[String]) -> bool {
+    status.len() == 1
+        && status[0].starts_with("Starting the local webview on ")
+        && status[0].ends_with(". Enter the pairing code in its window.")
+}
+
+#[test]
+fn the_webview_starts_pairs_and_gets_the_pattern() {
+    let (mut s, m) = webview_setup();
+    s.session.show_webview(delayed(1, 1000));
+    assert_eq!(s.launcher.launches(), vec![(URL.into(), point(1))]);
+    assert!(starting(&s.statuses()));
+    assert_eq!(s.session.webview_display(&id(1)), None);
+
+    authenticate(&mut s, &m);
+    assert_eq!(s.timer.started(), vec![HELLO_TIMEOUT_MS]);
+    m.browser.set_client(1, MIN_SIZE);
+    m.browser.0.borrow_mut().webview = vec![client(1).key];
+    send(
+        &mut s,
+        &m,
+        ServiceEvent::Client(ClientState::Ready(client(1))),
+    );
+    s.pass();
+    assert_eq!(s.statuses(), vec!["Submitting pattern"]);
+    assert_eq!(m.browser.opens(), vec![(client(1), MIN_SIZE)]);
+    assert_eq!(s.session.webview_display(&id(1)), Some(client(1)));
+    assert_eq!(s.session.webview_display(&id(0)), None);
+    // The `hello` ended the timeout.
+    assert!(!s.timer.fire());
+
+    let _ = m.browser.take_present().1.send(Ok("mock status".into()));
+    s.pass();
+    assert!(s.statuses()[0].starts_with("Waiting for measurement delay: 1000 ms."));
+    assert!(s.timer.fire());
+    s.pass();
+    assert!(s.statuses()[0].starts_with("Ready after delay: 1000 ms. "));
+
+    // The ready webview gets the next request at once.
+    s.session.show_webview(request(1));
+    s.pass();
+    assert_eq!(s.statuses(), vec!["Submitting pattern"]);
+    assert_eq!(s.launcher.launches().len(), 1);
+    assert_eq!(m.browser.opens().len(), 2);
+    assert_eq!(s.launcher.ended(), 0);
+}
+
+#[test]
+fn a_wrong_code_keeps_the_webview_and_its_request() {
+    let (mut s, m) = webview_setup();
+    s.session.show_webview(request(1));
+    s.take_events();
+    send(&mut s, &m, ServiceEvent::Client(ClientState::Connected));
+    send(
+        &mut s,
+        &m,
+        ServiceEvent::Client(ClientState::Disconnected("wrong code".into())),
+    );
+    assert_eq!(s.statuses(), Vec::<String>::new());
+    // "Connect again" in the page.
+    pair(&mut s, &m, 2, true);
+    s.pass();
+    assert_eq!(s.statuses(), vec!["Submitting pattern"]);
+    assert_eq!(m.browser.opens(), vec![(client(2), MIN_SIZE)]);
+    assert_eq!(s.launcher.launches().len(), 1);
+}
+
+#[test]
+fn no_hello_after_authentication_ends_the_webview() {
+    let (mut s, m) = webview_setup();
+    s.session.show_webview(request(1));
+    s.take_events();
+    authenticate(&mut s, &m);
+    assert!(s.timer.fire());
+    s.deliver();
+    assert_eq!(
+        s.statuses(),
+        vec![
+            "Error: the local webview sent no display state within 10 s after \
+             authentication; it was closed"
+        ]
+    );
+    assert_eq!(s.launcher.ended(), 1);
+    // The next request starts a new process.
+    send(
+        &mut s,
+        &m,
+        ServiceEvent::Client(ClientState::Disconnected("client closed".into())),
+    );
+    s.session.show_webview(request(1));
+    assert_eq!(s.launcher.launches().len(), 2);
+}
+
+#[test]
+fn a_failed_webview_reports_its_exit() {
+    let (mut s, _m) = webview_setup();
+    s.session.show_webview(request(1));
+    s.take_events();
+    s.launcher
+        .exit("exit status 1: error: no monitor contains the position 1500,500");
+    s.deliver();
+    assert_eq!(
+        s.statuses(),
+        vec![
+            "Error: the local webview stopped: exit status 1: error: no monitor contains \
+             the position 1500,500"
+        ]
+    );
+    s.launcher.0.borrow_mut().fail = Some("nitpick-webview.exe not found".into());
+    s.session.show_webview(request(1));
+    assert_eq!(
+        s.statuses(),
+        vec!["Error: cannot start the local webview: nitpick-webview.exe not found"]
+    );
+    s.session.show_webview(request(1));
+    assert!(starting(&s.statuses()));
+    assert_eq!(s.launcher.launches().len(), 2);
+}
+
+#[test]
+fn an_existing_browser_session_is_not_replaced() {
+    let (mut s, m) = webview_setup();
+    pair(&mut s, &m, 1, false);
+    s.take_events();
+    s.session.show_webview(request(1));
+    assert_eq!(
+        s.statuses(),
+        vec!["Error: another browser holds the session; close it before the local webview starts"]
+    );
+    assert_eq!(s.launcher.launches(), Vec::new());
+}
+
+#[test]
+fn another_browser_that_takes_the_slot_ends_the_webview() {
+    let (mut s, m) = webview_setup();
+    s.session.show_webview(request(1));
+    s.take_events();
+    pair(&mut s, &m, 1, false);
+    s.pass();
+    assert_eq!(
+        s.statuses(),
+        vec![
+            "Error: another browser took the session before the local webview; the webview \
+             was closed"
+        ]
+    );
+    assert_eq!(s.launcher.ended(), 1);
+    assert_eq!(m.browser.opens(), Vec::new());
+    // The other browser stays a browser display.
+    assert!(s.session.displays().iter().any(|d| d.id == client(1)));
+}
+
+#[test]
+fn a_removed_screen_ends_the_webview() {
+    let (mut s, m) = webview_setup();
+    s.session.show_webview(request(1));
+    s.take_events();
+    s.window.0.borrow_mut().screens = Some(vec![0]);
+    s.session.refresh().unwrap();
+    assert_eq!(s.statuses(), vec!["Cancelled: display changed"]);
+    assert_eq!(s.launcher.ended(), 1);
+    // The page of the ended process gives no request to its client.
+    pair(&mut s, &m, 1, true);
+    s.pass();
+    assert_eq!(m.browser.opens(), Vec::new());
+    send(
+        &mut s,
+        &m,
+        ServiceEvent::Client(ClientState::Disconnected("client closed".into())),
+    );
+
+    // A display change keeps a webview whose screen stays.
+    s.session.show_webview(request(0));
+    s.take_events();
+    s.session.refresh().unwrap();
+    assert_eq!(s.statuses(), vec!["Cancelled: display changed"]);
+    assert_eq!(s.launcher.ended(), 1);
+}
+
+#[test]
+fn a_webview_on_another_screen_is_replaced_after_its_session_ends() {
+    let (mut s, m) = webview_setup();
+    s.session.show_webview(request(0));
+    pair(&mut s, &m, 1, true);
+    s.pass();
+    s.take_events();
+
+    s.session.show_webview(request(1));
+    assert_eq!(
+        s.statuses(),
+        vec!["Closing the local webview on the other screen"]
+    );
+    assert_eq!(s.launcher.ended(), 1);
+    // The old page still holds the slot.
+    assert_eq!(s.launcher.launches().len(), 1);
+    m.browser.0.borrow_mut().clients.clear();
+    send(
+        &mut s,
+        &m,
+        ServiceEvent::Client(ClientState::Disconnected("client closed".into())),
+    );
+    assert_eq!(s.launcher.launches()[1], (URL.into(), point(1)));
+    assert!(starting(&s.statuses()));
+}
+
+#[test]
+fn a_service_restart_ends_the_webview() {
+    let (mut s, m) = webview_setup();
+    s.session.show_webview(request(1));
+    s.take_events();
+    send(&mut s, &m, ServiceEvent::Client(ClientState::Connected));
+    s.session.start_browser(&ServiceConfig::default()).unwrap();
+    assert_eq!(
+        s.statuses(),
+        vec!["Cancelled: the browser service restarted"]
+    );
+    assert_eq!(s.launcher.ended(), 1);
+    // The new service has no session.
+    s.session.show_webview(request(1));
+    assert!(starting(&s.statuses()));
+    // The exit of the ended process does nothing.
+    s.launcher
+        .0
+        .borrow_mut()
+        .exits
+        .remove(0)
+        .send("exit status 1".into())
+        .unwrap_err();
+    s.deliver();
+    assert_eq!(s.statuses(), Vec::<String>::new());
+}
+
+#[test]
+fn a_late_event_of_an_ended_process_does_nothing() {
+    let (mut s, _m) = webview_setup();
+    s.session.show_webview(request(1));
+    s.take_events();
+    s.session
+        .on_webview_event(7, WebviewEvent::Exited("exit status 1".into()));
+    s.session.on_webview_event(1, WebviewEvent::HelloTimeout);
+    assert_eq!(s.statuses(), Vec::<String>::new());
+    assert_eq!(s.launcher.ended(), 0);
 }
 
 /// The page of the native-service test: a WebSocket client on its own

@@ -32,6 +32,11 @@ pub trait PatternWindow: MetadataSink {
     /// # Errors
     /// No screen with this index, or a platform failure.
     fn screen_size(&self, screen: i32) -> Result<(usize, usize), String>;
+    /// A point on the screen for `nitpick-webview --at`.
+    ///
+    /// # Errors
+    /// No screen with this index, or a platform failure.
+    fn desktop_point(&self, screen: i32) -> Result<(i64, i64), String>;
     /// Replaces any open window.
     ///
     /// # Errors
@@ -80,6 +85,11 @@ impl PatternWindow for BridgeWindow {
         let width = ffi::screen_pixel_width(screen).map_err(|e| e.to_string())?;
         let height = ffi::screen_pixel_height(screen).map_err(|e| e.to_string())?;
         Ok((size(width)?, size(height)?))
+    }
+
+    fn desktop_point(&self, screen: i32) -> Result<(i64, i64), String> {
+        let p = ffi::screen_desktop_point(screen).map_err(|e| e.to_string())?;
+        Ok((i64::from(p.x), i64::from(p.y)))
     }
 
     fn open(
@@ -204,6 +214,18 @@ impl<W: PatternWindow, J: Workers> QrhiDriver<W, J> {
     /// The display of the open window.
     pub fn opened(&self) -> Option<&DisplayId> {
         self.opened.as_ref().map(|o| &o.display)
+    }
+
+    /// A point on the screen of `display` for `nitpick-webview --at`.
+    ///
+    /// # Errors
+    /// `Disconnected` if the screen is gone; `Platform` if the platform
+    /// gives no point.
+    pub fn desktop_point(&self, display: &DisplayId) -> Result<(i64, i64), OutputError> {
+        let screen = self.screen(display)?;
+        self.window
+            .desktop_point(screen)
+            .map_err(OutputError::Platform)
     }
 
     /// The current screen index of `display`, if the screen exists.
