@@ -3,7 +3,7 @@
 //! `doc/design/output_driver/testing.md`.
 //!
 //! Windows: Windows Graphics Capture of one window into an FP16 frame pool
-//! ([`wgc`]). Other platforms have no adapter yet.
+//! (module `wgc`, Windows only). Other platforms have no adapter yet.
 
 pub mod frame;
 #[cfg(windows)]

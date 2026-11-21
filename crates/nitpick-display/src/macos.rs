@@ -97,7 +97,8 @@ pub struct ScreenReport {
     pub p3: bool,
 }
 
-/// Native calls. [`MacDisplay::new`] uses the OS; tests inject reports.
+/// Native calls. `MacDisplay::new` (macOS only) uses the OS; tests inject
+/// reports.
 pub trait MacNative {
     /// Active displays. Core Graphics and `ColorSync` only; callable on any
     /// thread.

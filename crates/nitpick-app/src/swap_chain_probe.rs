@@ -123,10 +123,11 @@ mod ffi {
 
 pub use ffi::{FrameFault, MetadataCall, SwapChainRecord};
 
-/// See [`ffi::SwapChainImage`]; the readback of a completed render.
+/// The readback of the swap-chain image after the completed draw of `frame`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapChainImage {
     pub frame: u64,
+    /// `QRhiTexture::Format` of the readback, for example `RGB10A2`.
     pub format: String,
     /// Tightly packed rows from the top-left pixel.
     pub data: Vec<u8>,

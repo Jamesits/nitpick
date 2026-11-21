@@ -112,7 +112,8 @@ pub struct ColordReport {
     pub devices: Vec<ColordDevice>,
 }
 
-/// Native calls. [`LinuxDisplay::new`] uses the OS; tests inject reports.
+/// Native calls. `LinuxDisplay::new` (Linux only) uses the OS; tests inject
+/// reports.
 pub trait LinuxNative {
     /// Every connector of every card.
     ///

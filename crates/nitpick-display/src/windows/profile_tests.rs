@@ -1143,6 +1143,101 @@ fn record_without_prefix_is_rejected() {
     ));
 }
 
+const BOOT_LUID: i64 = 0x1_0000_2000;
+
+/// A path without a monitor device path, as the HDMI recorder of a checked
+/// Windows 11 build 26200 system.
+fn fallback_path(luid: i64) -> PathReport {
+    let mut p = hdr(1);
+    p.adapter_luid = luid;
+    p.target_adapter_luid = luid;
+    p.target_name.as_mut().unwrap().device_path = String::new();
+    p
+}
+
+fn fallback_target(luid: i64) -> ProfileTarget {
+    ProfileTarget {
+        device: DeviceId {
+            backend: "windows".into(),
+            key: format!("target:{luid:016x}:101"),
+        },
+        role: ProfileRole::AdvancedColor,
+        scope: ProfileScope {
+            user: UserScope::Current,
+            host: None,
+        },
+    }
+}
+
+#[test]
+fn fallback_key_gives_no_targets_and_no_changes() {
+    let fake = Fake::with(vec![fallback_path(BOOT_LUID)]);
+    let mut b = fake.backend();
+    let t = fallback_target(BOOT_LUID);
+    assert_eq!(b.devices().unwrap()[0].id, t.device);
+    assert_eq!(b.profile_targets(&t.device).unwrap(), vec![]);
+    let caps = b.query_device(&t.device).unwrap().capabilities;
+    assert_eq!(caps.icc_profiles.value(), None);
+    assert!(matches!(
+        b.prepare_icc_profile(&t, &icc(1)),
+        Err(DeviceError::Unsupported { .. })
+    ));
+    assert_eq!(fake.writes(), 0);
+}
+
+/// A recovery record of the fallback key, as an earlier build saved it,
+/// with its change applied. The fake keys its displays by device key.
+fn applied_fallback_record(fake: &Fake) -> PreparedProfileChange {
+    let t = fallback_target(BOOT_LUID);
+    let donor = Fake::with(vec![hdr(1)]);
+    let mut change = donor
+        .backend()
+        .prepare_icc_profile(&ac_user(1), &icc(1))
+        .unwrap();
+    change.device = fake.backend().devices().unwrap().remove(0);
+    change.target = t.clone();
+    change.original.target = t.clone();
+    let name = installed_name(&change).to_string();
+    fake.put_file(&name, &icc_bytes(1));
+    fake.set_per_user_flag(&t.device.key, true);
+    fake.set_lists(
+        &t.device.key,
+        UserScope::Current,
+        ProfileRole::AdvancedColor,
+        lists(&[&name], Some(&name)),
+    );
+    recovery::decode(&recovery::encode(&change).unwrap()).unwrap()
+}
+
+#[test]
+fn fallback_key_record_restores_before_a_restart_only() {
+    let fake = Fake::with(vec![fallback_path(BOOT_LUID)]);
+    let before = fake.state();
+    let change = applied_fallback_record(&fake);
+    let mut b = fake.backend();
+    assert!(matches!(
+        b.set_icc_profile(&change),
+        Err(DeviceError::Unsupported { .. })
+    ));
+    assert_eq!(fake.writes(), 0);
+    assert_eq!(b.restore_profile(&change), Ok(change.original.clone()));
+    assert_eq!(fake.state(), before);
+
+    // After a restart the adapter has a new LUID, so the key names no
+    // display. The change stays on the display.
+    let fake = Fake::with(vec![fallback_path(BOOT_LUID)]);
+    let change = applied_fallback_record(&fake);
+    let applied = fake.state();
+    fake.0.borrow_mut().paths = vec![fallback_path(BOOT_LUID + 1)];
+    let mut b = fake.backend();
+    assert_eq!(
+        b.restore_profile(&change),
+        Err(DeviceError::Disconnected(change.target.device.clone()))
+    );
+    assert_eq!(fake.writes(), 0);
+    assert_eq!(fake.state(), applied);
+}
+
 #[test]
 fn missing_api_gives_no_targets() {
     let fake = Fake::with(vec![hdr(1)]);

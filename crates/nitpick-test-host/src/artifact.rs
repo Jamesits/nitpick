@@ -400,11 +400,11 @@ fn write_files(dir: &Path, artifact: &Artifact) -> io::Result<()> {
     fs::write(dir.join(RESULT), serde_json::to_vec_pretty(&result)?)
 }
 
-/// Reads an artifact directory of [`write`].
+/// Reads an artifact directory of [`write`](fn@write).
 ///
 /// # Errors
 /// A file is missing, has another size than its record or another name
-/// than [`write`] gives, or `result.json` is invalid or of another version.
+/// than [`write`](fn@write) gives, or `result.json` is invalid or of another version.
 pub fn read(dir: &Path) -> io::Result<Artifact> {
     let invalid = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
     let r: ResultFile = serde_json::from_slice(&fs::read(dir.join(RESULT))?)?;

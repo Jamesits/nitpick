@@ -261,7 +261,7 @@ impl BrowserService {
     }
 
     /// Stops the server and waits for its thread, at most about
-    /// [`SHUTDOWN_GRACE`]. The port is free on return.
+    /// `SHUTDOWN_GRACE`. The port is free on return.
     pub fn shutdown(mut self) {
         self.stop();
     }

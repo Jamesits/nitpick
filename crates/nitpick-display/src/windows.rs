@@ -133,7 +133,8 @@ pub struct DxgiOutput {
     pub desc1: Field<OutputDesc1>,
 }
 
-/// Native calls. [`WindowsDisplay::new`] uses the OS; tests inject reports.
+/// Native calls. `WindowsDisplay::new` (Windows only) uses the OS; tests
+/// inject reports.
 pub trait WindowsNative {
     /// Active paths.
     ///
@@ -232,15 +233,34 @@ struct Snapshot {
     revision: u64,
 }
 
+/// Prefix of the device key of a path without a monitor device path.
+/// Monitor device interface paths start with `\\?\`, so the forms cannot
+/// collide.
+const FALLBACK_KEY_PREFIX: &str = "target:";
+
+const FALLBACK_KEY_REASON: &str = "the display has no monitor device path; its fallback key holds \
+     the adapter LUID, which changes at a restart, so a recovery record could not find the \
+     display again";
+
+/// Whether `key` is the fallback key, which does not survive a restart.
+fn is_fallback_key(key: &str) -> bool {
+    key.starts_with(FALLBACK_KEY_PREFIX)
+}
+
 /// The monitor device path is the key: it is stable across restarts and
 /// distinguishes identical monitors. The fallback key contains the adapter
 /// LUID, so it does not survive a restart; a recovery record for it then
-/// fails as disconnected instead of matching another display.
+/// fails as disconnected instead of matching another display. The other
+/// fields of the path (adapter device path, target ID, EDID IDs) were not
+/// selected as a key: they identify a connector or a model, not a unit.
 fn device_info(path: &PathReport) -> DeviceInfo {
     let target = path.target_name.as_ref().ok();
     let key = match target {
         Some(t) if !t.device_path.is_empty() => t.device_path.clone(),
-        _ => format!("target:{:016x}:{}", path.adapter_luid, path.target_id),
+        _ => format!(
+            "{FALLBACK_KEY_PREFIX}{:016x}:{}",
+            path.adapter_luid, path.target_id
+        ),
     };
     let name = target
         .map(|t| t.friendly_name.clone())
@@ -503,6 +523,7 @@ impl<N: WindowsNative + WindowsProfileNative + WindowsSetupNative> DisplayDevice
         let desc1 = desc1.as_ref().copied().map_err(String::as_str);
         let active = active(&entry.path, desc1);
         let icc_profiles = match self.native.profile_api() {
+            Ok(()) if is_fallback_key(&entry.info.id.key) => unknown(FALLBACK_KEY_REASON),
             Ok(()) => known(true, MSCMS),
             Err(DeviceError::Unsupported { .. }) => known(false, MSCMS),
             Err(e) => unknown(e.to_string()),

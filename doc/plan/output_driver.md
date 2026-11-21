@@ -346,7 +346,7 @@ TODO:
 
 TODO:
 
-- On the Windows development system, `GetDeviceGammaRamp` failed for the only active display (an HDMI recorder, HDR off; its device key was the `target:` fallback, so the monitor device path was empty). Find the cause. On the runner, record the ramp of each display with and without a loaded calibration, and which identity form the driver gives.
+- On the Windows development system, `GetDeviceGammaRamp` failed for the only active display (an HDMI recorder, HDR off; its device key was the `target:` fallback, so the monitor device path was empty). On the same display, `ColorProfileGetDisplayUserScope` failed with `E_INVALIDARG`; the missing monitor device can be the common cause (item 80). Find the cause. On the runner, record the ramp of each display with and without a loaded calibration, and which identity form the driver gives.
 - On a dedicated test system, set a ramp with a separate tool and check that `DisplaySetup::changes` reports `gamma_ramp`. With HDR on and in SDR WCG, record whether the GDI ramp changes the output, for example with a WGC capture. Do not change the display settings of a developer machine.
 
 ### 75. Deliver OS display events to the device run
@@ -548,16 +548,18 @@ TODO:
 - Record actual wire depth and dithering state separately. Check repeated wire samples for temporal changes; one frame cannot establish code preservation. Keep gamma-ramp, GPU-clamp and MHC2 effects isolated under the [display setup](../design/display_device.md#display-setup) baseline.
 - Store results at their measured boundary, verify restoration, and update only the claims supported by those results. Remove completed plan items without renumbering the remaining items.
 
-### 80. Recover a change of a Windows display without a monitor device path after a restart
+### 80. Decide profile control of a Windows display without a monitor device path
 
-A Windows display without a monitor device path has the device key `target:<adapter LUID>:<target ID>`; see [Windows reports](../design/display_device.md#windows-reports). The LUID changes at a restart. Thus after a crash and a restart, the recovery record of a change of such a display fails as disconnected and stays, and the profile change stays on the display. The HDMI recorder of the Windows development system has no device path (item 73).
+A Windows device with the fallback key `target:<adapter LUID>:<target ID>` has no profile targets, because the key does not survive a restart; see [Windows profile assignment](../design/display_device.md#windows-profile-assignment). The HDMI recorder of the Windows development system has this key (item 73).
+
+Open questions:
+
+- Can Windows assign a profile to a display without a monitor device path? On the HDMI recorder, `ColorProfileGetDisplayUserScope` failed with `E_INVALIDARG`, and `EnumDisplayDevicesW` listed no monitor with its device path. If yes, which key survives a restart and still separates identical displays? The target ID with the adapter device path identifies a connector, not a unit; **unverified:** whether the target ID survives a restart.
+
+### 81. Check the rustdoc warnings on macOS and Linux
+
+`cargo doc --no-deps --workspace` gives no warning on Windows, also with the feature `device` of `nitpick-cli`. A cross-target build on Windows (`--target x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`) gave no warning for `nitpick-core`, `nitpick-display`, `nitpick-capture`, `nitpick-browser`, `nitpick-compare`, `nitpick-model`, `nitpick-fixtures`, `nitpick-test-host` and `nitpick-cli` (with and without `device`). Links to items of one OS are code text without a link.
 
 TODO:
 
-- Find a key for such a display that survives a restart and still separates identical displays, or reject profile changes of a device with the fallback key. Verify with injected native reports: a record of the fallback key after a simulated restart.
-
-### 81. Fix the broken rustdoc links
-
-TODO:
-
-- `cargo doc --no-deps` for Windows warns about four intra-doc links: `LinuxDisplay::new` (`nitpick-display`, `linux.rs`) and `MacDisplay::new` (`macos.rs`) exist only on their target OS, and `write` in `nitpick-test-host` (`artifact.rs`) is both a function and a macro. Change the links so that `cargo doc` gives no warning on each OS.
+- On macOS and on Linux, run `cargo doc --no-deps --workspace`. The cross-target build could not document `nitpick-profile` (the `lcms2-sys` build needs a C compiler of the target), `nitpick-webview` (GTK `pkg-config` on Linux, a C compiler for `objc2-exception-helper` on macOS) and `nitpick-app` (not tried: it needs the Qt of the target). Fix each warning.

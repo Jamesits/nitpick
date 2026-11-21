@@ -174,7 +174,7 @@ Each platform module maps native reports to the core types through an injected n
 
 ### Windows reports
 
-The device key is the monitor device interface path from `DISPLAYCONFIG_TARGET_DEVICE_NAME`. It survives a restart and distinguishes identical monitors. Without a device path the key is `target:<adapter LUID>:<target ID>`. The LUID changes at a restart, so this key does not survive it: a recovery record for it then fails as disconnected and stays. A check on Windows 11 build 26200 gave this fallback for an HDMI recorder. The identity evidence holds only fields that survive a restart: EDID IDs, connector instance and output technology. The backend re-resolves the adapter LUID and source ID from the key before each native call.
+The device key is the monitor device interface path from `DISPLAYCONFIG_TARGET_DEVICE_NAME`. It survives a restart and distinguishes identical monitors. Without a device path the key is `target:<adapter LUID>:<target ID>`. The LUID changes at a restart, so this key does not survive it. Thus a device with this fallback key has no profile targets; see [Windows profile assignment](#windows-profile-assignment). The identity evidence holds only fields that survive a restart: EDID IDs, connector instance and output technology. The backend re-resolves the adapter LUID and source ID from the key before each native call.
 
 | Field | Source | Rule |
 |---|---|---|
@@ -188,13 +188,15 @@ The device key is the monitor device interface path from `DISPLAYCONFIG_TARGET_D
 
 **Unverified:** whether DXGI substitutes OS default luminance for an EDID without HDR static metadata, whether the legacy wide-colour bit is set only for SDR WCG, and the wire gamut of SDR WCG. A check on Windows 11 build 26200 with one HDR display read every field above, with HDR on at 8 bits per channel.
 
-`icc_profiles` is `Yes` when `mscms.dll` exports the `ColorProfile*` functions (Windows build 20348 and later), and `No` otherwise.
+`icc_profiles` is `Yes` when `mscms.dll` exports the `ColorProfile*` functions (Windows build 20348 and later), and `No` otherwise. For a device with the fallback key it is unknown with the reason.
 
 ### Windows profile assignment
 
 `nitpick_display::windows` uses the [display association functions](https://learn.microsoft.com/en-us/windows/win32/api/icm/nf-icm-colorprofileadddisplayassociation) of `mscms.dll`. They address a display by the adapter LUID and source ID, which the backend re-resolves from the device key before each call. The backend loads every `mscms.dll` function at run time.
 
 Each device has four targets: the ordinary and the Advanced Color role, each in the current-user and the system-wide scope. Windows has no host scope; a target with a host scope is `Unsupported`.
+
+A device with the fallback key of [Windows reports](#windows-reports) has no targets. `prepare_icc_profile` and `set_icc_profile` of such a target fail with `Unsupported` before a native call. **Conservative rule:** after a crash and a restart, a recovery record of this key would fail as disconnected and stay, and the change would stay on the display. `restore_profile` does not reject the key, so a record of an earlier build is still restored before a restart. A check on Windows 11 build 26200 gave the fallback key for an HDMI recorder. Its profile state was unreadable without this rule: `EnumDisplayDevicesW` listed no monitor with the target's device path, so the registry lists were unknown, and `ColorProfileGetDisplayUserScope` failed with `E_INVALIDARG`. PnP listed a monitor device for the recorder (`DISPLAY\ATSA714\...`), with the status "Unknown", as each monitor device of the system. **Open:** whether Windows can assign a profile to a display without a monitor device path, and thus whether a key that survives a restart is necessary.
 
 Native model. Items marked "observed" come from a check on Windows 11 build 26200 and are not in the Microsoft reference:
 - Each scope and role has an association list and a default.
@@ -407,6 +409,7 @@ The crate must build on all three operating systems. Missing APIs, services, rol
 | Display setup read | Record it by hand only; a separate trait; a method of `DisplayDeviceControl` | Method `display_setup`. The backend resolves the device identity in the same way as for the other calls, and the host uses one worker. A backend that cannot read a field gives unknown. |
 | Unknown setup field in a baseline | Take it as off; report it as a finding | A finding. An unsupported vendor call does not show that the control is off. |
 | Recovery-record format | Separate record types in `nitpick-display`; `serde` forms of the core types | `serde` behind a core feature: one definition of each type. The reader checks `version` before other fields, because another version can give a field another meaning. Profile bytes and hashes are hex text, and the stored hash must match the bytes. |
+| Windows display without a monitor device path | A key from the adapter device path, target ID and EDID IDs; the fallback key with profile changes; the fallback key without profile changes | No profile changes. The other fields identify a connector or a model, not a unit, so an identical display on the same connector would match a record. **Unverified:** whether the target ID survives a restart. With the fallback key, a record fails after a restart and leaves the change on the display. Cost: such a display has no profile control. |
 | Native-call tests | Test only on each OS; inject native reports | Inject. The mapping compiles on every OS, and unknown or failed fields can be tested without a display. |
 | macOS EDR headroom | Put it in the luminance fields with an assumed SDR white; a separate ratio field | Separate `edr` field. The SDR white luminance changes with brightness and is not reported. An assumed scale would give false absolute values and a false exact claim for the QRhi FP16 path. |
 | macOS `NSScreen` thread | Require the main thread; synchronous dispatch to the main queue; asynchronous dispatch with a bounded wait | Bounded wait. The trait runs on a worker. A synchronous dispatch blocks for ever in a host without a main run loop. A late block sends to a closed channel. |

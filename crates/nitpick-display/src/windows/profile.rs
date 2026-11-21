@@ -13,7 +13,9 @@ use nitpick_core::device::{
     ProfileTarget, Report, ResourceKind, UserScope,
 };
 
-use super::{BACKEND, Entry, Snapshot, WindowsDisplay, WindowsNative};
+use super::{
+    BACKEND, Entry, FALLBACK_KEY_REASON, Snapshot, WindowsDisplay, WindowsNative, is_fallback_key,
+};
 use crate::common::{fnv1a64, resolve, unsupported};
 
 /// File name prefix of profiles that this backend installs. Restoration
@@ -167,6 +169,16 @@ fn check_target(target: &ProfileTarget) -> Result<(), DeviceError> {
     }
     if target.scope.host.is_some() {
         return Err(unsupported("profile target", "Windows has no host scope"));
+    }
+    Ok(())
+}
+
+/// A change needs a key that a recovery record finds after a restart.
+/// Restoration does not check this, so a record of an earlier build is
+/// still restored before a restart.
+fn check_changeable(target: &ProfileTarget) -> Result<(), DeviceError> {
+    if is_fallback_key(&target.device.key) {
+        return Err(unsupported("profile change", FALLBACK_KEY_REASON));
     }
     Ok(())
 }
@@ -429,7 +441,7 @@ impl<N: WindowsNative + WindowsProfileNative> WindowsDisplay<N> {
     }
 
     pub(super) fn profile_targets_of(&mut self, info: &DeviceInfo) -> Vec<ProfileTarget> {
-        if self.native.profile_api().is_err() {
+        if self.native.profile_api().is_err() || is_fallback_key(&info.id.key) {
             return Vec::new();
         }
         targets(info)
@@ -466,6 +478,7 @@ impl<N: WindowsNative + WindowsProfileNative> WindowsDisplay<N> {
         target: &ProfileTarget,
         profile: &IccProfile,
     ) -> Result<PreparedProfileChange, DeviceError> {
+        check_changeable(target)?;
         let (snapshot, entry) = self.locate(target)?;
         let entry = &entry;
         let original = self.read_state(entry, target);
@@ -525,6 +538,7 @@ impl<N: WindowsNative + WindowsProfileNative> WindowsDisplay<N> {
         change.check_version()?;
         let plan = Plan::of(change)?;
         let target = &change.target;
+        check_changeable(target)?;
         let (snapshot, entry) = self.locate(target)?;
         let entry = &entry;
         if entry.info != change.device {
