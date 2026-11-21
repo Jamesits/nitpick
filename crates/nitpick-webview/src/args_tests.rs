@@ -74,3 +74,21 @@ fn list_monitors_excludes_the_window_arguments() {
     .unwrap();
     assert_eq!(args.at, Some((0, 0)));
 }
+
+#[test]
+fn at_accepts_a_separate_negative_value() {
+    for at in [&["--at", "-1920,540"][..], &["--at=-1920,540"]] {
+        let mut command = vec!["nitpick-webview", "--url", "http://127.0.0.1/"];
+        command.extend(at);
+        let args = Args::try_parse_from(command).unwrap();
+        assert_eq!(args.at, Some((-1920, 540)), "{at:?}");
+    }
+}
+
+// With hyphen values allowed, `--at` takes the next flag as its value; the
+// point parser must then reject it.
+#[test]
+fn at_without_a_value_fails() {
+    let argv = ["nitpick-webview", "--at", "--url", "http://127.0.0.1/"];
+    assert!(Args::try_parse_from(argv).is_err());
+}

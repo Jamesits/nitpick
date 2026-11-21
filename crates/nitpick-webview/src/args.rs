@@ -15,7 +15,14 @@ pub struct Args {
     pub url: Option<Url>,
     /// A point on the target monitor, `<x>,<y>`, in the coordinates that
     /// `--list-monitors` prints.
-    #[arg(long, value_parser = point, required_unless_present = "list_monitors")]
+    // `allow_negative_numbers` does not cover `-1920,540`: clap accepts only
+    // a value that parses as one number.
+    #[arg(
+        long,
+        value_parser = point,
+        allow_hyphen_values = true,
+        required_unless_present = "list_monitors"
+    )]
     pub at: Option<(i64, i64)>,
     /// Print the monitors and exit.
     #[arg(long, conflicts_with_all = ["url", "at"])]

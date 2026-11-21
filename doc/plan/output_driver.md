@@ -585,9 +585,3 @@ Open questions:
 TODO:
 
 - On macOS and on Linux, run `cargo doc --no-deps --workspace`. The cross-target build could not document `nitpick-profile` (the `lcms2-sys` build needs a C compiler of the target), `nitpick-webview` (GTK `pkg-config` on Linux, a C compiler for `objc2-exception-helper` on macOS) and `nitpick-app` (not tried: it needs the Qt of the target). Fix each warning.
-
-### 83. Accept a separate negative `--at` value in `nitpick-webview`
-
-TODO:
-
-- `nitpick-webview --url <url> --at -1920,540` stops with exit status 2: `clap` reads `-1920,540` as a flag. Only `--at=-1920,540` works; [Usage](../design/output_driver/browser.md#usage) states this, and the launcher uses the `=` form. Accept the separate form, for example with `allow_hyphen_values` on `--at`, and test it in `args_tests.rs`. Then remove the note in Usage.

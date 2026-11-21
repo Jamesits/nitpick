@@ -292,8 +292,6 @@ cargo run -p nitpick-webview -- --url http://127.0.0.1:8080/ --at 100,100
 
 Desktop units are native pixels on Windows, points on macOS and GDK application pixels on Linux. See the "Position units" decision in [Technical decisions](#technical-decisions). Edges are half-open: a monitor at `0,0 2560x1440` contains `2559,1439`, not `2560,0`. The shell fails if no monitor or more than one monitor contains the point.
 
-Give a point with a negative coordinate as one argument, `--at=-1920,540`. As a separate value, `--at -1920,540` stops with exit status 2: the argument parser (`clap`) reads `-1920,540` as a flag.
-
 The shell opens one borderless full-screen window on the selected monitor and requests the keyboard focus. The window permits navigation only inside the origin of `--url` and rejects new windows. The shell defines no commands and no capabilities, so the page has no IPC access to it. The webview runs in private mode, so it keeps no cookies or storage. WebView2 still creates a data folder in `%LOCALAPPDATA%\com.nekomimirouter.nitpick.webview`. On Linux, the shell prints `warning: WebKitGTK shows HDR images as SDR`; the driver identifies the engine from the user agent, see [Graphics path](#graphics-path).
 
 Exit status: 0 after the window closes and after `--list-monitors`, 1 if the shell cannot start, read the monitors, select a monitor or open the window, and 2 for invalid arguments. The process does not stop when the session ends; the caller closes it. When the process ends, the server sees a closed client.
