@@ -10,9 +10,11 @@ use futures_channel::mpsc;
 use futures_core::Stream;
 use futures_util::stream;
 use nitpick_browser::{BrowserDriver, BrowserService, ClientState, ServiceEvent, ServiceEvents};
+use nitpick_core::driver::DisplayId;
 use nitpick_test_host::protocol::DisplayState;
 use nitpick_test_host::{
-    Clock, DriverEvent, Event, Fixtures, Hooks, LocalFuture, NoCapture, TestHost,
+    ArtifactWriter, Artifacts, Clock, DriverEvent, Environment, EnvironmentSource, Event, Fixtures,
+    Hooks, LocalFuture, NoCapture, TestHost,
 };
 
 use crate::host::Exit;
@@ -43,6 +45,24 @@ impl Hooks for BrowserHooks {
 
     fn watch_surface(&mut self) -> Option<LocalFuture<()>> {
         None
+    }
+}
+
+/// `os`: of the host process. A capture can show only a browser on the
+/// host; the user agent names the OS of a remote client. The browser does
+/// not report its GPU.
+struct BrowserEnvironment {
+    os: Option<String>,
+    driver: BrowserDriver,
+}
+
+impl EnvironmentSource for BrowserEnvironment {
+    fn read(&mut self, display: &DisplayId) -> Environment {
+        Environment {
+            os: self.os.clone(),
+            renderer: self.driver.agent(display),
+            ..Environment::default()
+        }
     }
 }
 
@@ -93,14 +113,22 @@ pub async fn run(
     lines: mpsc::UnboundedReceiver<String>,
     fixtures: Fixtures,
     delay_ms: u32,
+    artifacts: Option<ArtifactWriter>,
 ) -> Exit {
+    let artifacts = artifacts.map(|writer| Artifacts {
+        sink: Box::new(writer),
+        environment: Box::new(BrowserEnvironment {
+            os: Some(nitpick_test_host::host_os()),
+            driver: BrowserDriver::new(service),
+        }),
+    });
     let host = TestHost {
         driver: Rc::new(RefCell::new(BrowserDriver::new(service))),
         viewer: BrowserDriver::new(service),
         clock: Box::new(TokioClock),
         hooks: Box::new(BrowserHooks),
         capture: Box::new(NoCapture(NO_CAPTURE.into())),
-        artifacts: None,
+        artifacts,
         fixtures: Rc::new(fixtures),
         delay_ms,
     };

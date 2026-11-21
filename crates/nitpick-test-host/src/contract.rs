@@ -21,7 +21,7 @@ use nitpick_core::image::Image;
 use nitpick_core::signal::{BitDepth, Encoding, Format, Rgb};
 use nitpick_fixtures::{LightLevelRequest, MetadataRequest};
 
-use crate::artifact::{Artifact, ArtifactSink, Artifacts, Environment, Saved};
+use crate::artifact::{Artifact, ArtifactSink, Artifacts, Environment, EnvironmentSource, Saved};
 use crate::capture::{Capture, CaptureAdapter, CaptureFrames, CaptureTarget, Timestamp};
 use crate::controller::{Clock, DriverEvent, Hooks, LocalFuture, NO_ARTIFACTS, TestHost};
 use crate::fixture::{Fixtures, hdr10_request};
@@ -419,10 +419,22 @@ impl Drop for Session {
     }
 }
 
-fn environment() -> Environment {
+/// The environment that [`DisplayEnvironment`] gives for `display`.
+fn environment(display: &str) -> Environment {
     Environment {
         os: Some("mock os".into()),
+        renderer: Some(format!("mock renderer of {display}")),
         ..Environment::default()
+    }
+}
+
+/// Gives an environment of the display that it gets, so that a run record
+/// shows which display the host passed.
+struct DisplayEnvironment;
+
+impl EnvironmentSource for DisplayEnvironment {
+    fn read(&mut self, display: &DisplayId) -> Environment {
+        environment(&display.to_string())
     }
 }
 
@@ -480,7 +492,7 @@ fn setup(fixtures: &Rc<Fixtures>, with_artifacts: bool) -> (LocalFuture<()>, Har
         capture: Box::new(HeldCapture(Rc::clone(&captures))),
         artifacts: with_artifacts.then(|| Artifacts {
             sink: Box::new(HeldSink(Rc::clone(&sink))),
-            environment: environment(),
+            environment: Box::new(DisplayEnvironment),
         }),
         fixtures: Rc::clone(fixtures),
         delay_ms: DEFAULT_DELAY_MS,

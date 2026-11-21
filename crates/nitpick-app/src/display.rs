@@ -74,6 +74,23 @@ pub mod ffi {
         description: String,
     }
 
+    /// The renderer of the open pattern window, for the artifact
+    /// environment of the test host.
+    #[namespace = "nitpick"]
+    struct RendererInfo {
+        /// `qVersion()`: the Qt run-time version.
+        qt_version: String,
+        /// `QRhi::backendName()`.
+        backend: String,
+        /// `QRhiDriverInfo`. The IDs are PCI IDs on D3D11 and Vulkan.
+        device_name: String,
+        vendor_id: u64,
+        device_id: u64,
+        /// D3D11: the user-mode driver version of the DXGI adapter. Vulkan:
+        /// the raw `driverVersion`. Empty: not read (Metal).
+        driver_version: String,
+    }
+
     /// Native identity of a Qt screen. Fields of other platforms are empty
     /// or 0.
     #[namespace = "nitpick"]
@@ -137,6 +154,11 @@ pub mod ffi {
         #[namespace = "nitpick"]
         #[cxx_name = "patternWindowHandle"]
         fn pattern_window_handle() -> Result<u64>;
+
+        /// The renderer of the open pattern window.
+        #[namespace = "nitpick"]
+        #[cxx_name = "patternWindowRenderer"]
+        fn pattern_window_renderer() -> Result<RendererInfo>;
 
         /// Queues `pixels` as frame `frame` in the open window and returns:
         /// tightly packed rows in the swap chain format, `width × height`

@@ -8,12 +8,13 @@
 //! `cargo nextest run -p nitpick-app --test test_host --run-ignored only`.
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nitpick_test_host::controller::NO_ARTIFACTS;
+use nitpick_test_host::artifact::read;
 use nitpick_test_host::protocol::{CaptureOutcome, Cause, ErrorKind, SurfaceState, VERSION};
 use nitpick_test_host::{Event, Request};
 // The build script links the generated C++ of the package into every
@@ -29,18 +30,27 @@ struct Host {
     events: mpsc::Receiver<String>,
 }
 
+/// `nitpick --test-host`, with an artifact directory if `artifacts`.
+fn host_command(platform: Option<&str>, artifacts: Option<&Path>) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nitpick"));
+    command.arg("--test-host");
+    if let Some(dir) = artifacts {
+        command.arg("--artifacts").arg(dir);
+    }
+    if let Some(platform) = platform {
+        command.env("QT_QPA_PLATFORM", platform);
+    }
+    command
+}
+
 impl Host {
-    fn start(platform: Option<&str>) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_nitpick"));
-        command
-            .arg("--test-host")
+    fn start(platform: Option<&str>, artifacts: Option<&Path>) -> Self {
+        let mut child = host_command(platform, artifacts)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        if let Some(platform) = platform {
-            command.env("QT_QPA_PLATFORM", platform);
-        }
-        let mut child = command.spawn().expect("start nitpick");
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("start nitpick");
         let stdout = child.stdout.take().expect("piped");
         let (tx, events) = mpsc::channel();
         thread::spawn(move || {
@@ -122,24 +132,43 @@ fn capture(frame: u64) -> Request {
     }
 }
 
-/// The `captured` event of `frame`: its result and reason.
-fn captured(host: &mut Host, frame: u64) -> (CaptureOutcome, Option<String>) {
-    match host.next() {
+/// The `captured` event of `frame`: its result, reason and artifact. With
+/// an artifact, waits for its `saved` event.
+fn captured(host: &mut Host, frame: u64) -> (CaptureOutcome, Option<String>, Option<String>) {
+    let (result, reason, artifact) = match host.next() {
         Event::Captured {
             frame: f,
             result,
             reason,
+            artifact,
             ..
-        } if f == frame => (result, reason),
+        } if f == frame => (result, reason, artifact),
         other => panic!("expected `captured` of frame {frame}, got {other:?}"),
+    };
+    if let Some(name) = &artifact {
+        host.expect(&Event::Saved {
+            frame,
+            artifact: name.clone(),
+        });
     }
+    (result, reason, artifact)
 }
 
-/// Captures the marked, acknowledged `frame` of the pattern window. On
-/// Windows, frame acceptance needs a heartbeat, because the window gives
-/// no new frames while it shows a static image. The host has no artifact
-/// directory, so an accepted frame is `unavailable` with that reason.
-fn check_capture(host: &mut Host, frame: u64) {
+/// The shown frame that a capture artifact must record.
+struct Shown<'a> {
+    display: &'a str,
+    generation: u64,
+    frame: u64,
+    fixture: &'a str,
+    depth: u32,
+}
+
+/// Captures the marked, acknowledged frame of the pattern window, with
+/// the artifacts in `root`. On Windows, frame acceptance needs a
+/// heartbeat, because the window gives no new frames while it shows a
+/// static image.
+fn check_capture(host: &mut Host, shown: &Shown<'_>, root: &Path) {
+    let frame = shown.frame;
     if !cfg!(windows) {
         host.send(&capture(frame));
         assert_eq!(captured(host, frame).0, CaptureOutcome::Unavailable);
@@ -150,18 +179,86 @@ fn check_capture(host: &mut Host, frame: u64) {
         heartbeat_ms: None,
         deadline_ms: Some(2000),
     });
-    let (result, reason) = captured(host, frame);
-    eprintln!("without heartbeat: {result:?}, {reason:?}");
+    let (result, reason, artifact) = captured(host, frame);
+    eprintln!("without heartbeat: {result:?}, {reason:?}, {artifact:?}");
     assert_eq!(result, CaptureOutcome::Fail, "{reason:?}");
+    // At the deadline the last frame goes to the artifact, if one arrived.
+    if let Some(name) = &artifact {
+        let failed = read(&root.join(name)).unwrap();
+        assert_eq!(failed.check.result, CaptureOutcome::Fail);
+        assert_eq!(failed.check.reason, reason);
+    }
     host.send(&Request::Capture {
         frame,
         heartbeat_ms: Some(100),
         deadline_ms: Some(10_000),
     });
+    let (result, reason, artifact) = captured(host, frame);
+    assert_eq!((result, &reason), (CaptureOutcome::Pass, &None));
+    let name = artifact.expect("an artifact of `pass`");
+    check_artifact(&root.join(&name), shown);
+}
+
+/// The files and the records of a `pass` artifact.
+fn check_artifact(dir: &Path, shown: &Shown<'_>) {
+    for file in ["result.json", "plane-0.bin"] {
+        assert!(dir.join(file).is_file(), "{file} in {}", dir.display());
+    }
+    let artifact = read(dir).unwrap();
+    assert_eq!(artifact.check.result, CaptureOutcome::Pass);
+    let run = &artifact.run;
     assert_eq!(
-        captured(host, frame),
-        (CaptureOutcome::Unavailable, Some(NO_ARTIFACTS.into()))
+        (
+            run.driver.as_str(),
+            run.display.as_str(),
+            run.generation,
+            run.frame,
+            run.fixture.as_str(),
+            run.format.depth,
+        ),
+        (
+            "qrhi",
+            shown.display,
+            shown.generation,
+            shown.frame,
+            shown.fixture,
+            shown.depth
+        )
     );
+    assert!(run.surface.contains("swap chain"), "{}", run.surface);
+    let env = &run.environment;
+    eprintln!("environment: {env:?}; HDR on: {:?}", run.mode.hdr_on);
+    assert!(
+        env.os.as_deref().is_some_and(|os| !os.is_empty()),
+        "{env:?}"
+    );
+    assert!(
+        env.gpu
+            .as_deref()
+            .is_some_and(|gpu| gpu.contains(", driver ")),
+        "{env:?}"
+    );
+    assert!(
+        env.renderer
+            .as_deref()
+            .is_some_and(|r| r.starts_with("Qt 6.") && r.ends_with("QRhi D3D11")),
+        "{env:?}"
+    );
+    assert_eq!((&env.edid_sha256, &env.profile_sha256), (&None, &None));
+    let acceptance = &artifact.acceptance;
+    assert_eq!(acceptance.frames.len(), 3);
+    assert!(acceptance.received >= 3);
+    assert_eq!(acceptance.heartbeat_ms, Some(100));
+    let capture = &artifact.capture;
+    let content = capture
+        .descriptor
+        .content
+        .map_or((capture.descriptor.width, capture.descriptor.height), |r| {
+            (r.width, r.height)
+        });
+    assert_eq!([content.0, content.1], run.surface_size);
+    assert_eq!(capture.planes.len(), 1);
+    assert!(capture.config.contains_key("api"), "{:?}", capture.config);
 }
 
 /// `show` with the frame marker.
@@ -182,9 +279,26 @@ fn show(frame: u64, fixture: &str, delay_ms: u32) -> Request {
     }
 }
 
+/// An artifact name of an earlier run could repeat.
+#[test]
+fn rejects_a_non_empty_artifact_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("earlier"), b"").unwrap();
+    let output = host_command(Some("offscreen"), Some(tmp.path()))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run nitpick");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty(), "no `hello` before the check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is not empty"), "{stderr}");
+}
+
 #[test]
 fn protocol_runs_on_the_qt_event_loop() {
-    let mut host = Host::start(Some("offscreen"));
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("artifacts");
+    let mut host = Host::start(Some("offscreen"), Some(&root));
     host.line("{");
     assert_eq!(host.error(), (None, ErrorKind::Malformed));
     host.send(&Request::Refresh {});
@@ -202,6 +316,7 @@ fn protocol_runs_on_the_qt_event_loop() {
     host.send(&Request::Quit {});
     host.expect(&Event::Stopped { error: None });
     assert!(host.exit().success());
+    assert!(root.read_dir().unwrap().next().is_none());
 }
 
 /// The status of `submitted`; panics on another event.
@@ -235,7 +350,9 @@ fn open(host: &mut Host, display: &str, depth: u32, generation: u64) {
 #[test]
 #[ignore = "opens full-screen windows on the first screen"]
 fn presents_fixtures_on_a_screen() {
-    let mut host = Host::start(None);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut host = Host::start(None, Some(root));
     host.send(&Request::Refresh {});
     let display = host.displays().into_iter().next().expect("a screen");
     host.send(&Request::Query {
@@ -258,7 +375,14 @@ fn presents_fixtures_on_a_screen() {
         delay_ms: 300,
     });
     assert!(start.elapsed() >= Duration::from_millis(250));
-    check_capture(&mut host, 2);
+    let shown = Shown {
+        display: &display,
+        generation: 1,
+        frame: 2,
+        fixture: "state-frame-b-pq-full-10",
+        depth: 10,
+    };
+    check_capture(&mut host, &shown, root);
 
     // A 12-bit fixture on a 10-bit surface.
     host.send(&show(3, "state-frame-a-pq-full-12", 0));
@@ -298,7 +422,14 @@ fn presents_fixtures_on_a_screen() {
         frame: 4,
         delay_ms: 0,
     });
-    check_capture(&mut host, 4);
+    let shown = Shown {
+        display: &display,
+        generation: 2,
+        frame: 4,
+        fixture: "state-frame-b-pq-full-12",
+        depth: 12,
+    };
+    check_capture(&mut host, &shown, root);
 
     host.send(&Request::Close {});
     host.expect(&Event::Surface {

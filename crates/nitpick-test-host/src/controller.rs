@@ -945,7 +945,16 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
             cause: None,
             artifact,
         };
-        let Some(environment) = self.host.artifacts.as_ref().map(|a| a.environment.clone()) else {
+        let open = self
+            .open
+            .as_ref()
+            .expect("a capture ends before its surface");
+        let environment = self
+            .host
+            .artifacts
+            .as_mut()
+            .map(|a| a.environment.read(&open.surface.display));
+        let Some(environment) = environment else {
             let e = match result {
                 CaptureOutcome::Pass => {
                     event(CaptureOutcome::Unavailable, Some(NO_ARTIFACTS.into()), None)

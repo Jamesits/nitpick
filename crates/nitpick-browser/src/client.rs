@@ -319,6 +319,13 @@ impl Hello {
     pub(crate) fn display_name(&self, peer: SocketAddr) -> String {
         format!("{} at {}", self.engine_label(), peer.ip())
     }
+
+    /// The engine label and the unchanged user agent. The user agent is the
+    /// only version the page sends; a browser with a reduced user agent
+    /// gives only its major version.
+    pub(crate) fn agent(&self) -> String {
+        format!("{}; {}", self.engine_label(), self.client.user_agent)
+    }
 }
 
 fn is_linux(ua: &str) -> bool {

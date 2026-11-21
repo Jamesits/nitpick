@@ -48,6 +48,7 @@ using Microsoft::WRL::ComPtr;
 // Windows has Vulkan in addition to D3D11 if the build finds the headers.
 #if defined(NITPICK_HAS_VULKAN) && !defined(Q_OS_MACOS)
 #define NITPICK_WINDOW_VULKAN 1
+#include <QtGui/QVulkanFunctions>
 #include <QtGui/private/qrhivulkan_p.h>
 #endif
 
@@ -406,6 +407,21 @@ public:
     // Empty if QRhi accepted the swap chain format; see init().
     const std::string &fallback() const { return m_fallback; }
 
+    nitpick::RendererInfo rendererInfo() const {
+        if (!m_rhi) {
+            throw std::runtime_error("the pattern window has no QRhi");
+        }
+        const QRhiDriverInfo d = m_rhi->driverInfo();
+        nitpick::RendererInfo r{};
+        r.qt_version = rust::String(qVersion());
+        r.backend = rust::String(m_rhi->backendName());
+        r.device_name = rust::String(d.deviceName.toStdString());
+        r.vendor_id = d.vendorId;
+        r.device_id = d.deviceId;
+        r.driver_version = rust::String(driverVersion());
+        return r;
+    }
+
     nitpick::SwapChainRecord record() const {
         nitpick::SwapChainRecord r{};
         r.backend = rust::String(m_rhi->backendName());
@@ -682,6 +698,56 @@ private:
         default:
             return "Vulkan uses the first surface format of the compositor; the codes are shown "
                    "as SDR values";
+        }
+    }
+
+    // QRhiDriverInfo has no driver version. Empty: the backend has no read
+    // (Metal: the driver is a part of macOS).
+    std::string driverVersion() const {
+        switch (m_backend) {
+#if defined(Q_OS_WIN)
+        case PatternBackend::D3d11: {
+            const auto *h = static_cast<const QRhiD3D11NativeHandles *>(m_rhi->nativeHandles());
+            ComPtr<IDXGIDevice> device;
+            ComPtr<IDXGIAdapter> adapter;
+            LARGE_INTEGER v{};
+            HRESULT hr = static_cast<ID3D11Device *>(h->dev)->QueryInterface(IID_PPV_ARGS(&device));
+            if (SUCCEEDED(hr)) {
+                hr = device->GetAdapter(&adapter);
+            }
+            // Microsoft documents that this call fails for Direct3D 11
+            // interfaces. For IDXGIDevice it gives the user-mode driver
+            // version of the adapter; Chromium reads the version this way.
+            if (SUCCEEDED(hr)) {
+                hr = adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &v);
+            }
+            char text[64];
+            if (FAILED(hr)) {
+                std::snprintf(text, sizeof text, "unknown (DXGI error 0x%08lx)",
+                              static_cast<unsigned long>(hr));
+            } else {
+                std::snprintf(text, sizeof text, "%u.%u.%u.%u", unsigned(HIWORD(v.HighPart)),
+                              unsigned(LOWORD(v.HighPart)), unsigned(HIWORD(v.LowPart)),
+                              unsigned(LOWORD(v.LowPart)));
+            }
+            return text;
+        }
+#endif
+#if defined(NITPICK_WINDOW_VULKAN)
+        case PatternBackend::Vulkan: {
+            const auto *h = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles());
+            VkPhysicalDeviceProperties p{};
+            nitpick::sharedVulkanInstance()->functions()->vkGetPhysicalDeviceProperties(h->physDev,
+                                                                                         &p);
+            // The bit layout of driverVersion differs between vendors.
+            char text[64];
+            std::snprintf(text, sizeof text, "VkPhysicalDeviceProperties::driverVersion 0x%08x",
+                          unsigned(p.driverVersion));
+            return text;
+        }
+#endif
+        default:
+            return {};
         }
     }
 
@@ -1005,6 +1071,8 @@ PatternSurface openPatternWindow(std::int32_t screen, bool fp16, PatternBackend 
 void closePatternWindow() { delete g_window.data(); }
 
 std::uint64_t patternWindowHandle() { return std::uint64_t(openWindow().winId()); }
+
+RendererInfo patternWindowRenderer() { return openWindow().rendererInfo(); }
 
 void presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
                     std::int32_t height, std::uint64_t frame, std::int32_t timeoutMs) {

@@ -59,6 +59,14 @@ impl<J: Workers> BrowserDriver<J> {
             opened: None,
         }
     }
+
+    /// The browser of `display` from its cached `hello`: the engine label
+    /// and the user agent, for example `Edge; Mozilla/5.0 (…) Edg/141.0.0.0`.
+    /// `None` if no client with a valid `hello` has this ID.
+    #[must_use]
+    pub fn agent(&self, display: &DisplayId) -> Option<String> {
+        client(&self.hub, display).ok().map(|c| c.hello.agent())
+    }
 }
 
 /// The cached state of `display`.

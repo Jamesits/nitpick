@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 
 use futures_channel::mpsc;
 use futures_util::StreamExt as _;
+use nitpick_core::driver::DisplayId;
 use nitpick_fixtures::MetadataRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -38,6 +39,35 @@ pub struct Environment {
     /// Of the active display profile.
     pub profile_sha256: Option<String>,
 }
+
+/// Gives the [`Environment`] of each artifact.
+pub trait EnvironmentSource {
+    /// Called on the host thread when a capture ends, while `display` has
+    /// the open surface of the capture. It must not block: the `QRhi` host
+    /// calls it on the Qt GUI thread.
+    fn read(&mut self, display: &DisplayId) -> Environment;
+}
+
+/// The same values for each display.
+impl EnvironmentSource for Environment {
+    fn read(&mut self, _: &DisplayId) -> Environment {
+        self.clone()
+    }
+}
+
+/// The OS of the host process: type, version (on Windows with the build),
+/// edition and word size, from `os_info`.
+#[must_use]
+pub fn host_os() -> String {
+    os_info::get().to_string()
+}
+
+/// The artifact queue of both hosts: queued or in-progress writes. A full
+/// queue fails the capture. An artifact holds the whole captured frame
+/// (66 MB for 3840×2160 binary16 RGBA), so the queue limits the memory to
+/// 4 such frames. A capture session needs three matching frames, so it
+/// rarely ends faster than a local disk writes one frame.
+pub const QUEUE_CAPACITY: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,7 +162,7 @@ pub trait ArtifactSink {
 /// The artifact settings of a host.
 pub struct Artifacts {
     pub sink: Box<dyn ArtifactSink>,
-    pub environment: Environment,
+    pub environment: Box<dyn EnvironmentSource>,
 }
 
 type Store = Box<dyn FnMut(&str, &Artifact) -> Result<(), String> + Send>;

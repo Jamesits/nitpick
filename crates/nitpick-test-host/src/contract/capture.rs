@@ -203,7 +203,7 @@ async fn capture_waits_for_three_current_frames(mut h: Harness) {
         );
         assert_eq!(run.metadata, fixtures.get(FRAME_B).unwrap().metadata);
         assert_eq!(run.delay_ms, 1000);
-        assert_eq!(run.environment, environment());
+        assert_eq!(run.environment, environment(DISPLAY));
     }
     // The delay continues; the frame stays capturable.
     assert!(h.fire(0));

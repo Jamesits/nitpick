@@ -256,6 +256,16 @@ fn display_name_has_engine_and_address() {
 }
 
 #[test]
+fn agent_has_engine_and_unchanged_user_agent() {
+    assert_eq!(hello(&[]).agent(), format!("Safari; {SAFARI_IPAD}"));
+    let webview = hello(&[
+        ("client.userAgent", Some(json!(EDGE_WINDOWS))),
+        ("client.webview", Some(json!(true))),
+    ]);
+    assert_eq!(webview.agent(), format!("Edge webview; {EDGE_WINDOWS}"));
+}
+
+#[test]
 fn geometry_changes_with_size_ratio_and_zoom_only() {
     let base = hello(&[]).geometry();
     for change in [

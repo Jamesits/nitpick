@@ -113,12 +113,7 @@ Open questions:
 
 ### 62. Connect capture artifacts to the hosts
 
-Requires: 34. The first capture adapter exists: the [WGC adapter](../design/output_driver/testing.md#windows-graphics-capture-adapter) of the QRhi host on Windows. Without an artifact directory, that host gives `unavailable` for an accepted frame; the browser host, and the QRhi host on other platforms, give `unavailable` for every capture.
-
-TODO:
-
-- Add an artifact directory option to `nitpick --test-host` and `nitpick-cli --test-host`, and give `TestHost::artifacts` an `ArtifactWriter`. Select and document the queue size. Fill the `Environment` fields that each host can read: OS and build, GPU and driver, Qt version and QRhi backend, or browser and engine version from the client. Leave the EDID hash and the profile hash `null` until the device worker of item 48 gives them.
-- Run a process test of each host with an artifact directory: `pass`, `saved`, the files and `read` of the artifact.
+Both hosts take `--artifacts <directory>`, with a queue of 4 and the environment of [Capture interface and artifacts](../design/output_driver/testing.md#capture-interface-and-artifacts). The QRhi host passed the process test with an artifact directory on Windows (`pass`, `saved`, the files and `read`). The browser host has no capture adapter; its artifact test is in item 66. The macOS and Linux environment reads are in item 69. The EDID hash and the profile hash stay `null` until the device worker of item 48 gives them.
 
 Open questions:
 
@@ -194,16 +189,32 @@ TODO:
 
 ### 66. Add Windows capture to the browser host
 
-Requires: 62.
-
 Open questions:
 
 - Which window does `nitpick-cli --test-host` capture? The WGC adapter takes an `HWND`, and the browser host knows only the client state. The optional webview runs in the `nitpick-webview` process; an external browser needs a lookup by process or title. A remote browser cannot be captured on the server.
 - WGC captures the whole top-level window. Must the adapter accept a browser window only in full screen, or give a content rectangle without the browser chrome?
+- The artifact `renderer` of the browser host is the user agent of `hello`. A browser with a reduced user agent (Chromium) gives only its major version. Must the page also send the full version, for example from `navigator.userAgentData.getHighEntropyValues(["fullVersionList"])` where it exists?
+- The artifact `gpu` of the browser host is `null`: the page does not report its GPU, and the command-line host has no GPU dependency. Must the page report it (for example WebGL `UNMASKED_RENDERER_WEBGL`), or must the host read the local GPU?
 
 TODO:
 
 - After the decision, give the browser host a WGC adapter for a local browser window. Verify the window identity and the content rectangle with the page in full screen and in a normal window.
+- Run a process test of `nitpick-cli --test-host --artifacts <directory>` with a captured local browser: `pass`, `saved`, the files and `read` of the artifact, with `os` and `renderer` in the environment. The current process test checks only that `capture` is `unavailable` and that the directory stays empty.
+
+### 69. Check the artifact environment on macOS and Linux
+
+Requires: 40 for macOS, 41 for Linux.
+
+The QRhi host reads the environment of an artifact from the open pattern window; see [Capture interface and artifacts](../design/output_driver/testing.md#capture-interface-and-artifacts). Only D3D11 on Windows has run. The Vulkan read has been compiled on Windows with `VULKAN_SDK`; the Metal branch has not been built.
+
+TODO:
+
+- With the capture adapter of each OS, run the ignored screen test of `nitpick-app` (`tests/test_host.rs`) with its artifact directory. `check_artifact` asserts the Windows `renderer` (`QRhi D3D11`) and a driver version in `gpu`; change these checks for Metal (no driver version) and Vulkan. Record the `os`, `gpu` and `renderer` values in the design.
+- Check the `os_info` value: on macOS it runs `sw_vers`, on Linux it reads `/etc/os-release` or runs `lsb_release`. Both run once at host start, before the event loop.
+
+Open questions:
+
+- The Vulkan `driverVersion` has a vendor-specific bit layout, so the record gives it raw. Must the host read `VkPhysicalDeviceDriverProperties` (driver name and driver info, for example the Mesa version) instead? That needs Vulkan 1.2 or `VK_KHR_driver_properties`, and an instance of Vulkan 1.1 or `VK_KHR_get_physical_device_properties2`. `sharedVulkanInstance` sets no API version; **unverified:** which version Qt then requests.
 
 ### 67. Check the WGC failure paths and a capture with HDR off
 
@@ -213,8 +224,6 @@ TODO:
 - With HDR off, capture a 12-bit pattern window (fallback swap chain) and record the captured samples against the submitted words. `tests/wgc_capture.rs` requires HDR on; extend it or add a separate check. Do not change the display settings of a developer machine without its owner.
 
 ### 63. Qualify frame acceptance with a real capture adapter
-
-Requires: 62.
 
 The frame marker, the gate, the heartbeat and region selection are in [Timing and frame identity](../design/output_driver/testing.md#timing-and-frame-identity). With a real adapter, only the QRhi host on Windows was checked (the ignored process test of `nitpick-app`, WGC adapter): the marker read through the WGC FP16 capture of the HDR10 and the FP16 swap chain, and three matching frames arrived before a 10 s deadline with `heartbeat_ms` 100. Without a heartbeat, a static window gave one frame in 2 s. The WGC frame time is a QPC time; see [Windows Graphics Capture adapter](../design/output_driver/testing.md#windows-graphics-capture-adapter).
 
@@ -362,7 +371,7 @@ TODO:
 
 ### 51. Qualify capture adapters and compare output
 
-Requires: 32, 35, 36, 38, 47, 48, 62, 63, plus the applicable adapter: 40 or 41 (the Windows adapter exists). Windows profile comparisons also require 43, 50.
+Requires: 32, 35, 36, 38, 47, 48, 63, plus the applicable adapter: 40 or 41 (the Windows adapter exists). Windows profile comparisons also require 43, 50.
 
 TODO:
 

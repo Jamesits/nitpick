@@ -15,7 +15,7 @@ use zune_png::PngDecoder;
 use super::*;
 use crate::service::{ClientState, EventSender, ServiceEvent, ServiceEvents};
 use crate::session::{ACK_TIMEOUT, Pairing, Reservation};
-use crate::test_support::{self, Client, Outgoing, PEER, hello, hello_with};
+use crate::test_support::{self, Client, Outgoing, PEER, SAFARI_IPAD, hello, hello_with};
 use crate::worker::Job;
 
 /// Runs each job at once, on the calling thread.
@@ -154,6 +154,7 @@ fn no_display_before_a_valid_hello() {
     assert_eq!(f.driver.displays(), []);
     let (_reservation, display) = f.authenticate();
     assert_eq!(f.driver.displays(), [], "authenticated only");
+    assert_eq!(f.driver.agent(&display), None);
     assert_eq!(f.driver.query(&display), Err(OutputError::Disconnected));
     assert_eq!(
         f.driver.open(&display, BitDepth::Ten),
@@ -178,11 +179,16 @@ fn hello_adds_the_client_display() {
     );
     let q = f.driver.query(&display).unwrap();
     assert_eq!(q.mode.hdr_on, Some(true));
+    assert_eq!(
+        f.driver.agent(&display),
+        Some(format!("Safari; {SAFARI_IPAD}"))
+    );
     let other = DisplayId {
         driver: DRIVER,
         key: "client-0".into(),
     };
     assert_eq!(f.driver.query(&other), Err(OutputError::Disconnected));
+    assert_eq!(f.driver.agent(&other), None);
 }
 
 #[test]

@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::ffi::OsStr;
 use std::net::SocketAddr;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
@@ -34,8 +35,11 @@ struct Host {
 
 impl Host {
     async fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nitpick-cli"))
-            .args(["--test-host", "--code", CODE, "--delay", "0"])
+        Self::start_with(&[]).await
+    }
+
+    async fn start_with(args: &[&OsStr]) -> Self {
+        let mut child = host_command(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -166,6 +170,15 @@ impl Host {
             .expect("exit")
             .unwrap()
     }
+}
+
+/// `nitpick-cli --test-host` with a fixed code, no delay and `args`.
+fn host_command(args: &[&OsStr]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nitpick-cli"));
+    command
+        .args(["--test-host", "--code", CODE, "--delay", "0"])
+        .args(args);
+    command
 }
 
 fn display_event(state: DisplayState, display: Option<&str>) -> Event {
@@ -304,9 +317,15 @@ async fn drives_query_open_show_and_replacement() {
     assert!(host.exit().await.success());
 }
 
+/// With an artifact directory: the browser host has no capture adapter, so
+/// it writes no artifact. The process test with `pass` and `saved` needs
+/// one.
 #[tokio::test(flavor = "current_thread")]
 async fn reports_capture_readiness_and_close() {
-    let mut host = Host::start().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("artifacts");
+    let mut host = Host::start_with(&[OsStr::new("--artifacts"), root.as_os_str()]).await;
+    assert!(root.read_dir().unwrap().next().is_none());
     let (mut page, display) = host.ready().await;
     host.open(&display, 1, VIEWPORT).await;
     host.show_with(3, FRAME_B, 0, true).await;
@@ -381,6 +400,27 @@ async fn reports_capture_readiness_and_close() {
     host.expect(Event::Stopped { error: None }).await;
     assert!(host.exit().await.success());
     page.expect_end().await;
+    assert!(root.read_dir().unwrap().next().is_none());
+}
+
+/// An artifact name of an earlier run could repeat.
+#[tokio::test(flavor = "current_thread")]
+async fn rejects_a_non_empty_artifact_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("earlier"), b"").unwrap();
+    let output = timeout(
+        WAIT,
+        host_command(&[OsStr::new("--artifacts"), tmp.path().as_os_str()])
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .expect("exit")
+    .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty(), "no `hello` before the check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is not empty"), "{stderr}");
 }
 
 /// The frame gets the same `error` event whether the driver result or the

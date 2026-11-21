@@ -314,6 +314,7 @@ cargo run -p nitpick-cli -- --host 192.168.1.10 --port 8080 --pattern bt2111 --e
 | `--depth` | `10` or `12` | `10` |
 | `--delay` | [measurement delay](overview.md#measurement-delay) in ms after the client acknowledgement; an integer >= 0 | `1000` |
 | `--test-host` | read [test-host protocol](testing.md#host-boundary) requests in place of console commands; `--pattern`, `--encoding` and `--depth` have no effect | off |
+| `--artifacts` | with `--test-host` only: the empty root directory of the [capture artifacts](testing.md#capture-interface-and-artifacts) | none |
 
 The host prints one event per line: `url:`, `pairing code:`, `client:` (connected, authenticated, ready with the name, size and mode, viewport changed, disconnected), `output:` and `warning:` (the [output limits](overview.md#interface) before each frame), `surface:`, `status:` and `error:`. After the acknowledgement, `status: waiting for measurement delay: N ms.` and then `status: ready after delay: N ms.` follow, each with the driver status and its warnings. With a zero delay, only the ready line follows. It reads one command per stdin line:
 

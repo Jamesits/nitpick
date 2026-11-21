@@ -12,6 +12,7 @@ struct DxgiHdrMetadata;
 struct MetalHdrMetadata;
 struct VulkanHdrMetadata;
 struct PatternSurface;
+struct RendererInfo;
 struct ScreenIdentity;
 
 // All functions throw std::runtime_error on failure; cxx maps it to Err.
@@ -22,6 +23,7 @@ ScreenIdentity screenIdentity(std::int32_t screen);
 PatternSurface openPatternWindow(std::int32_t screen, bool fp16, PatternBackend backend);
 void closePatternWindow();
 std::uint64_t patternWindowHandle();
+RendererInfo patternWindowRenderer();
 void presentPattern(rust::Slice<const std::uint8_t> pixels, std::int32_t width,
                     std::int32_t height, std::uint64_t frame, std::int32_t timeoutMs);
 void setDxgiHdrMetadata(const DxgiHdrMetadata &metadata);

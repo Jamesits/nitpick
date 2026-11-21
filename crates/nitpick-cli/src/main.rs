@@ -10,6 +10,7 @@ mod test_host;
 use std::cell::RefCell;
 use std::io::BufRead;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::thread;
 
@@ -18,7 +19,7 @@ use nitpick_browser::{BindHost, BrowserDriver, BrowserService, ServiceConfig};
 use nitpick_core::driver::DEFAULT_DELAY_MS;
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, Encoding, Format};
-use nitpick_test_host::Fixtures;
+use nitpick_test_host::{ArtifactWriter, Fixtures, QUEUE_CAPACITY};
 use tokio::sync::mpsc;
 
 use crate::host::{Exit, Settings, Stdout};
@@ -56,6 +57,11 @@ struct Args {
     /// the default delay of `show`.
     #[arg(long)]
     test_host: bool,
+    /// With `--test-host`: the root directory of the capture artifacts. It
+    /// must be empty or absent. Without it, an accepted capture is
+    /// `unavailable`.
+    #[arg(long, requires = "test_host")]
+    artifacts: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -81,6 +87,19 @@ fn main() -> ExitCode {
         }
     } else {
         None
+    };
+    let artifacts = match &args.artifacts {
+        None => None,
+        Some(dir) => match ArtifactWriter::start(dir.clone(), QUEUE_CAPACITY) {
+            Ok(writer) => Some(writer),
+            Err(e) => {
+                eprintln!(
+                    "nitpick-cli: cannot use the artifact directory {}: {e}",
+                    dir.display()
+                );
+                return ExitCode::from(2);
+            }
+        },
     };
     let (service, mut events) = match BrowserService::start(&config) {
         Ok(started) => started,
@@ -110,6 +129,7 @@ fn main() -> ExitCode {
             lines,
             fixtures,
             settings.delay_ms,
+            artifacts,
         ))
     } else {
         let (console_tx, mut console) = mpsc::unbounded_channel();

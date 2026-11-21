@@ -188,6 +188,8 @@ The unit tests of `qrhi_driver.rs` and `session.rs` use a simulated event loop w
 
 `nitpick --test-host` runs the [test-host protocol](testing.md#host-boundary) without QML. `test_host.rs` makes a `QGuiApplication` and three `QrhiDriver` values on the shared device cache. The first opens and presents. The second answers `displays` and `query` while a presentation borrows the first. The third lists the screen identities for `refresh`. The state machine runs as one `gui_executor.rs` task. The test host has no `QObject` for `CxxQtThread::queue`, so it posts task steps with `QMetaObject::invokeMethod` on the application object (`cpp/test_host.cpp`). After `stopped`, it ends the event loop. The `submission.rs` close count gives a pattern window that closes outside the host, as in the launcher. The capture adapter comes from `pattern_capture.rs`: on Windows the [WGC adapter](testing.md#windows-graphics-capture-adapter) on the `HWND` of the open pattern window (`patternWindowHandle` in `cpp/pattern_window.cpp`), elsewhere none.
 
+The only option after `--test-host` is `--artifacts <directory>`. The host rejects other arguments with exit status 2, also Qt options such as `-platform`; use the Qt environment variables (for example `QT_QPA_PLATFORM`). With `--artifacts`, the environment of each artifact comes from the open pattern window (`patternWindowRenderer` in `cpp/pattern_window.cpp`); see [Capture interface and artifacts](testing.md#capture-interface-and-artifacts) for the fields.
+
 Counter-intuitive: `nitpick-app` is a library and a binary. The build script links the generated C++ into every target, and that C++ calls the Rust side of the bridges. An integration test gets these Rust symbols only from a library.
 
 ## Signalling

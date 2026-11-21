@@ -28,7 +28,9 @@ mod ffi {
 }
 
 use std::cell::RefCell;
+use std::ffi::OsString;
 use std::io::{BufRead as _, Write as _};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -36,8 +38,11 @@ use std::thread;
 
 use cxx_qt_lib::QGuiApplication;
 use futures_util::stream;
-use nitpick_core::driver::DEFAULT_DELAY_MS;
-use nitpick_test_host::{Clock, Event, Exit, Fixtures, Hooks, LocalFuture, TestHost};
+use nitpick_core::driver::{DEFAULT_DELAY_MS, DisplayId};
+use nitpick_test_host::{
+    ArtifactWriter, Artifacts, Clock, Environment, EnvironmentSource, Event, Exit, Fixtures, Hooks,
+    LocalFuture, QUEUE_CAPACITY, TestHost, host_os,
+};
 
 use crate::delay::{DelayTimer, QtTimer};
 use crate::display::{self, Backend, DeviceStates};
@@ -128,6 +133,77 @@ impl Hooks for QtHooks {
     }
 }
 
+/// The environment of the artifacts: the OS of the process and the
+/// renderer of the open pattern window, which shows the captured frame.
+struct QtEnvironment {
+    os: Option<String>,
+}
+
+impl EnvironmentSource for QtEnvironment {
+    fn read(&mut self, _: &DisplayId) -> Environment {
+        let renderer = display::ffi::pattern_window_renderer().map_err(|e| e.what().to_owned());
+        if let Err(e) = &renderer {
+            // The capture holds the surface, so the window exists.
+            eprintln!("nitpick: cannot read the renderer of the pattern window: {e}");
+        }
+        environment(self.os.clone(), renderer.ok().as_ref())
+    }
+}
+
+/// `renderer`: `None` if it cannot be read.
+fn environment(os: Option<String>, renderer: Option<&display::ffi::RendererInfo>) -> Environment {
+    let Some(r) = renderer else {
+        return Environment {
+            os,
+            ..Environment::default()
+        };
+    };
+    let ids = if (r.vendor_id, r.device_id) == (0, 0) {
+        String::new()
+    } else {
+        format!(
+            " (vendor 0x{:04x}, device 0x{:04x})",
+            r.vendor_id, r.device_id
+        )
+    };
+    let driver = if r.driver_version.is_empty() {
+        String::new()
+    } else {
+        format!(", driver {}", r.driver_version)
+    };
+    Environment {
+        os,
+        gpu: Some(format!("{}{ids}{driver}", r.device_name)),
+        renderer: Some(format!("Qt {}, QRhi {}", r.qt_version, r.backend)),
+        ..Environment::default()
+    }
+}
+
+/// The options after [`FLAG`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Options {
+    /// The root directory of the capture artifacts.
+    artifacts: Option<PathBuf>,
+}
+
+/// # Errors
+/// An unknown or repeated option, or an option without its value.
+fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<Options, String> {
+    let mut options = Options::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg != "--artifacts" {
+            return Err(format!("unknown argument `{}`", arg.to_string_lossy()));
+        }
+        if options.artifacts.is_some() {
+            return Err("`--artifacts` is given twice".into());
+        }
+        let dir = args.next().ok_or("`--artifacts` needs a directory")?;
+        options.artifacts = Some(dir.into());
+    }
+    Ok(options)
+}
+
 fn exit_code(exit: &Exit) -> i32 {
     match exit {
         Exit::Quit | Exit::Stopped(None) => 0,
@@ -136,13 +212,39 @@ fn exit_code(exit: &Exit) -> i32 {
 }
 
 /// Runs the protocol on stdin and stdout until `quit` or the end of stdin.
+/// The options follow [`FLAG`]: `--artifacts <directory>`.
 pub fn main() -> ExitCode {
+    let options = match parse_options(std::env::args_os().skip(2)) {
+        Ok(options) => options,
+        Err(e) => {
+            eprintln!("nitpick: {e}; usage: nitpick {FLAG} [--artifacts <directory>]");
+            return ExitCode::from(2);
+        }
+    };
     let fixtures = match Fixtures::load() {
         Ok(fixtures) => fixtures,
         Err(e) => {
             eprintln!("nitpick: cannot read the output fixtures: {e}");
             return ExitCode::from(2);
         }
+    };
+    let artifacts = match options.artifacts {
+        None => None,
+        Some(dir) => match ArtifactWriter::start(dir.clone(), QUEUE_CAPACITY) {
+            Ok(writer) => Some(Artifacts {
+                sink: Box::new(writer),
+                environment: Box::new(QtEnvironment {
+                    os: Some(host_os()),
+                }),
+            }),
+            Err(e) => {
+                eprintln!(
+                    "nitpick: cannot use the artifact directory {}: {e}",
+                    dir.display()
+                );
+                return ExitCode::from(2);
+            }
+        },
     };
     let mut app = QGuiApplication::new();
     let backend = Backend::current();
@@ -157,7 +259,7 @@ pub fn main() -> ExitCode {
             states: states.clone(),
         }),
         capture: pattern_capture::adapter(),
-        artifacts: None,
+        artifacts,
         fixtures: Rc::new(fixtures),
         delay_ms: DEFAULT_DELAY_MS,
     };

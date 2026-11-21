@@ -18,7 +18,10 @@ pub mod region;
 #[cfg(any(test, feature = "contract"))]
 pub mod replay;
 
-pub use artifact::{ArtifactSink, ArtifactWriter, Artifacts, Environment};
+pub use artifact::{
+    ArtifactSink, ArtifactWriter, Artifacts, Environment, EnvironmentSource, QUEUE_CAPACITY,
+    host_os,
+};
 pub use capture::{Capture, CaptureAdapter, CaptureFrames, CaptureTarget, NoCapture};
 pub use controller::{Clock, DriverEvent, Exit, Hooks, LocalFuture, TestHost};
 pub use fixture::{FixtureFrame, Fixtures};
