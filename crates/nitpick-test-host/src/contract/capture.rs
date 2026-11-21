@@ -41,7 +41,7 @@ pub(super) const WITHOUT_ARTIFACTS: &[Scenario] = scenarios![
 /// Adapter time of every `show` unless a scenario sets another.
 const SHOWN_AT: u64 = 100;
 
-fn cancelled(frame: u64, cause: Cause) -> Event {
+pub(super) fn cancelled(frame: u64, cause: Cause) -> Event {
     Event::Captured {
         frame,
         result: CaptureOutcome::Cancelled,

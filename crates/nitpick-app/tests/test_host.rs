@@ -30,7 +30,8 @@ struct Host {
     events: mpsc::Receiver<String>,
 }
 
-/// `nitpick --test-host`, with an artifact directory if `artifacts`.
+/// `nitpick --test-host`, with an artifact directory if `artifacts`. A
+/// host without device requests does not open the per-user device store.
 fn host_command(platform: Option<&str>, artifacts: Option<&Path>) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nitpick"));
     command.arg("--test-host");
@@ -45,7 +46,11 @@ fn host_command(platform: Option<&str>, artifacts: Option<&Path>) -> Command {
 
 impl Host {
     fn start(platform: Option<&str>, artifacts: Option<&Path>) -> Self {
-        let mut child = host_command(platform, artifacts)
+        Self::spawn(host_command(platform, artifacts))
+    }
+
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -317,6 +322,87 @@ fn protocol_runs_on_the_qt_event_loop() {
     host.expect(&Event::Stopped { error: None });
     assert!(host.exit().success());
     assert!(root.read_dir().unwrap().next().is_none());
+}
+
+/// `nitpick --test-host --device-state <dir>`.
+fn device_host(platform: Option<&str>, state: &Path) -> Host {
+    let mut command = host_command(platform, None);
+    command.arg("--device-state").arg(state);
+    Host::spawn(command)
+}
+
+/// The native device worker, read only. The store is a temporary
+/// directory; no device setting changes.
+#[test]
+fn device_requests_run_on_the_native_worker() {
+    let state = tempfile::tempdir().unwrap();
+    let mut host = device_host(Some("offscreen"), state.path());
+    host.send(&Request::DeviceMap {
+        display: "qrhi:none".into(),
+    });
+    assert_eq!(host.error(), (None, ErrorKind::UnknownDisplay));
+    assert!(!state.path().join("lock").exists());
+    host.send(&Request::DeviceList {});
+    // The store is empty, so no `recovery` event comes first.
+    let devices = match host.next() {
+        Event::DeviceList { devices } => devices,
+        other => panic!("expected `device_list`, got {other:?}"),
+    };
+    assert!(state.path().join("lock").exists());
+    let Some(device) = devices.first().map(|d| d.id.clone()) else {
+        eprintln!("no local display device; the remaining checks need one");
+        host.send(&Request::Quit {});
+        host.expect(&Event::Stopped { error: None });
+        return;
+    };
+    host.send(&Request::ProfileAssign {
+        target: nitpick_core::device::ProfileTarget {
+            device,
+            role: nitpick_core::device::ProfileRole::Standard,
+            scope: nitpick_core::device::ProfileScope {
+                user: nitpick_core::device::UserScope::Current,
+                host: None,
+            },
+        },
+        profile: "ordinary_srgb".into(),
+    });
+    assert_eq!(host.error(), (None, ErrorKind::NoDeviceRun));
+    host.send(&Request::Quit {});
+    host.expect(&Event::Stopped { error: None });
+    assert!(host.exit().success());
+}
+
+/// Maps the first screen to its local device and reads its setup. Opens
+/// no window and changes no setting; it needs a desktop session.
+#[test]
+#[ignore = "needs a desktop session with a screen"]
+fn maps_a_screen_to_its_device() {
+    let state = tempfile::tempdir().unwrap();
+    let mut host = device_host(None, state.path());
+    host.send(&Request::Refresh {});
+    let screens = host.displays();
+    let display = screens.first().expect("a screen").clone();
+    host.send(&Request::DeviceMap {
+        display: display.clone(),
+    });
+    let device = match host.next() {
+        Event::DeviceMap { display: d, device } if d == display => device,
+        other => panic!("expected `device_map`, got {other:?}"),
+    };
+    eprintln!("{display} maps to {device}");
+    host.send(&Request::DeviceSetup {
+        device: device.clone(),
+    });
+    match host.next() {
+        Event::DeviceSetup { setup, findings } => {
+            assert_eq!(setup.device, device);
+            eprintln!("setup: {setup:?}; findings: {findings:?}");
+        }
+        other => panic!("expected `device_setup`, got {other:?}"),
+    }
+    host.send(&Request::Quit {});
+    host.expect(&Event::Stopped { error: None });
+    assert!(host.exit().success());
 }
 
 /// The status of `submitted`; panics on another event.

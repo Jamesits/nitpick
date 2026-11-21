@@ -6,7 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-# Serde forms of the device recovery-record types.
+# Serde forms of the device types, for recovery records and the test-host
+# protocol.
 serde = ["dep:serde", "dep:hex"]
 
 [dependencies]

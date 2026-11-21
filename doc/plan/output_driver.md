@@ -88,12 +88,12 @@ The protocol, both hosts and their tests are in [Host boundary](../design/output
 
 TODO:
 
-- Run the test-host tests of `nitpick-test-host`, `nitpick-cli` and `nitpick-app` on macOS and on Linux: the `offscreen` test without a display server, and the ignored screen test on a desktop (GNOME 50 with Wayland and with xcb). Record the results in the design.
+- Run the test-host tests of `nitpick-test-host`, `nitpick-cli` (with and without the feature `device`) and `nitpick-app` on macOS and on Linux: the `offscreen` test without a display server, and the ignored screen and mapping tests on a desktop (GNOME 50 with Wayland and with xcb). Record the results in the design.
 - In the real Qt event loop, close the pattern window by Esc during a presentation and during the delay. Expect `error` with kind `disconnected` or `cancelled` with cause `disconnected`, then `surface` with `state: closed`. Only the contract checks this now, with a controlled close.
 
 Open questions:
 
-- The hosts read the fixtures from the source tree of the build (`nitpick_fixtures::fixture_dir`). Thus a packaged launcher with `--test-host` stops with exit status 2. Must the release build leave out the test-host mode, or include the fixtures?
+- The hosts read the fixtures from the source tree of the build (`nitpick_fixtures::fixture_dir`; `profile_assign` reads the profile fixtures in the same way). Thus a packaged launcher with `--test-host` stops with exit status 2. Must the release build leave out the test-host mode, or include the fixtures?
 - The host fills the surface around the fixture with nominal black, so automatic MaxCLL and MaxFALL differ from the fixture values (for example `seq-metadata-*`) unless the surface has the fixture size. Must a metadata check use a surface of the fixture size, or must the fixtures give the values of the filled frame?
 
 ### 68. Verify the timer render trigger with HDR on and with two screens
@@ -113,7 +113,7 @@ Open questions:
 
 ### 62. Connect capture artifacts to the hosts
 
-Both hosts take `--artifacts <directory>`, with a queue of 4 and the environment of [Capture interface and artifacts](../design/output_driver/testing.md#capture-interface-and-artifacts). The QRhi host passed the process test with an artifact directory on Windows (`pass`, `saved`, the files and `read`). The browser host has no capture adapter; its artifact test is in item 66. The macOS and Linux environment reads are in item 69. The EDID hash and the profile hash stay `null` until the device worker of item 48 gives them.
+Both hosts take `--artifacts <directory>`, with a queue of 4 and the environment of [Capture interface and artifacts](../design/output_driver/testing.md#capture-interface-and-artifacts). The QRhi host passed the process test with an artifact directory on Windows (`pass`, `saved`, the files and `read`). The browser host has no capture adapter; its artifact test is in item 66. The macOS and Linux environment reads are in item 69. A device run gives the profile hash and the display setup; the EDID hash stays `null` (item 79).
 
 Open questions:
 
@@ -311,7 +311,7 @@ Open questions:
 
 ### 70. Decide the restoration and baseline rules
 
-The recovery store, the profile run and the display setup check are in [Restoration and recovery](../design/display_device.md#restoration-and-recovery) and [Display setup](../design/display_device.md#display-setup). They use the conservative rules below until a decision.
+The recovery store, the profile run and the display setup check are in [Restoration and recovery](../design/display_device.md#restoration-and-recovery) and [Display setup](../design/display_device.md#display-setup). They use the conservative rules below until a decision. The [device run](../design/output_driver/testing.md#device-requests) of the test hosts applies them: on the checked Windows system each device run fails at its start, because the calibration loader is on.
 
 Open questions:
 
@@ -349,17 +349,70 @@ TODO:
 - On the Windows development system, `GetDeviceGammaRamp` failed for the only active display (an HDMI recorder, HDR off; its device key was the `target:` fallback, so the monitor device path was empty). Find the cause. On the runner, record the ramp of each display with and without a loaded calibration, and which identity form the driver gives.
 - On a dedicated test system, set a ramp with a separate tool and check that `DisplaySetup::changes` reports `gamma_ramp`. With HDR on and in SDR WCG, record whether the GDI ramp changes the output, for example with a WGC capture. Do not change the display settings of a developer machine.
 
-### 48. Connect device operations to both hosts and tests
+### 75. Deliver OS display events to the device run
 
-Requires: 16, 27, 33. Native checks use the applicable profile backend from 44, 45, 46.
+The test hosts read the display setup of a device run again at `DriverEvent::SystemChanged`, but no host gives this event; see [Device requests](../design/output_driver/testing.md#device-requests). Thus a setup change after an HDR, topology or resume event is found only by the read after a profile change or before a capture passes.
 
 TODO:
 
-- Add the shared device worker and test-host requests from [Host boundary](../design/output_driver/testing.md#host-boundary). Use the trait for profile changes in the Qt host, CLI and calibration runner. Keep CLI device control behind an optional feature.
-- Open a `RecoveryStore` in a per-user state directory of each host and call `recover` before the first device request; report each kept record. Make each profile change through `ProfileRun`. A cancellation during `set_icc_profile` waits for the call on the worker and then restores; no other change of that device starts before. Use `nitpick_display::fake` (feature `fake`) in the host tests.
-- Read the display setup before a device run and report its findings. Read it again after HDR, topology and resume events and before a pass; a change fails the run. Put the setup in the artifact environment.
-- Verify responsive event loops, saved recovery records and serialization when a native write outlives a timeout or cancellation. Before profile assignment, cancel presentation and readiness. After readback, refresh device state, reopen as needed and submit a new frame.
-- Test a local display mapping and reject a remote browser client as a local device identity. Verify stale callbacks and captures cannot qualify the new profile state. Build and run the browser-only CLI without the native device feature.
+- Give the event in both test hosts for an HDR change, a topology change and a resume from sleep. Candidate sources: the `QGuiApplication` and `QScreen` signals in the Qt host; `WM_DISPLAYCHANGE` and `WM_POWERBROADCAST` with `PBT_APMRESUMEAUTOMATIC` on Windows; `CGDisplayRegisterReconfigurationCallback` and the wake notification of `NSWorkspace` on macOS; the DRM `change` uevent and the logind `PrepareForSleep` signal on Linux. The command-line host has no window, so it needs sources that do not need one. Verify with injected events, then on each OS without a change of the display settings of a developer machine.
+
+Open questions:
+
+- Which of these sources reports an HDR change on Windows? HDR on or off does not always change the desktop mode. **Unverified.**
+
+### 76. Check the device requests on a dedicated test display
+
+Requires: 44 for Windows, 45 for macOS, 46 for Linux.
+
+The [device requests](../design/output_driver/testing.md#device-requests) passed with a held worker, with the fake backend and with the native read requests only. On the Windows development system, the ignored mapping test of `nitpick-app` mapped the only screen and read its setup; no profile changed.
+
+TODO:
+
+- On a dedicated Windows test display, run `nitpick --test-host` and `nitpick-cli --features device --test-host` with `device_run`, `profile_assign` of `ordinary_srgb`, `open`, `show` with `marker`, `capture`, `profile_restore` and `quit`. Compare the profile state before and after with `profile_roundtrip state`. Measure the Qt event loop during the device calls with the method of [Running launcher checks](../design/output_driver/qt.md#running-launcher-checks).
+- End the host process during an assignment. Start it again, send a device request and check the `recovery` event and the profile state.
+- Run the same on macOS and on Linux.
+
+Open questions:
+
+- Must the host reopen the surface after each profile change? The surface is always stale after a change, also when the device report did not change.
+- The `quit` wait for queued device calls has no deadline, as the artifact wait of item 62. Must it have one, and what must the host report for a call that does not end?
+- `profile_sha256` in the artifact environment is the profile of the change target. With HDR on, Windows applies the Advanced Color role, so a change of the ordinary role gives the hash of a profile that does not apply. Must the environment also name the role, or the profile that the OS applies?
+
+### 77. Decide profile control in the interactive launcher
+
+[Display device operations](../design/display_device.md) states that the Qt host and the command-line host can use `DisplayDeviceControl`. Only the test hosts change profiles now.
+
+Open questions:
+
+- Must the Qt launcher assign and restore profiles? If yes: which controls, and must it call `recover` at start? A record of a crashed test host now stays until the next test host with a device request.
+
+### 78. Add the calibration runner on the device worker
+
+Requires: 44, 76.
+
+The runner that compares captures and the Windows calibration tests do not exist; see [Usage and restoration](../design/output_driver/testing.md#usage-and-restoration).
+
+Open questions:
+
+- Must the runner use the device requests of the test hosts, or its own `nitpick_display::worker::DeviceWorker`? One process at a time holds the per-user recovery store, so the runner and a host with device requests cannot both change profiles.
+- `profile_assign` accepts only profile fixtures of use `ordinary`. How does the Windows calibration runner assign the `mhc2` fixtures: a host option, another request, or its own worker?
+
+TODO:
+
+- Add the runner. Make each profile change in a device run with its setup checks. Verify with the fake backend: a profile change between captures, a crash of the runner during a change with recovery in the next run, and a setup change that fails the run.
+
+### 79. Give the EDID hash to the artifact environment
+
+`edid_sha256` of the artifact environment is `null`: `DisplayDeviceControl` gives no EDID bytes. The Linux identity evidence has the EDID MD5; the Windows and macOS evidence has EDID IDs only.
+
+TODO:
+
+- Read the EDID bytes in each backend, add their SHA-256 to the device report, and set `edid_sha256` from the device of the device run. Verify with injected native calls.
+
+Open questions:
+
+- Where does a Windows device with the `target:` fallback key get its EDID? It has no monitor device path.
 
 ### 58. Decide the remaining conventional ICC transform cases
 
@@ -392,7 +445,7 @@ Open questions:
 
 ### 51. Qualify capture adapters and compare output
 
-Requires: 32, 35, 36, 38, 48, 63, plus the applicable adapter: 40 or 41 (the Windows adapter exists). Windows profile comparisons also require 43, 50.
+Requires: 32, 35, 36, 38, 63, 78, plus the applicable adapter: 40 or 41 (the Windows adapter exists). Windows profile comparisons also require 43, 50.
 
 TODO:
 
@@ -462,7 +515,7 @@ TODO:
 
 ### 55. Verify Windows profile loading through the IDD
 
-Requires: 43, 44, 48, 50, 54, 74.
+Requires: 43, 44, 50, 54, 74, 76, 78.
 
 Open questions:
 
@@ -477,11 +530,11 @@ TODO:
 
 ### 56. Add cross-platform execution gates
 
-Requires: 28, 33, 36, 43, 48, 49, 50. Add device jobs after their qualification items pass.
+Requires: 28, 33, 36, 43, 49, 50. Add device jobs after their qualification items pass.
 
 TODO:
 
-- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display. Include the `nitpick-cli` process and dependency-graph tests on Linux and macOS without a display server or a window session; they passed only on Windows in a desktop session. Run the `nitpick-profile` adapter tests and the `nitpick-model` tests on each OS; the job needs a C compiler and must not set `LCMS2_LIB_DIR`. The model tests passed only on Windows. Build and unit-test `nitpick-webview` in a separate job on each OS; on Linux it needs the WebKitGTK and GTK development packages, and it has been built only on Windows.
+- Add the ordinary CI jobs and separate GPU, HDR, calibration and release jobs from [Run matrix](../design/output_driver/testing.md#run-matrix). Run core, driver, fixture and mock protocol checks on Windows, Linux and macOS without a virtual display. Include the `nitpick-cli` process and dependency-graph tests on Linux and macOS without a display server or a window session, in both builds (with and without the feature `device`); they passed only on Windows in a desktop session. Run the `nitpick-profile` adapter tests and the `nitpick-model` tests on each OS; the job needs a C compiler and must not set `LCMS2_LIB_DIR`. The model tests passed only on Windows. Build and unit-test `nitpick-webview` in a separate job on each OS; on Linux it needs the WebKitGTK and GTK development packages, and it has been built only on Windows.
 - Run native device query and profile contract tests with injected calls on each target OS. Keep actual profile mutations in selected-device integration jobs. Verify routing and result aggregation with injected pass, fail and unavailable results. A required device losing qualification must fail; an optional unavailable device must not count as HDR coverage. Record conversion, encoding, acknowledgement, capture and settle times separately. Fail bounded-wait and queue-growth checks independently of pixel results.
 
 ### 57. Record physical output qualification
@@ -494,3 +547,17 @@ TODO:
 - Record wire samples and metadata where a cable exists, repeated probe readings, quantized references, uncertainty, display controls and delay. Check FP16 exceptions and above-peak tone mapping separately. A server capture cannot qualify a remote browser's light output.
 - Record actual wire depth and dithering state separately. Check repeated wire samples for temporal changes; one frame cannot establish code preservation. Keep gamma-ramp, GPU-clamp and MHC2 effects isolated under the [display setup](../design/display_device.md#display-setup) baseline.
 - Store results at their measured boundary, verify restoration, and update only the claims supported by those results. Remove completed plan items without renumbering the remaining items.
+
+### 80. Recover a change of a Windows display without a monitor device path after a restart
+
+A Windows display without a monitor device path has the device key `target:<adapter LUID>:<target ID>`; see [Windows reports](../design/display_device.md#windows-reports). The LUID changes at a restart. Thus after a crash and a restart, the recovery record of a change of such a display fails as disconnected and stays, and the profile change stays on the display. The HDMI recorder of the Windows development system has no device path (item 73).
+
+TODO:
+
+- Find a key for such a display that survives a restart and still separates identical displays, or reject profile changes of a device with the fallback key. Verify with injected native reports: a record of the fallback key after a simulated restart.
+
+### 81. Fix the broken rustdoc links
+
+TODO:
+
+- `cargo doc --no-deps` for Windows warns about four intra-doc links: `LinuxDisplay::new` (`nitpick-display`, `linux.rs`) and `MacDisplay::new` (`macos.rs`) exist only on their target OS, and `write` in `nitpick-test-host` (`artifact.rs`) is both a function and a macro. Change the links so that `cargo doc` gives no warning on each OS.

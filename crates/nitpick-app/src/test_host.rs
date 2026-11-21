@@ -38,10 +38,12 @@ use std::thread;
 
 use cxx_qt_lib::QGuiApplication;
 use futures_util::stream;
+use nitpick_core::device::DeviceId;
 use nitpick_core::driver::{DEFAULT_DELAY_MS, DisplayId};
+use nitpick_display::store;
 use nitpick_test_host::{
     ArtifactWriter, Artifacts, Clock, Environment, EnvironmentSource, Event, Exit, Fixtures, Hooks,
-    LocalFuture, QUEUE_CAPACITY, TestHost, host_os,
+    LocalFuture, QUEUE_CAPACITY, TestHost, WorkerDevices, host_os,
 };
 
 use crate::delay::{DelayTimer, QtTimer};
@@ -131,6 +133,17 @@ impl Hooks for QtHooks {
             }
         }))
     }
+
+    /// Reads the device state again, then takes the device of the screen
+    /// from its report.
+    fn device(&mut self, display: &DisplayId) -> LocalFuture<Result<DeviceId, String>> {
+        let read = self.refresh();
+        let (states, display) = (self.states.clone(), display.clone());
+        Box::pin(async move {
+            read.await;
+            states.device(&display)
+        })
+    }
 }
 
 /// The environment of the artifacts: the OS of the process and the
@@ -184,6 +197,9 @@ fn environment(os: Option<String>, renderer: Option<&display::ffi::RendererInfo>
 struct Options {
     /// The root directory of the capture artifacts.
     artifacts: Option<PathBuf>,
+    /// The directory of the device recovery records; `None`: the
+    /// per-user directory.
+    device_state: Option<PathBuf>,
 }
 
 /// # Errors
@@ -192,14 +208,16 @@ fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<Options, St
     let mut options = Options::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
-        if arg != "--artifacts" {
-            return Err(format!("unknown argument `{}`", arg.to_string_lossy()));
+        let (name, slot) = match arg.to_str() {
+            Some(name @ "--artifacts") => (name, &mut options.artifacts),
+            Some(name @ "--device-state") => (name, &mut options.device_state),
+            _ => return Err(format!("unknown argument `{}`", arg.to_string_lossy())),
+        };
+        if slot.is_some() {
+            return Err(format!("`{name}` is given twice"));
         }
-        if options.artifacts.is_some() {
-            return Err("`--artifacts` is given twice".into());
-        }
-        let dir = args.next().ok_or("`--artifacts` needs a directory")?;
-        options.artifacts = Some(dir.into());
+        let dir = args.next().ok_or(format!("`{name}` needs a directory"))?;
+        *slot = Some(dir.into());
     }
     Ok(options)
 }
@@ -212,12 +230,23 @@ fn exit_code(exit: &Exit) -> i32 {
 }
 
 /// Runs the protocol on stdin and stdout until `quit` or the end of stdin.
-/// The options follow [`FLAG`]: `--artifacts <directory>`.
+/// The options follow [`FLAG`]: `--artifacts <directory>` and
+/// `--device-state <directory>`.
 pub fn main() -> ExitCode {
     let options = match parse_options(std::env::args_os().skip(2)) {
         Ok(options) => options,
         Err(e) => {
-            eprintln!("nitpick: {e}; usage: nitpick {FLAG} [--artifacts <directory>]");
+            eprintln!(
+                "nitpick: {e}; usage: nitpick {FLAG} [--artifacts <directory>] \
+                 [--device-state <directory>]"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let device_state = match options.device_state.map_or_else(store::user_dir, Ok) {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("nitpick: {e}");
             return ExitCode::from(2);
         }
     };
@@ -260,6 +289,10 @@ pub fn main() -> ExitCode {
         }),
         capture: pattern_capture::adapter(),
         artifacts,
+        devices: Some(Box::new(WorkerDevices::new(
+            nitpick_display::native,
+            device_state,
+        ))),
         fixtures: Rc::new(fixtures),
         delay_ms: DEFAULT_DELAY_MS,
     };

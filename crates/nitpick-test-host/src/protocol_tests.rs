@@ -18,6 +18,52 @@ fn metadata() -> MetadataRequest {
     }
 }
 
+fn device() -> DeviceId {
+    DeviceId {
+        backend: "windows".into(),
+        key: r"\\?\DISPLAY#DEL40E7#1".into(),
+    }
+}
+
+fn target() -> ProfileTarget {
+    ProfileTarget {
+        device: device(),
+        role: nitpick_core::device::ProfileRole::AdvancedColor,
+        scope: nitpick_core::device::ProfileScope {
+            user: nitpick_core::device::UserScope::Current,
+            host: None,
+        },
+    }
+}
+
+/// The test process writes these lines; their form is the interface.
+#[test]
+fn device_requests_have_a_fixed_form() {
+    let line = json!({
+        "request": "profile_assign",
+        "target": {
+            "device": {"backend": "windows", "key": r"\\?\DISPLAY#DEL40E7#1"},
+            "role": "AdvancedColor",
+            "scope": {"user": "Current", "host": null},
+        },
+        "profile": "ordinary_srgb",
+    })
+    .to_string();
+    assert_eq!(
+        parse_request(&line),
+        Ok(Some(Request::ProfileAssign {
+            target: target(),
+            profile: "ordinary_srgb".into(),
+        }))
+    );
+    let e = Event::device_error("profile assignment", &DeviceError::Timeout);
+    assert_eq!(
+        serde_json::to_value(&e).unwrap(),
+        json!({"event": "error", "kind": "device", "device_error": "timeout",
+               "message": "profile assignment: device operation timed out"})
+    );
+}
+
 #[test]
 fn requests_round_trip() {
     let requests = [
@@ -63,6 +109,20 @@ fn requests_round_trip() {
         },
         Request::Close {},
         Request::Quit {},
+        Request::DeviceList {},
+        Request::DeviceMap {
+            display: "qrhi:\\\\.\\DISPLAY1".into(),
+        },
+        Request::DeviceQuery { device: device() },
+        Request::DeviceSetup { device: device() },
+        Request::DeviceRun { device: device() },
+        Request::ProfileTargets { device: device() },
+        Request::ProfileState { target: target() },
+        Request::ProfileAssign {
+            target: target(),
+            profile: "ordinary_srgb".into(),
+        },
+        Request::ProfileRestore {},
     ];
     for request in requests {
         let line = serde_json::to_string(&request).unwrap();

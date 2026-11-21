@@ -100,6 +100,7 @@ pub struct DeviceInfo {
 }
 
 /// Detected support. Not the active settings; see [`DeviceMode`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceCapabilities {
     pub hdr: Report<bool>,
@@ -114,6 +115,7 @@ pub struct DeviceCapabilities {
 }
 
 /// Current settings. Read-only.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceMode {
     /// HDR signalling is active. Advanced Color support or an FP16
@@ -140,6 +142,7 @@ pub struct DeviceMode {
 /// A ratio, not a luminance. The SDR white luminance changes with the
 /// brightness setting and is not reported, so these values give no
 /// absolute scale.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EdrHeadroom {
     /// Available now. Changes with brightness and other EDR content.
@@ -150,6 +153,7 @@ pub struct EdrHeadroom {
     pub reference: Option<f64>,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceQuery {
     pub device: DeviceInfo,

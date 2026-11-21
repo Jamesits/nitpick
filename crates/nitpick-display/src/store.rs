@@ -77,6 +77,24 @@ fn io_error(op: &str, path: &Path, e: &std::io::Error) -> DeviceError {
 /// directory sync; there the change is durable when NTFS commits its
 /// metadata log. **Unverified:** that a power loss right after `save`
 /// keeps the record on Windows.
+/// The per-user store directory of the hosts: `nitpick/device-recovery`
+/// in the state directory (Linux, `$XDG_STATE_HOME`) or else the local
+/// data directory (`%LOCALAPPDATA%` on Windows, `~/Library/Application
+/// Support` on macOS). Not a cache or a temporary directory: a record
+/// must survive a restart.
+///
+/// # Errors
+/// [`DeviceError::Unsupported`] if the OS gives no such directory.
+pub fn user_dir() -> Result<PathBuf, DeviceError> {
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .map(|d| d.join("nitpick").join("device-recovery"))
+        .ok_or_else(|| DeviceError::Unsupported {
+            operation: "recovery store".into(),
+            reason: "no per-user state or local data directory".into(),
+        })
+}
+
 #[cfg(unix)]
 fn sync_dir(dir: &Path) -> Result<(), DeviceError> {
     File::open(dir)

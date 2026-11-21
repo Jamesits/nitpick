@@ -40,17 +40,27 @@ fn parse(args: &[&str]) -> Result<super::Options, String> {
 }
 
 #[test]
-fn options_take_one_artifact_directory() {
+fn options_take_one_directory_each() {
     assert_eq!(parse(&[]), Ok(super::Options::default()));
     assert_eq!(
         parse(&["--artifacts", "out"]),
         Ok(super::Options {
-            artifacts: Some("out".into())
+            artifacts: Some("out".into()),
+            device_state: None,
+        })
+    );
+    assert_eq!(
+        parse(&["--device-state", "records", "--artifacts", "out"]),
+        Ok(super::Options {
+            artifacts: Some("out".into()),
+            device_state: Some("records".into()),
         })
     );
     for args in [
         &["--artifacts"][..],
         &["--artifacts", "a", "--artifacts", "b"],
+        &["--device-state", "a", "--device-state", "b"],
+        &["--device-state"],
         &["--artifacts=out"],
         &["-platform", "offscreen"],
     ] {

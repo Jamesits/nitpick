@@ -19,7 +19,9 @@ use nitpick_browser::{BindHost, BrowserDriver, BrowserService, ServiceConfig};
 use nitpick_core::driver::DEFAULT_DELAY_MS;
 use nitpick_core::pattern::PatternKind;
 use nitpick_core::signal::{BitDepth, Encoding, Format};
-use nitpick_test_host::{ArtifactWriter, Fixtures, QUEUE_CAPACITY};
+#[cfg(feature = "device")]
+use nitpick_test_host::WorkerDevices;
+use nitpick_test_host::{ArtifactWriter, Devices, Fixtures, QUEUE_CAPACITY};
 use tokio::sync::mpsc;
 
 use crate::host::{Exit, Settings, Stdout};
@@ -62,10 +64,22 @@ struct Args {
     /// `unavailable`.
     #[arg(long, requires = "test_host")]
     artifacts: Option<PathBuf>,
+    /// With `--test-host`: the directory of the device recovery records.
+    /// Default: `nitpick/device-recovery` in the per-user state directory.
+    #[cfg(feature = "device")]
+    #[arg(long, requires = "test_host")]
+    device_state: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
     let args = Args::parse();
+    let devices = match test_host_devices(&args) {
+        Ok(devices) => devices,
+        Err(e) => {
+            eprintln!("nitpick-cli: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let config = ServiceConfig {
         host: args.host.map_or(BindHost::Loopback, BindHost::Address),
         port: args.port,
@@ -130,6 +144,7 @@ fn main() -> ExitCode {
             fixtures,
             settings.delay_ms,
             artifacts,
+            devices,
         ))
     } else {
         let (console_tx, mut console) = mpsc::unbounded_channel();
@@ -149,6 +164,35 @@ fn main() -> ExitCode {
         Exit::Quit | Exit::Stopped(None) => ExitCode::SUCCESS,
         Exit::Stopped(Some(_)) => ExitCode::FAILURE,
     }
+}
+
+/// The device worker of the test host, which starts at its first device
+/// request. `None` without `--test-host` or without the feature `device`.
+///
+/// # Errors
+/// No per-user state directory and no `--device-state`.
+#[cfg(feature = "device")]
+fn test_host_devices(args: &Args) -> Result<Option<Box<dyn Devices>>, String> {
+    if !args.test_host {
+        return Ok(None);
+    }
+    let dir = match &args.device_state {
+        Some(dir) => dir.clone(),
+        None => nitpick_display::store::user_dir().map_err(|e| e.to_string())?,
+    };
+    Ok(Some(Box::new(WorkerDevices::new(
+        nitpick_display::native,
+        dir,
+    ))))
+}
+
+#[cfg(not(feature = "device"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as with the feature"
+)]
+fn test_host_devices(_: &Args) -> Result<Option<Box<dyn Devices>>, String> {
+    Ok(None)
 }
 
 /// Passes each stdin line to `send` on a thread, until `send` fails. The

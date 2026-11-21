@@ -1,6 +1,10 @@
 //! Requests and events of the test-host protocol: one JSON object per line.
 //! See "Host boundary" in `doc/design/output_driver/testing.md`.
 
+use nitpick_core::device::{
+    DeviceError, DeviceId, DeviceInfo, DeviceQuery, DisplaySetup, ProfileState, ProfileTarget,
+    SetupField, SetupFinding,
+};
 use nitpick_core::driver::{
     Capabilities, Conversion, Gamut, ModeSettings, OutputError, Query, Support,
 };
@@ -58,6 +62,37 @@ pub enum Request {
     },
     Close {},
     Quit {},
+    /// Local display devices of the device backend.
+    DeviceList {},
+    /// The local device of an output display.
+    DeviceMap {
+        display: String,
+    },
+    DeviceQuery {
+        device: DeviceId,
+    },
+    /// Reads the display setup; it does not change a device run.
+    DeviceSetup {
+        device: DeviceId,
+    },
+    /// Starts a device run: the display setup now is its baseline.
+    DeviceRun {
+        device: DeviceId,
+    },
+    ProfileTargets {
+        device: DeviceId,
+    },
+    ProfileState {
+        target: ProfileTarget,
+    },
+    /// Assigns a profile fixture of use `ordinary` in the device run.
+    ProfileAssign {
+        target: ProfileTarget,
+        /// Case ID of a profile fixture.
+        profile: String,
+    },
+    /// Restores the active profile change.
+    ProfileRestore {},
 }
 
 /// Separates an explicit `null` from an absent field.
@@ -146,6 +181,9 @@ pub enum Event {
         frame: Option<u64>,
         kind: ErrorKind,
         message: String,
+        /// With kind `device`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_error: Option<DeviceErrorKind>,
     },
     /// The end of a `capture` request.
     Captured {
@@ -166,6 +204,60 @@ pub enum Event {
     Saved {
         frame: u64,
         artifact: String,
+    },
+    /// One record of an earlier process, before the reply to the first
+    /// device request. With `error` the record stays.
+    Recovery {
+        record: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<ProfileState>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    DeviceList {
+        devices: Vec<DeviceInfo>,
+    },
+    DeviceMap {
+        display: String,
+        device: DeviceId,
+    },
+    DeviceQuery {
+        query: Box<DeviceQuery>,
+    },
+    DeviceSetup {
+        setup: DisplaySetup,
+        findings: Vec<SetupFinding>,
+    },
+    /// A device run started with this baseline. A `competing` finding
+    /// fails the run at once.
+    DeviceRun {
+        setup: DisplaySetup,
+        findings: Vec<SetupFinding>,
+    },
+    /// The device run failed. Sent once; no capture of the run passes
+    /// afterwards.
+    RunFailed {
+        device: DeviceId,
+        reason: String,
+        /// Setup fields that differ from the baseline.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<SetupField>,
+    },
+    ProfileTargets {
+        targets: Vec<ProfileTarget>,
+    },
+    ProfileState {
+        state: ProfileState,
+    },
+    /// The readback selects the profile. `open` is possible again.
+    ProfileAssigned {
+        state: ProfileState,
+    },
+    /// The readback equals the original state. `open` is possible again.
+    ProfileRestored {
+        state: ProfileState,
+        /// The record stays until the next recovery.
+        record_kept: bool,
     },
     /// Always the last event.
     Stopped {
@@ -191,6 +283,18 @@ impl Event {
             frame,
             kind,
             message: message.into(),
+            device_error: None,
+        }
+    }
+
+    /// The `error` event of a device error; `context` precedes the text.
+    #[must_use]
+    pub fn device_error(context: &str, e: &DeviceError) -> Self {
+        Self::Error {
+            frame: None,
+            kind: ErrorKind::Device,
+            message: format!("{context}: {e}"),
+            device_error: Some(DeviceErrorKind::of(e)),
         }
     }
 
@@ -237,6 +341,8 @@ pub enum Cause {
     Disconnected,
     /// `open` failed; the earlier surface is closed.
     OpenFailed,
+    /// A profile assignment or restoration started.
+    Profile,
     /// `quit`, the end of the input or a service stop.
     Stopped,
 }
@@ -272,6 +378,51 @@ pub enum ErrorKind {
     Timeout,
     /// [`OutputError::Platform`].
     Platform,
+    /// A [`DeviceError`]; `device_error` gives its variant.
+    Device,
+    /// The host has no device control, or the profile fixture is not of
+    /// use `ordinary`.
+    DeviceUnsupported,
+    /// The display is not a local display device, for example a browser
+    /// client.
+    NotLocal,
+    /// `profile_assign` without a device run of the target device.
+    NoDeviceRun,
+    /// `open` and `show` while a profile change or its device read runs;
+    /// `device_run` and `profile_assign` also while a change is active.
+    ProfilePending,
+    /// `profile_restore` without a profile change.
+    NoProfileChange,
+}
+
+/// The variant of a [`DeviceError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceErrorKind {
+    Unsupported,
+    PermissionDenied,
+    InvalidProfile,
+    Disconnected,
+    AmbiguousIdentity,
+    StateConflict,
+    Timeout,
+    Native,
+}
+
+impl DeviceErrorKind {
+    #[must_use]
+    pub fn of(e: &DeviceError) -> Self {
+        match e {
+            DeviceError::Unsupported { .. } => Self::Unsupported,
+            DeviceError::PermissionDenied(_) => Self::PermissionDenied,
+            DeviceError::InvalidProfile(_) => Self::InvalidProfile,
+            DeviceError::Disconnected(_) => Self::Disconnected,
+            DeviceError::AmbiguousIdentity(_) => Self::AmbiguousIdentity,
+            DeviceError::StateConflict(_) => Self::StateConflict,
+            DeviceError::Timeout => Self::Timeout,
+            DeviceError::Native { .. } => Self::Native,
+        }
+    }
 }
 
 impl ErrorKind {

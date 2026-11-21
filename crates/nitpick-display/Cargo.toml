@@ -14,6 +14,8 @@ x11 = ["dep:x11rb"]
 fake = []
 
 [dependencies]
+dirs = "7.0.0"
+futures-channel = "0.3.34"
 md-5 = "0.11.0"
 nitpick-core = { path = "../nitpick-core", features = ["serde"] }
 serde_json = "1"

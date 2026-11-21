@@ -18,6 +18,7 @@ pub mod recovery;
 pub mod restoration;
 pub mod store;
 pub mod windows;
+pub mod worker;
 
 /// The backend for the target OS. On other targets every call fails with
 /// [`nitpick_core::device::DeviceError::Unsupported`].

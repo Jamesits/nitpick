@@ -11,6 +11,9 @@ publish = false
 # The shared host contract with a mock driver, for the executor tests of
 # each host.
 contract = []
+# The device worker of `nitpick-display` behind the device requests. A
+# browser-only command-line host leaves it off.
+device = ["dep:nitpick-display"]
 
 # No executor, GUI or server: each host polls the controller with its own
 # executor. The command-line host builds this crate without a window system.
@@ -19,7 +22,8 @@ futures-channel = "0.3.34"
 futures-core = "0.3.34"
 futures-util = { version = "0.3.34", default-features = false }
 half = "2.7.1"
-nitpick-core = { path = "../nitpick-core" }
+nitpick-core = { path = "../nitpick-core", features = ["serde"] }
+nitpick-display = { path = "../nitpick-display", optional = true }
 nitpick-fixtures = { path = "../nitpick-fixtures" }
 os_info = { version = "3.15.0", default-features = false }
 serde ={ version = "1.0.229", features = ["derive"] }
@@ -28,6 +32,7 @@ serde ={ version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 
 [dev-dependencies]
+nitpick-display = { path = "../nitpick-display", features = ["fake"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt", "time"] }
 

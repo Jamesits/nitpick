@@ -243,7 +243,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use futures_channel::oneshot;
-use nitpick_core::device::{DeviceQuery, Report};
+use nitpick_core::device::{DeviceId, DeviceQuery, Report};
 use nitpick_core::driver::{
     Capabilities, Conversion, DepthSupport, DisplayId, EncodingSupport, ModeSettings, OutputError,
     Query, Support, Surface,
@@ -355,6 +355,20 @@ impl DeviceStates {
         s.applied = refresh;
         s.reports = reports.into_iter().collect();
         true
+    }
+
+    /// The local device of `display`, from its last report: the screen to
+    /// device mapping of [`device_reports`].
+    ///
+    /// # Errors
+    /// `display` is not a `QRhi` screen, or its screen has no device.
+    pub fn device(&self, display: &DisplayId) -> Result<DeviceId, String> {
+        if display.driver != DRIVER {
+            return Err(format!("{display} is not a {DRIVER} screen"));
+        }
+        self.report(&display.key)
+            .map(|q| q.device.id)
+            .map_err(|reason| format!("{display} has no local device: {reason}"))
     }
 
     /// The report of the screen with key `key`.

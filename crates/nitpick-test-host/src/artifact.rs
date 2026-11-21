@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 
 use futures_channel::mpsc;
 use futures_util::StreamExt as _;
+use nitpick_core::device::DisplaySetup;
 use nitpick_core::driver::DisplayId;
 use nitpick_fixtures::MetadataRequest;
 use serde::{Deserialize, Serialize};
@@ -21,12 +22,12 @@ use crate::capture::{Capture, CaptureDescriptor, Timestamp, valid_blob_name};
 use crate::protocol::{CaptureOutcome, ModeReport};
 
 /// Of `result.json`.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const RESULT: &str = "result.json";
 const PREVIEW: &str = "preview-tone-mapped.png";
 
 /// Host and system versions. `None`: the host does not read it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Environment {
     /// OS and build.
@@ -36,8 +37,12 @@ pub struct Environment {
     /// Qt and graphics backend, or browser and engine version.
     pub renderer: Option<String>,
     pub edid_sha256: Option<String>,
-    /// Of the active display profile.
+    /// Of the profile that the active profile change of the device run
+    /// selects.
     pub profile_sha256: Option<String>,
+    /// The display setup of the device run, read before the capture
+    /// passed. `None` without a device run.
+    pub display_setup: Option<DisplaySetup>,
 }
 
 /// Gives the [`Environment`] of each artifact.

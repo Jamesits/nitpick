@@ -6,6 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 description = "Command-line host of the nitpick browser output"
 
+[features]
+# Local display device control in the test host: the device worker and
+# the native backend of `nitpick-display`. Off by default, so the
+# browser-only host builds and runs without a local display service.
+device = ["nitpick-test-host/device", "dep:nitpick-display"]
+
 # No Qt, Tauri or nitpick-app: this host runs without a window system.
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
@@ -14,6 +20,7 @@ futures-core = "0.3.34"
 futures-util = { version = "0.3.34", default-features = false }
 nitpick-browser = { path = "../nitpick-browser" }
 nitpick-core = { path = "../nitpick-core" }
+nitpick-display = { path = "../nitpick-display", optional = true }
 nitpick-test-host = { path = "../nitpick-test-host" }
 tokio = { version = "1.54.1", features = ["macros", "rt", "sync", "time"] }
 

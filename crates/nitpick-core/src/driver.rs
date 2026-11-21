@@ -106,6 +106,7 @@ pub struct EncodingSupport {
     pub auto_light_level: Support,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gamut {
     Srgb,

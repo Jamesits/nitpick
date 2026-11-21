@@ -2478,6 +2478,7 @@ dependencies = [
  "futures-util",
  "nitpick-browser",
  "nitpick-core",
+ "nitpick-display",
  "nitpick-fixtures",
  "nitpick-test-host",
  "serde_json",
@@ -2511,8 +2512,10 @@ dependencies = [
 name = "nitpick-display"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "dispatch2",
  "drm",
+ "futures-channel",
  "md-5",
  "nitpick-core",
  "nitpick-fixtures",
@@ -2565,6 +2568,7 @@ dependencies = [
  "futures-util",
  "half",
  "nitpick-core",
+ "nitpick-display",
  "nitpick-fixtures",
  "os_info",
  "serde",

@@ -20,7 +20,7 @@ futures-channel = "0.3.34"
 futures-util = { version = "0.3.34", default-features = false }
 nitpick-core = { path = "../nitpick-core" }
 nitpick-display = { path = "../nitpick-display", features = ["x11"] }
-nitpick-test-host = { path = "../nitpick-test-host" }
+nitpick-test-host = { path = "../nitpick-test-host", features = ["device"] }
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]

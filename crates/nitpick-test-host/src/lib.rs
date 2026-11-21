@@ -10,6 +10,7 @@ pub mod capture;
 #[cfg(any(test, feature = "contract"))]
 pub mod contract;
 pub mod controller;
+pub mod device;
 pub mod fixture;
 pub mod gate;
 pub mod marker;
@@ -24,5 +25,8 @@ pub use artifact::{
 };
 pub use capture::{Capture, CaptureAdapter, CaptureFrames, CaptureTarget, NoCapture};
 pub use controller::{Clock, DriverEvent, Exit, Hooks, LocalFuture, TestHost};
+#[cfg(feature = "device")]
+pub use device::worker::WorkerDevices;
+pub use device::{DeviceCall, DeviceReply, Devices};
 pub use fixture::{FixtureFrame, Fixtures};
 pub use protocol::{Event, Request};

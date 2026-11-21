@@ -7,11 +7,12 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::{self, Future};
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
+use nitpick_core::device::{DeviceError, DeviceId};
 use nitpick_core::driver::{
     Capabilities, Conversion, DepthSupport, DisplayId, DisplayInfo, EncodingSupport, Hdr10Request,
     ModeSettings, OutputDriver, OutputError, PresentFuture, Query, Support, Surface, check_frame,
@@ -24,6 +25,7 @@ use nitpick_fixtures::{LightLevelRequest, MetadataRequest};
 use crate::artifact::{Artifact, ArtifactSink, Artifacts, Environment, EnvironmentSource, Saved};
 use crate::capture::{Capture, CaptureAdapter, CaptureFrames, CaptureTarget, Timestamp};
 use crate::controller::{Clock, DriverEvent, Hooks, LocalFuture, NO_ARTIFACTS, TestHost};
+use crate::device::{DeviceCall, DeviceReply, Devices};
 use crate::fixture::{Fixtures, hdr10_request};
 use crate::protocol::{
     CaptureOutcome, Cause, DisplayEntry, DisplayState, ErrorKind, Event, Request, SupportState,
@@ -96,8 +98,17 @@ pub const CAPTURE_SCENARIOS: &[Scenario] = capture::SCENARIOS;
 /// Scenarios of a host without [`Artifacts`].
 pub const SCENARIOS_WITHOUT_ARTIFACTS: &[Scenario] = capture::WITHOUT_ARTIFACTS;
 
-/// Runs every scenario of [`SCENARIOS`], [`CAPTURE_SCENARIOS`] and
-/// [`SCENARIOS_WITHOUT_ARTIFACTS`] with `exec`.
+mod device;
+
+/// Device requests, the device run and profile changes.
+pub const DEVICE_SCENARIOS: &[Scenario] = device::SCENARIOS;
+
+/// Scenarios of a host without [`Devices`].
+pub const SCENARIOS_WITHOUT_DEVICES: &[Scenario] = device::WITHOUT_DEVICES;
+
+/// Runs every scenario of [`SCENARIOS`], [`CAPTURE_SCENARIOS`],
+/// [`DEVICE_SCENARIOS`], [`SCENARIOS_WITHOUT_ARTIFACTS`] and
+/// [`SCENARIOS_WITHOUT_DEVICES`] with `exec`.
 ///
 /// # Panics
 /// A scenario fails.
@@ -106,11 +117,13 @@ pub fn run_all(exec: &mut impl LocalExecutor) {
     let all = SCENARIOS
         .iter()
         .chain(CAPTURE_SCENARIOS)
-        .map(|s| (s, true))
-        .chain(SCENARIOS_WITHOUT_ARTIFACTS.iter().map(|s| (s, false)));
-    for ((name, scenario), artifacts) in all {
+        .chain(DEVICE_SCENARIOS)
+        .map(|s| (s, true, true))
+        .chain(SCENARIOS_WITHOUT_ARTIFACTS.iter().map(|s| (s, false, true)))
+        .chain(SCENARIOS_WITHOUT_DEVICES.iter().map(|s| (s, true, false)));
+    for ((name, scenario), artifacts, devices) in all {
         eprintln!("contract scenario: {name}");
-        let (host, mut harness) = setup(&fixtures, artifacts);
+        let (host, mut harness) = setup(&fixtures, artifacts, devices);
         let script = Box::pin(async move {
             harness
                 .expect(Event::Hello {
@@ -196,6 +209,8 @@ struct MockState {
     replies: Vec<Option<Reply>>,
     /// `present` futures not yet dropped.
     live: usize,
+    /// The hooks map the screen to no device, as for a browser client.
+    not_local: bool,
 }
 
 type Shared = Rc<RefCell<MockState>>;
@@ -294,6 +309,7 @@ type Senders = Rc<RefCell<Vec<oneshot::Sender<()>>>>;
 struct HeldHooks {
     refreshes: Senders,
     watches: Senders,
+    mock: Shared,
 }
 
 impl Hooks for HeldHooks {
@@ -313,6 +329,42 @@ impl Hooks for HeldHooks {
                 future::pending::<()>().await;
             }
         }))
+    }
+
+    /// The mock screen is a local device unless `MockState::not_local`.
+    fn device(&mut self, display: &DisplayId) -> LocalFuture<Result<DeviceId, String>> {
+        let result = if *display == display_id() && !self.mock.borrow().not_local {
+            Ok(device::device_id())
+        } else {
+            Err(format!("{display} is not a local display"))
+        };
+        Box::pin(future::ready(result))
+    }
+}
+
+type DeviceCalls = RefCell<Vec<(DeviceCall, Option<oneshot::Sender<DeviceResult>>)>>;
+type DeviceReplies = Rc<DeviceCalls>;
+type DeviceResult = Result<DeviceReply, DeviceError>;
+
+/// Device calls complete only when the script replies. The script owns
+/// the calls: when it ends, each pending call fails, so the host can stop.
+struct HeldDevices(Weak<DeviceCalls>);
+
+impl Devices for HeldDevices {
+    fn call(&mut self, call: DeviceCall) -> LocalFuture<DeviceResult> {
+        let (tx, rx) = oneshot::channel();
+        if let Some(calls) = self.0.upgrade() {
+            calls.borrow_mut().push((call, Some(tx)));
+        }
+        Box::pin(async move {
+            rx.await.unwrap_or_else(|_| {
+                Err(DeviceError::Native {
+                    api: "mock".into(),
+                    code: None,
+                    message: "the mock worker stopped".into(),
+                })
+            })
+        })
     }
 }
 
@@ -465,11 +517,17 @@ pub struct Harness {
     watches: Senders,
     captures: Captures,
     sink: Rc<RefCell<SinkState>>,
+    devices: DeviceReplies,
     /// The adapter time of the next frame of [`Self::accept`].
     ticks: Cell<u64>,
 }
 
-fn setup(fixtures: &Rc<Fixtures>, with_artifacts: bool) -> (LocalFuture<()>, Harness) {
+fn setup(
+    fixtures: &Rc<Fixtures>,
+    with_artifacts: bool,
+    with_devices: bool,
+) -> (LocalFuture<()>, Harness) {
+    let devices = DeviceReplies::default();
     let mock: Shared = Rc::new(RefCell::new(MockState {
         size: SIZE,
         ..MockState::default()
@@ -488,12 +546,15 @@ fn setup(fixtures: &Rc<Fixtures>, with_artifacts: bool) -> (LocalFuture<()>, Har
         hooks: Box::new(HeldHooks {
             refreshes: Rc::clone(&refreshes),
             watches: Rc::clone(&watches),
+            mock: Rc::clone(&mock),
         }),
         capture: Box::new(HeldCapture(Rc::clone(&captures))),
         artifacts: with_artifacts.then(|| Artifacts {
             sink: Box::new(HeldSink(Rc::clone(&sink))),
             environment: Box::new(DisplayEnvironment),
         }),
+        devices: with_devices
+            .then(|| Box::new(HeldDevices(Rc::downgrade(&devices))) as Box<dyn Devices>),
         fixtures: Rc::clone(fixtures),
         delay_ms: DEFAULT_DELAY_MS,
     };
@@ -513,6 +574,7 @@ fn setup(fixtures: &Rc<Fixtures>, with_artifacts: bool) -> (LocalFuture<()>, Har
         watches,
         captures,
         sink,
+        devices,
         ticks: Cell::new(10_000),
     };
     (host, harness)
@@ -1026,6 +1088,7 @@ async fn failed_presentation_starts_no_timer(mut h: Harness) {
         frame: Some(1),
         kind: ErrorKind::Timeout,
         message: "driver acknowledgement timed out".into(),
+        device_error: None,
     })
     .await;
     h.sync().await;
@@ -1042,6 +1105,7 @@ async fn stopped_timer_is_an_error(mut h: Harness) {
         frame: Some(1),
         kind: ErrorKind::Timer,
         message: "the mock timer stopped".into(),
+        device_error: None,
     })
     .await;
 }
@@ -1157,6 +1221,7 @@ fn frame_disconnected(frame: u64) -> Event {
         frame: Some(frame),
         kind: ErrorKind::Disconnected,
         message: "display disconnected".into(),
+        device_error: None,
     }
 }
 
@@ -1224,6 +1289,7 @@ async fn display_change_fails_the_presentation_and_needs_open(mut h: Harness) {
         frame: Some(1),
         kind: ErrorKind::Platform,
         message: "platform error: mock viewport changed".into(),
+        device_error: None,
     })
     .await;
     h.expect(surface(1, SurfaceState::Stale, Cause::Changed))

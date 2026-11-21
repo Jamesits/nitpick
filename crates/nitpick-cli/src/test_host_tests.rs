@@ -81,3 +81,14 @@ fn a_viewport_change_carries_the_driver_error() {
         Some(OutputError::Platform(_))
     ));
 }
+
+/// The design allows no remote profile control, and a local browser test
+/// selects its device explicitly.
+#[test]
+fn a_client_display_is_not_a_local_device() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let mapped = runtime.block_on(BrowserHooks.device(&id()));
+    assert_eq!(mapped, Err(format!("browser:client-1: {NOT_LOCAL}")));
+}

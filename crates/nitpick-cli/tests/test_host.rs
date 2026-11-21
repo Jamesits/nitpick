@@ -459,6 +459,7 @@ async fn disconnect_during_presentation_fails_the_frame() {
                 frame: Some(round + 1),
                 kind: ErrorKind::Disconnected,
                 message: "display disconnected".into(),
+                device_error: None,
             }],
             "{events:#?}"
         );
@@ -590,6 +591,82 @@ async fn viewport_change_makes_the_surface_stale() {
             ..
         }
     ));
+    host.expect(Event::Stopped { error: None }).await;
+    assert!(host.exit().await.success());
+}
+
+/// A browser client is never a local device, with or without the feature
+/// `device`.
+async fn rejects_the_client_as_a_local_device(host: &mut Host, display: &str) {
+    host.send(&Request::DeviceMap {
+        display: display.into(),
+    })
+    .await;
+    assert_eq!(error_kind(&host.next().await), (None, ErrorKind::NotLocal));
+}
+
+/// The browser-only build: device requests fail, the protocol continues.
+#[cfg(not(feature = "device"))]
+#[tokio::test(flavor = "current_thread")]
+async fn device_requests_need_the_device_feature() {
+    let mut host = Host::start().await;
+    let (_page, display) = host.ready().await;
+    rejects_the_client_as_a_local_device(&mut host, &display).await;
+    host.send(&Request::DeviceList {}).await;
+    assert_eq!(
+        error_kind(&host.next().await),
+        (None, ErrorKind::DeviceUnsupported)
+    );
+    host.sync().await;
+    host.send(&Request::Quit {}).await;
+    host.expect(Event::Stopped { error: None }).await;
+    assert!(host.exit().await.success());
+}
+
+/// With the feature `device`: the native backend, read only. The store is
+/// a temporary directory; no device setting changes.
+#[cfg(feature = "device")]
+#[tokio::test(flavor = "current_thread")]
+async fn device_requests_use_the_native_worker() {
+    let state = tempfile::tempdir().unwrap();
+    let mut host =
+        Host::start_with(&[OsStr::new("--device-state"), state.path().as_os_str()]).await;
+    let (_page, display) = host.ready().await;
+    rejects_the_client_as_a_local_device(&mut host, &display).await;
+    assert!(
+        !state.path().join("lock").exists(),
+        "no store before a device request"
+    );
+    host.send(&Request::DeviceList {}).await;
+    // The store is empty, so no `recovery` event comes first.
+    let Event::DeviceList { devices } = host.next().await else {
+        panic!("expected `device_list`");
+    };
+    assert!(state.path().join("lock").exists());
+    let target = nitpick_core::device::ProfileTarget {
+        device: devices.first().map_or_else(
+            || nitpick_core::device::DeviceId {
+                backend: "none".into(),
+                key: "none".into(),
+            },
+            |d| d.id.clone(),
+        ),
+        role: nitpick_core::device::ProfileRole::Standard,
+        scope: nitpick_core::device::ProfileScope {
+            user: nitpick_core::device::UserScope::Current,
+            host: None,
+        },
+    };
+    host.send(&Request::ProfileAssign {
+        target,
+        profile: "ordinary_srgb".into(),
+    })
+    .await;
+    assert_eq!(
+        error_kind(&host.next().await),
+        (None, ErrorKind::NoDeviceRun)
+    );
+    host.send(&Request::Quit {}).await;
     host.expect(Event::Stopped { error: None }).await;
     assert!(host.exit().await.success());
 }

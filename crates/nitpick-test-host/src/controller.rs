@@ -11,6 +11,7 @@ use std::task::{Context, Poll};
 
 use futures_core::Stream;
 use futures_util::StreamExt as _;
+use nitpick_core::device::DeviceId;
 use nitpick_core::driver::{DisplayId, Frame, Hdr10Request, OutputDriver, OutputError, Surface};
 use nitpick_core::image::Image;
 use nitpick_core::signal::{BitDepth, Format};
@@ -20,6 +21,7 @@ use crate::artifact::{
     Acceptance, Artifact, Artifacts, Check, Environment, FormatRecord, RunRecord, Saved,
 };
 use crate::capture::{Capture, CaptureAdapter, CaptureFrames, CaptureTarget, Timestamp};
+use crate::device::{DeviceCall, Devices};
 use crate::fixture::{Fixtures, hdr10_request};
 use crate::gate::{DEADLINE_MS, Expected, FrameGate, MATCH_LIMIT, Offer};
 use crate::marker::Marker;
@@ -30,6 +32,9 @@ use crate::protocol::{
 
 /// Reason of a valid capture in a host without [`Artifacts`].
 pub const NO_ARTIFACTS: &str = "the host has no artifact directory";
+
+/// Reason of a device request in a host without [`Devices`].
+pub const NO_DEVICES: &str = "this host has no device control";
 
 pub type LocalFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
@@ -48,6 +53,9 @@ pub trait Hooks {
     /// closes outside the host, for example by Esc in the window. `None`:
     /// the host reports such changes as [`DriverEvent`]s.
     fn watch_surface(&mut self) -> Option<LocalFuture<()>>;
+    /// The local display device of `display`, or the reason that it has
+    /// none. A browser client is not a local device.
+    fn device(&mut self, display: &DisplayId) -> LocalFuture<Result<DeviceId, String>>;
 }
 
 /// A change on the driver side, outside the requests.
@@ -72,6 +80,11 @@ pub enum DriverEvent {
     Stopped {
         error: Option<String>,
     },
+    /// An HDR, topology or resume event of the OS. The display setup of
+    /// the device run is read again; a change fails the run.
+    SystemChanged {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +107,8 @@ pub struct TestHost<D> {
     pub capture: Box<dyn CaptureAdapter>,
     /// `None`: a valid capture is `unavailable`, with [`NO_ARTIFACTS`].
     pub artifacts: Option<Artifacts>,
+    /// `None`: each device request fails with [`NO_DEVICES`].
+    pub devices: Option<Box<dyn Devices>>,
     pub fixtures: Rc<Fixtures>,
     /// Measurement delay of a `show` without `delay_ms`.
     pub delay_ms: u32,
@@ -151,6 +166,12 @@ impl Pending {
 /// session, the deadline timer and the heartbeat.
 struct Capturing {
     frame: u64,
+    /// Identifies the session in a device reply.
+    serial: u64,
+    /// The gate accepted a frame; the display setup of the device run is
+    /// read before the capture passes. The session and the heartbeat have
+    /// ended.
+    verifying: bool,
     frames: CaptureFrames,
     gate: FrameGate,
     deadline_ms: u32,
@@ -192,6 +213,7 @@ enum Input {
     CaptureDeadline(Result<(), String>),
     BeatDue(Result<(), String>),
     BeatPresented(Result<String, OutputError>),
+    Device(devices::Done),
 }
 
 struct Machine<D, O> {
@@ -212,12 +234,18 @@ struct Machine<D, O> {
     last_frame: Option<u64>,
     /// The acknowledged frame on the open surface.
     current: Option<Shown>,
+    /// Capture sessions started; gives [`Capturing::serial`].
+    sessions: u64,
+    dev: devices::DeviceSide,
 }
+
+mod devices;
 
 impl<D: OutputDriver + 'static> TestHost<D> {
     /// Runs until `quit`, the end of `lines` or [`DriverEvent::Stopped`].
     /// Then it ends the pending frame, closes the surface, waits for the
-    /// queued artifacts and sends [`Event::Stopped`].
+    /// queued device calls, restores an active profile change, waits for
+    /// the queued artifacts and sends [`Event::Stopped`].
     pub async fn run(
         self,
         mut lines: impl Stream<Item = String> + Unpin,
@@ -235,6 +263,8 @@ impl<D: OutputDriver + 'static> TestHost<D> {
             generation: 0,
             last_frame: None,
             current: None,
+            sessions: 0,
+            dev: devices::DeviceSide::default(),
         };
         let driver = m.host.driver.borrow().id().to_owned();
         m.emit(&Event::Hello {
@@ -250,6 +280,7 @@ impl<D: OutputDriver + 'static> TestHost<D> {
         m.end_capture(Cause::Stopped);
         m.cancel(Cause::Stopped);
         m.close_surface(Cause::Stopped);
+        m.stop_devices().await;
         while let Some(saved) = poll_fn(|cx| m.poll_saved(cx)).await {
             m.saved(saved);
         }
@@ -294,6 +325,9 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
         }
         if let Poll::Ready(Some(saved)) = self.poll_saved(cx) {
             return Poll::Ready(Input::Saved(saved));
+        }
+        if let Poll::Ready(done) = self.dev.poll(cx) {
+            return Poll::Ready(Input::Device(done));
         }
         // The handler of each capture input replaces or drops the future
         // that completed.
@@ -379,7 +413,10 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
                 return Some(Exit::Stopped(Some("the driver event source ended".into())));
             }
             Input::Driver(Some(event)) => return self.on_event(event),
-            Input::Refreshed => self.displays(),
+            Input::Refreshed => {
+                self.displays();
+                self.refreshed();
+            }
             Input::SurfaceClosed => self.surface_lost(),
             Input::Saved(saved) => self.saved(saved),
             Input::Presented { shown, result } => self.presented(shown, result),
@@ -397,6 +434,7 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
             Input::CaptureDeadline(result) => self.capture_deadline(result),
             Input::BeatDue(result) => self.beat_due(result),
             Input::BeatPresented(result) => self.beat_presented(result),
+            Input::Device(done) => self.device_done(done),
         }
         None
     }
@@ -429,6 +467,23 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
                 }
             }
             Request::Quit {} => return Some(Exit::Quit),
+            Request::DeviceList {} => self.device_call(DeviceCall::List, devices::Purpose::Reply),
+            Request::DeviceMap { display } => self.device_map(&display),
+            Request::DeviceQuery { device } => {
+                self.device_call(DeviceCall::Query(device), devices::Purpose::Reply);
+            }
+            Request::DeviceSetup { device } => {
+                self.device_call(DeviceCall::Setup(device), devices::Purpose::Reply);
+            }
+            Request::DeviceRun { device } => self.device_run(device),
+            Request::ProfileTargets { device } => {
+                self.device_call(DeviceCall::Targets(device), devices::Purpose::Reply);
+            }
+            Request::ProfileState { target } => {
+                self.device_call(DeviceCall::State(target), devices::Purpose::Reply);
+            }
+            Request::ProfileAssign { target, profile } => self.profile_assign(target, &profile),
+            Request::ProfileRestore {} => self.profile_restore(),
         }
         None
     }
@@ -476,6 +531,7 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
                 }
             }
             DriverEvent::Stopped { error } => return Some(Exit::Stopped(error)),
+            DriverEvent::SystemChanged { reason } => self.check_run(format!("after {reason}")),
         }
         None
     }
@@ -567,6 +623,9 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
     /// Ends the earlier generation, then queries and opens, as the
     /// launcher does before each `open`.
     fn open(&mut self, text: &str, depth: u32) {
+        if self.dev.changing() {
+            return self.emit(&devices::pending(None));
+        }
         let Some(display) = self.find(text) else {
             return;
         };
@@ -647,6 +706,9 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
         let metadata = metadata.unwrap_or_else(|| fx.metadata.clone());
         if let Some(Err(e)) = metadata.as_ref().map(nitpick_fixtures::validate_metadata) {
             return self.emit(&error(ErrorKind::InvalidMetadata, e.to_string()));
+        }
+        if self.dev.changing() {
+            return self.emit(&devices::pending(Some(frame)));
         }
         let Some(open) = &self.open else {
             return self.emit(&error(ErrorKind::NoSurface, "no open surface".into()));
@@ -790,8 +852,11 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
         };
         let deadline_ms = deadline_ms.unwrap_or(DEADLINE_MS);
         let clock = &self.host.clock;
+        self.sessions += 1;
         self.capturing = Some(Capturing {
             frame,
+            serial: self.sessions,
+            verifying: false,
             frames,
             gate: FrameGate::new(expected, MATCH_LIMIT),
             deadline_ms,
@@ -830,7 +895,7 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
             ),
             Some(Err(reason)) => self.finish_capture(CaptureOutcome::Unavailable, reason, false),
             Some(Ok(capture)) => match c.gate.offer(*capture) {
-                Offer::Accepted => self.finish_capture(CaptureOutcome::Pass, String::new(), true),
+                Offer::Accepted => self.accepted(),
                 Offer::Counted | Offer::Skipped(_) => {}
                 Offer::Rejected(reason) => self.finish_capture(CaptureOutcome::Fail, reason, true),
             },
@@ -949,11 +1014,12 @@ impl<D: OutputDriver + 'static, O: FnMut(&Event)> Machine<D, O> {
             .open
             .as_ref()
             .expect("a capture ends before its surface");
-        let environment = self
-            .host
-            .artifacts
-            .as_mut()
-            .map(|a| a.environment.read(&open.surface.display));
+        let environment = self.host.artifacts.as_mut().map(|a| {
+            let mut e = a.environment.read(&open.surface.display);
+            e.display_setup = self.dev.setup().cloned();
+            e.profile_sha256 = self.dev.selected().map(|h| h.to_string());
+            e
+        });
         let Some(environment) = environment else {
             let e = match result {
                 CaptureOutcome::Pass => {

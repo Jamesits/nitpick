@@ -365,3 +365,34 @@ fn device_states_keep_the_newest_refresh() {
     // Clones share the reports.
     assert_eq!(states.clone().report("b"), Err("unmapped".into()));
 }
+
+/// The test host maps a screen to its local device through the report of
+/// the last device read.
+#[test]
+fn a_screen_maps_to_the_device_of_its_report() {
+    let states = DeviceStates::default();
+    let screen = display_for_key("DISPLAY1");
+    assert!(states.device(&screen).is_err());
+    let refresh = states.begin();
+    states.apply(
+        refresh,
+        vec![
+            ("DISPLAY1".into(), Ok(hdr_on())),
+            ("DISPLAY2".into(), Err("clone mode".into())),
+        ],
+    );
+    assert_eq!(states.device(&screen), Ok(hdr_on().device.id));
+    let unmapped = states.device(&display_for_key("DISPLAY2")).unwrap_err();
+    assert!(
+        unmapped.ends_with("has no local device: clone mode"),
+        "{unmapped}"
+    );
+    let client = nitpick_core::driver::DisplayId {
+        driver: "browser",
+        key: "DISPLAY1".into(),
+    };
+    assert_eq!(
+        states.device(&client),
+        Err("browser:DISPLAY1 is not a qrhi screen".into())
+    );
+}

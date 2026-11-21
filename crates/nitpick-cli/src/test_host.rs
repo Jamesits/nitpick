@@ -10,11 +10,12 @@ use futures_channel::mpsc;
 use futures_core::Stream;
 use futures_util::stream;
 use nitpick_browser::{BrowserDriver, BrowserService, ClientState, ServiceEvent, ServiceEvents};
+use nitpick_core::device::DeviceId;
 use nitpick_core::driver::DisplayId;
 use nitpick_test_host::protocol::DisplayState;
 use nitpick_test_host::{
-    ArtifactWriter, Artifacts, Clock, DriverEvent, Environment, EnvironmentSource, Event, Fixtures,
-    Hooks, LocalFuture, NoCapture, TestHost,
+    ArtifactWriter, Artifacts, Clock, Devices, DriverEvent, Environment, EnvironmentSource, Event,
+    Fixtures, Hooks, LocalFuture, NoCapture, TestHost,
 };
 
 use crate::host::Exit;
@@ -22,6 +23,12 @@ use crate::host::Exit;
 /// Reason of every `capture` request.
 const NO_CAPTURE: &str = "the browser host has no capture adapter; \
                           a capture of the server desktop does not show a remote display";
+
+/// Reason of every `device_map` request. A client display is not a local
+/// device, also for a browser on this host: a local browser test selects
+/// its local device by the device ID.
+const NOT_LOCAL: &str = "a browser client is not a local display device; \
+                             select a local device by its device ID";
 
 /// The executor timer of the command-line host.
 struct TokioClock;
@@ -45,6 +52,11 @@ impl Hooks for BrowserHooks {
 
     fn watch_surface(&mut self) -> Option<LocalFuture<()>> {
         None
+    }
+
+    fn device(&mut self, display: &DisplayId) -> LocalFuture<Result<DeviceId, String>> {
+        let reason = format!("{display}: {NOT_LOCAL}");
+        Box::pin(async move { Err(reason) })
     }
 }
 
@@ -106,7 +118,8 @@ fn driver_events(events: ServiceEvents) -> impl Stream<Item = DriverEvent> + Unp
 }
 
 /// Runs the protocol until `quit`, the end of `lines` or a service stop.
-/// The caller stops the service afterwards.
+/// The caller stops the service afterwards. `devices`: `None` without the
+/// feature `device`.
 pub async fn run(
     service: &BrowserService,
     events: ServiceEvents,
@@ -114,6 +127,7 @@ pub async fn run(
     fixtures: Fixtures,
     delay_ms: u32,
     artifacts: Option<ArtifactWriter>,
+    devices: Option<Box<dyn Devices>>,
 ) -> Exit {
     let artifacts = artifacts.map(|writer| Artifacts {
         sink: Box::new(writer),
@@ -129,6 +143,7 @@ pub async fn run(
         hooks: Box::new(BrowserHooks),
         capture: Box::new(NoCapture(NO_CAPTURE.into())),
         artifacts,
+        devices,
         fixtures: Rc::new(fixtures),
         delay_ms,
     };
