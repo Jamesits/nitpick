@@ -133,6 +133,12 @@ def launch(playwright_instance, args=()):
     options = {"args": list(args), "headless": "NITPICK_BROWSER_HEADED" not in os.environ}
     if channel := os.environ.get("NITPICK_BROWSER_CHANNEL"):
         options["channel"] = channel
+    if engine.name == "chromium":
+        # Chromium emulates a pixel ratio as the OS scale times a float32
+        # factor: at an OS scale of 1.5, an emulated 2 reads 2.0000000596.
+        # Real browser zoom gives exact integer ratios. The last copy of the
+        # switch applies, so a test argument can still set another scale.
+        options["args"].insert(0, "--force-device-scale-factor=1")
     return engine.launch(**options)
 
 

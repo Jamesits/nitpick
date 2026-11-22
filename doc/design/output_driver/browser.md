@@ -107,7 +107,8 @@ HDR10 metadata: the driver writes PNG `mDCV` and `cLLI` chunks from the resolved
 The client shows the image at one image pixel per display pixel:
 - `open` gives the viewport size in display pixels: $\mathrm{round}(w_{css} \cdot r) \times \mathrm{round}(h_{css} \cdot r)$, $r$ = `devicePixelRatio`.
 - The `<img>` has the CSS size $W / r \times H / r$, `image-rendering: pixelated`, no transform, opacity 1 and `dynamic-range-limit: no-limit`. A transform or an opacity below 1 can clamp HDR to SDR (reported for WebKit).
-- `pixel_exact` is `Yes` only if $r$ is an integer, `visualViewport.scale` is 1 and the client reports a layout size equal to the image size. Otherwise the browser resamples and changes codes (**in question** for Chromium at $r = 1.5$; see the page test results in [Testing](#testing)). The driver continues and shows a warning. A non-integer $r$ or a scale other than 1 gives `No`. Before the client reports a layout size in `applied`, the result is `Unknown`.
+- `pixel_exact` is `Yes` only if $r$ is an integer, `visualViewport.scale` is 1 and the client reports a layout size equal to the image size. A non-integer $r$, a scale other than 1 or another layout size gives `No`. The driver continues and shows a warning. Before the client reports a layout size in `applied`, the result is `Unknown`.
+- Deviation: a non-integer $r$ gives `No`, although Chromium and Firefox on Windows showed one image pixel per display pixel at non-integer $r$ in SDR (see the real-input runs in [Testing](#testing)). This is the conservative rule: the HDR image path at these ratios is not verified, and the layout size then differs from the image size by float rounding. The integer test has no tolerance, because real browser zoom gave exact integer ratios. Only the pixel-ratio emulation of the developer tools at an OS scale other than 1 gave near-integer values.
 - iPad: $r = 2$. Safari ignores `user-scalable=no`, so a pinch zoom changes `visualViewport.scale`. The client reports it.
 - Tauri on Windows: the shell starts WebView2 with `--force-device-scale-factor=1`, so $r = 1$ at all Windows scale settings. On a 150 % monitor, the page reports $r = 1$ with this argument and $r = 1.5$ without it.
 
@@ -369,9 +370,9 @@ Page tests (`tests/browser_page`, Python with pytest and Playwright) run the [cl
 NITPICK_BROWSER_CHANNEL=msedge uv run pytest
 ```
 
-`NITPICK_BROWSER` selects the Playwright engine (`chromium`, `firefox` or `webkit`); `NITPICK_BROWSER_CHANNEL` selects an installed Chromium browser. Without a channel, install the engine with `uv run playwright install <engine>`. `NITPICK_BROWSER_HEADED` opens the browser windows on the desktop. The tests that need DevTools skip on other engines. Image tests use Pillow to read screenshots.
+`NITPICK_BROWSER` selects the Playwright engine (`chromium`, `firefox` or `webkit`); `NITPICK_BROWSER_CHANNEL` selects an installed Chromium browser. Without a channel, install the engine with `uv run playwright install <engine>`. `NITPICK_BROWSER_HEADED` opens the browser windows on the desktop. The tests that need DevTools skip on other engines. Image tests use Pillow to read screenshots. The tests start Chromium with `--force-device-scale-factor=1` (note 1).
 
-Page test results on Windows 11 25H2 (build 26200.9974), Playwright 1.64.1, one HDR monitor at 3840×2160 and 150 % scale:
+Page test results, first system: Windows 11 25H2 (build 26200.9974), Playwright 1.64.1, one HDR monitor at 3840×2160 and 150 % scale. These runs did not have `--force-device-scale-factor=1`:
 
 | Browser | Headless | Headed |
 |---|---|---|
@@ -381,17 +382,44 @@ Page test results on Windows 11 25H2 (build 26200.9974), Playwright 1.64.1, one 
 | Playwright Firefox 157.0 | 31 pass, 4 skip (DevTools) | not usable (note 2) |
 | Playwright WebKit 27.2 | 31 pass, 4 skip (DevTools) | 31 pass, 4 skip (DevTools) |
 
+Page test results, second system: Windows 11 25H2 (build 26200.9974), Playwright 1.64.1, NVIDIA GeForce RTX 5090, one SDR display (HDR off) at 2560×1600 and 100 % scale, with `--force-device-scale-factor=1`:
+
+| Browser | Headless | Headed |
+|---|---|---|
+| Edge 158.0.4370.33 | 35 pass | 35 pass |
+| Chrome 157.0.8103.79 | 35 pass | 35 pass |
+| Playwright Firefox 157.0 | 31 pass, 4 skip (DevTools) | 31 pass, 4 skip (DevTools) |
+| Playwright WebKit 27.2 | 31 pass, 4 skip (DevTools) | 31 pass, 4 skip (DevTools) |
+
 Notes and other findings from these runs:
-1. In a headed Chromium window at 150 % OS scale, an emulated pixel ratio is not exact: the page reads `devicePixelRatio` 1.0000000298, 2.0000000596 or 1.2499999702 for the emulated 1, 2 or 1.25. The driver then gives `pixel_exact = No` ("not an integer"). All 8 failures come from this. The screenshot column test passes at the emulated ratios 1 and 2.
-2. Headed Playwright Firefox does not complete a click until a further input event, and then its page process stops ("Target crashed"). This is a harness failure; the page received the delayed input and replied correctly.
+1. In a headed Chromium window at 150 % OS scale, an emulated pixel ratio is not exact: the page reads `devicePixelRatio` 1.0000000298, 2.0000000596 or 1.2499999702 for the emulated 1, 2 or 1.25. The driver then gives `pixel_exact = No` ("not an integer"). All 8 failures on the first system come from this. The screenshot column test passes at the emulated ratios 1 and 2. On the second system, Edge 158 with `--force-device-scale-factor=1.5` gave the same values, headless and headed. With a second switch `--force-device-scale-factor=1` after it, the emulated 1, 2, 1.25 and 1.5 were exact: the last switch applies. Thus the tests force the scale 1. **Not verified:** a headed Chromium run with the forced scale on a monitor at 150 % OS scale.
+2. On the first system, headed Playwright Firefox did not complete a click until a further input event, and then its page process stopped ("Target crashed"). This is a harness failure; the page received the delayed input and replied correctly. On the second system, headed Playwright Firefox passed all tests, also with a topmost window over the whole desktop, and with `layout.css.devPixelsPerPx` 1.5. Thus a harness change is not necessary. The cause of the failure on the first system is unknown. **Unverified** candidate: Firefox window occlusion tracking (`widget.windows.window_occlusion_tracking.enabled`).
 3. Playwright's Chromium launch adds `--force-color-profile=srgb`. With it, the page reports `dynamic-range: standard` and `color-gamut: srgb` on the HDR monitor. Without it, headed Edge and Chromium report `high` and `p3`, but only after some time: at the first page load the queries gave `standard` and `srgb`, and 2 s later `high` and `p3`. The page watches these queries and sends a new `hello` on a change (see [Client page](#client-page)); the media-query test covers this with DevTools. **Not verified:** this late change on a real display; in the runs, the first `hello` came after the change.
 4. Playwright WebKit on Windows sends a macOS Safari user agent (`Macintosh; Intel Mac OS X 10_15_7 … Version/27.2 Safari/605.1.15`). The driver names it "Safari" and does not apply an SDR-only rule; its `dynamic-range: high` is false, so `hdr_on = Some(false)`. This build is not Safari: its results cover DOM, fetch, decode and layout of the WebKit engine only. In a headed window it reports $r = 1$ at 150 % OS scale.
 5. Headed Firefox 157 on the HDR monitor reports `dynamic-range: high` false and `video-dynamic-range: high` true. This agrees with the Firefox SDR-only rule in [Graphics path](#graphics-path).
 6. `CSS.supports("dynamic-range-limit", "no-limit")` is true in Chromium 156 and 157, and false in Playwright Firefox 157 and WebKit 27.2. These engines ignore the property.
-7. Full screen through Playwright does not test full-screen geometry. In headed Chromium, `document.fullscreenElement` is set but the OS window keeps its size, so the page reports `fullscreen` true with the old viewport. Edge attached through DevTools (started outside Playwright) rejects the request; the page shows "Full screen failed: not granted". The webview shell run below covers full-screen geometry on Windows.
-8. Headed Edge without viewport emulation, attached through DevTools, at $r = 1.5$: a 1-pixel column frame of 2825×1952 display pixels gave a layout size of 2825.00006 × 1952.00006 and `pixel_exact = No`. Its screenshot showed alternating columns on all columns of the first, middle and last rows. **In question:** the claim in [Pixel mapping](#pixel-mapping) that a non-integer $r$ always resamples. A screenshot is geometry evidence only. With `--force-device-scale-factor=1`, the same check at 1881×1976 gave "Pixel-exact layout".
+7. Full screen with an attached DevTools client does not test full-screen geometry. In headed Chromium started by Playwright, `document.fullscreenElement` is set but the OS window keeps its size, so the page reports `fullscreen` true with the old viewport. Chrome 157 started outside Playwright with a DevTools port and attached through it gave the same result for an OS mouse click on "Full screen"; the host then gave no layout warning. On the first system, Edge attached in the same way rejected a click through DevTools; the page showed "Full screen failed: not granted". The real-input runs below cover full-screen geometry without DevTools.
+8. First system, headed Edge without viewport emulation, attached through DevTools, at $r = 1.5$: a 1-pixel column frame of 2825×1952 display pixels gave a layout size of 2825.00006 × 1952.00006 and `pixel_exact = No`. Its screenshot showed alternating columns on all columns of the first, middle and last rows. A screenshot is geometry evidence only. With `--force-device-scale-factor=1`, the same check at 1881×1976 gave "Pixel-exact layout".
 
-**Not verified:** Safari on macOS and iPadOS, Firefox on macOS (the only Firefox with HDR images), Chromium and Firefox on Linux, run-time browser zoom and pinch zoom in Firefox and WebKit (no DevTools calls), and full-screen geometry in a desktop browser.
+Real-input runs on the second system: a script started each browser and sent OS input (`SendInput` for keys and the mouse, `InjectTouchInput` for touch). It activated the window first; the Alt press for the Windows foreground lock opened the Firefox menu bar, and the page reported each such viewport change. A desktop capture (GDI) of the client area checked a 1-pixel column frame of the codes 64 and 940 (shown as SDR 0 and 255): each of three rows must alternate on all image columns, with no other value. Results:
+- Full screen: Chrome 157.0.8103.79, Edge 158.0.4370.33 and Firefox 160.0.1, started without automation, with an OS click on "Full screen". Each window became 2560×1600 at (0, 0), the surface 2560×1600, the layout warning cleared, the status had "Pixel-exact layout", and the first, middle and last rows alternated on all 2560 columns. Edge ran InPrivate: with a new profile, Edge opened a sync dialog of the signed-in Windows account over the page.
+- Browser zoom by Ctrl+plus and Ctrl+minus, all steps from 25 % to 500 % in Edge, and up to the ratio 2.22 (2.73 at the device scale 1.5) in Firefox:
+
+| Browser | Device scale | Integer ratios (all exact) | Example of other ratios |
+|---|---|---|---|
+| Edge 158 | 1 | 2, 3, 4, 5 | 1.100000023841858 (110 %), 0.6666666865348816 (67 %) |
+| Edge 158 | 1.25 (forced) | 1 (80 %), 5 (400 %) | 1.375, 0.8333333730697632 |
+| Edge 158 | 1.5 (forced) | 1 (67 %), 3 (200 %), 6 (400 %) | 1.6500000953674316, 1.3499999046325684 |
+| Playwright Firefox 157 | 1 | 1, 2 | 1.0909090909090908, 1.3043478260869563 |
+| Firefox 160 | 1 | 1 | 1.0909090909090908, 1.3953488372093024 |
+| Playwright Firefox 157 | 1.5 (`layout.css.devPixelsPerPx`) | none | 1.935483870967742, 2.0689655172413794 |
+
+  Chromium gives non-integer ratios as float32 values. Firefox gives $60/n$ for an integer $n$ (app units per device pixel). No ratio was near an integer and not exact. **Not verified:** the same at a real OS scale of 1.25 or 1.5; the runs forced the device scale.
+- Zoom with frames: at Edge 110, 125, 150, 175 and 250 %, and at Firefox 160 ratios from 1.0909 to 1.3953, `pixel_exact` was `No` ("not an integer"). The layout size differed from the image size by less than $10^{-4}$ display px (Edge at 110 %: 1240.99997 × 1439.99993 for 1241 × 1440). All rows alternated on all image columns. At Edge 200 % and 300 %, the status had "Pixel-exact layout", and all rows alternated. This is SDR geometry evidence only; it does not show the HDR codes.
+- Pinch zoom: a two-contact touch pinch in Edge 158 gave `visualViewport.scale` 2.3077 and `pixel_exact = No` ("zoom 2.3076939582824707"). Playwright Firefox 157 and Firefox 160 did not zoom for the injected touch pinch, or for Ctrl+wheel with `mousewheel.with_control.action` 5, also with `apz.allow_zooming` true. Windows reports no touch digitizer on the system (`SM_DIGITIZER` 0). **Not verified:** pinch zoom in Firefox with touch hardware.
+- Playwright WebKit 27.2 on Windows did not zoom for Ctrl+plus, Ctrl+wheel or the touch pinch.
+
+**Not verified:** Safari on macOS and iPadOS, Firefox on macOS (the only Firefox with HDR images), Chromium and Firefox on Linux, pinch zoom in Firefox and WebKit, run-time browser zoom in WebKit, and the HDR image path of all browsers at all ratios.
 
 Webview shell unit tests (`nitpick-webview`, `args_tests.rs`, `monitor_tests.rs`) cover the `--at` syntax, the URL schemes, the added `webview` parameter, the navigation origin rule, the exclusive `--list-monitors` flag, the desktop rectangles in native and logical units, half-open edges, mixed scales and overlapping monitors.
 

@@ -246,11 +246,19 @@ impl Hello {
     /// `Yes` needs the layout size from `applied`; before it, the best
     /// state is `Unknown`. The image size is the surface size: `present`
     /// rejects other sizes.
+    ///
+    /// A fractional ratio gives `No` although Chromium and Firefox on
+    /// Windows drew one image pixel per display pixel at such ratios in
+    /// SDR. The HDR image path at these ratios is not verified, and the
+    /// layout size then differs from the image size by float rounding.
+    /// The ratio test has no tolerance: real browser zoom gave exact
+    /// integer ratios; only the pixel-ratio emulation of the developer
+    /// tools at an OS scale other than 1 gave near-integer values.
     pub(crate) fn pixel_exact(&self, layout: Option<(f64, f64)>) -> Support {
         let r = self.pixel_ratio;
         if r.fract() != 0.0 {
             return Support::No(format!(
-                "pixel ratio {r} is not an integer; the browser resamples the image"
+                "pixel ratio {r} is not an integer; one image pixel per display pixel is not verified at a fractional ratio"
             ));
         }
         #[allow(clippy::float_cmp)] // The client reports exactly 1 without zoom.

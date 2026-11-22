@@ -197,6 +197,8 @@ fn pixel_mapping_rules() {
         (1.0, 1.0, None),
         (1.25, 1.0, Some("not an integer")),
         (1.5, 1.0, Some("not an integer")),
+        // DevTools emulation of 2 at an OS scale of 1.5: no tolerance.
+        (2.000_000_059_604_644_8, 1.0, Some("not an integer")),
         (2.0, 1.5, Some("zoom 1.5")),
         (2.0, 0.999, Some("zoom 0.999")),
     ];

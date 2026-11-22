@@ -38,7 +38,7 @@ TODO:
 
 - Run a remote session from another device on the network, for example Safari on an iPad: URL, pairing, the client name with the device address, a frame, the delay, and a disconnect and a rotation (viewport change) during the delay. On Windows, record whether the first bind of a network interface gives a Windows Defender Firewall prompt for the launcher, and what the user must allow. The launcher has no firewall handling.
 - Run the browser launcher checks on macOS and on GNOME 50 (Wayland and xcb). Use an event-loop probe of that OS in place of `WM_NULL`.
-- Select "Full screen" in a desktop browser page during a launcher session. Expect `ViewportChanged`, a cancelled delay and a frame at the full-screen size without the layout warning. Playwright full screen does not resize the OS window (see the page test notes in [Browser output driver testing](../design/output_driver/browser.md#testing)); use manual input or the webview shell.
+- Select "Full screen" in a desktop browser page during a launcher session. Expect `ViewportChanged`, a cancelled delay and a frame at the full-screen size without the layout warning. Playwright full screen does not resize the OS window (see the page test notes in [Browser output driver testing](../design/output_driver/browser.md#testing)); use OS input without DevTools (as in the real-input runs there), manual input or the webview shell.
 
 Open questions:
 
@@ -90,17 +90,19 @@ TODO:
 
 Requires: 25, 28. Test the optional shell after 30.
 
+Windows passed: the page tests headless and headed with Edge, Chrome and the Playwright Chromium, Firefox and WebKit builds, and the real-input runs (full screen, browser zoom, pinch zoom in Edge). See [Browser output driver testing](../design/output_driver/browser.md#testing).
+
 TODO:
 
-- Run the page tests in [Browser output driver testing](../design/output_driver/browser.md#testing) with Safari on macOS and on iPadOS, Firefox on macOS, and Chromium and Firefox on Linux. Record engine and OS versions. Windows passed with Edge, Chrome and the Playwright Chromium, Firefox and WebKit builds; the Playwright WebKit build is not Safari. Safari on iPadOS needs a remote harness or a manual run; Playwright cannot drive it.
-- Verify run-time browser zoom and pinch zoom outside Chromium, and full-screen geometry in a desktop browser. Playwright has no zoom call for Firefox and WebKit, and its full screen does not resize the OS window; use manual input or another harness. Use screenshots for geometry only.
-- Find a working headed Firefox harness, or record why headless runs are sufficient. On Windows, headed Playwright Firefox 157 delays clicks and then its page process stops.
+- Run the page tests in [Browser output driver testing](../design/output_driver/browser.md#testing) with Safari on macOS and on iPadOS, Firefox on macOS, and Chromium and Firefox on Linux. Record engine and OS versions. The Playwright WebKit build is not Safari. Safari on iPadOS needs a remote harness or a manual run; Playwright cannot drive it.
+- On macOS and on Linux, verify run-time browser zoom, pinch zoom and full-screen geometry in the desktop browsers with OS input or manual input, as in the Windows real-input runs. Do not attach DevTools for the full-screen check: then Chromium does not resize the window. Pinch zoom in Firefox and in Safari is not verified: on Windows, Firefox did not zoom for injected touch input (no touch digitizer), and the Playwright WebKit build has no zoom. Use touch hardware, a touchpad or an iPad. Use screenshots for geometry only.
+- On a system with a monitor at 125 % or 150 % OS scale, run the page tests headed with Edge and with Playwright Firefox. Expect all to pass: the tests force the Chromium scale 1, and the Firefox click failure of the first Windows system did not occur at 100 % scale. If the Firefox failure occurs again, test the occlusion tracking candidate of the design notes. Also repeat the browser zoom ratio check: each integer ratio must be exact. Use a dedicated system or the consent of the owner; do not change the display settings of a developer machine.
 - Keep HDR pixel and metadata-effect claims unverified until qualified capture or physical measurement.
 
 Open questions:
 
-- Must `pixel_exact` accept a ratio within a small tolerance of an integer? Headed Chromium at 150 % OS scale reports emulated ratios as float32 values, for example 2.0000000596, and the driver gives `No`. **Unverified:** whether ordinary browser zoom levels give such values.
-- Must `pixel_exact` accept a non-integer ratio when the layout size equals the image size? Edge at $r = 1.5$ showed one image pixel per display pixel in a screenshot. A screenshot cannot show resampling of HDR codes; a decision needs a qualified capture.
+- Must `pixel_exact` accept a non-integer ratio when the layout size is within float rounding of the image size? Edge and Firefox on Windows showed one image pixel per display pixel at all tested non-integer ratios, in a desktop capture with HDR off. That does not show the HDR codes; a decision needs a qualified capture (51) or a physical measurement. Until a decision, a non-integer ratio gives `No`.
+- The page reports `fullscreen` from `document.fullscreenElement`. With a DevTools client attached, Chromium sets it without a resize of the window, and the host then gives no layout warning, although the pattern covers only the old viewport. Must the driver also require that the viewport covers `screen`? Decide this together with the full-screen shell question of item 30, which asks the inverse.
 
 ### 33. Add the shared test-host protocol
 
